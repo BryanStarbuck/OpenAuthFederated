@@ -1,0 +1,344 @@
+---
+title: "Use case: a B2B SaaS customer is a whole company (domain-gated tenant)"
+description: A consuming web app is a multi-tenant B2B SaaS. One of its customers is buying for their entire company and wants everyone on their email domain (or an explicit allowlist) admitted into that customer's tenant — optionally federated to the customer's own SAML/OIDC IdP. The web app calls OpenAuthFederated to provision the tenant, verify the domain, admit qualifying users, and answer "is this signed-in user allowed in this tenant?" at runtime.
+---
+
+# Use case: a B2B SaaS customer is a whole company (domain-gated tenant)
+
+## Summary
+
+A web app that we own sits behind **OpenAuthFederated**, but unlike the
+[internal-admin use case](./admin_by_our_own_company.mdx) this web app is a **multi-tenant B2B
+SaaS product**. Its users are not our employees — they are the employees of **our customers**.
+A customer often signs up and **pays for their entire company**, and they want onboarding to be
+effortless for their people. Two onboarding shapes must be supported:
+
+* **Domain-based admission (the headline case):** the customer says "our company is
+  `acme.com` — anybody with a verified `@acme.com` identity should be admitted into *our* tenant."
+  No per-user invitations; the domain is the membership rule.
+* **Explicit values (allowlist):** the customer instead supplies specific emails (or a small set
+  of patterns) that should be admitted — useful for a pilot, a small team, or contractors.
+
+A customer that runs its own identity provider is a **"SAML company"**: they bring their own
+**SAML 2.0 / OIDC** IdP, and we federate the customer's tenant to it so their employees sign in
+with their existing corporate credentials. Domain admission and customer-owned SSO compose: the
+verified domain both routes the login to the right tenant *and* enforces who is allowed in.
+
+Each customer maps to one **organization (tenant)** in OpenAuthFederated. The web app calls
+OpenAuthFederated to (1) create the tenant, (2) claim and verify the customer's domain, (3) admit
+qualifying users (JIT) into that tenant, optionally via the customer's own IdP, and — critically
+— (4) **answer the runtime question** the web app asks on every tenant-scoped request: *is this
+signed-in user authenticated, and do they qualify for this particular tenant?* OpenAuthFederated
+performs that security check and returns the verdict (via the session token's org/permission
+claims plus, when needed, a stateful membership/verify call).
+
+> **Naming rule.** Internal spec for OpenAuthFederated, our open-source, self-hosted identity
+> platform. Never name the commercial hosted provider we model after; describe capabilities
+> generically.
+
+## Actors
+
+| Actor | Role in this use case |
+| --- | --- |
+| **Customer company** | The buyer. Owns a domain (e.g. `acme.com`) and possibly its own SAML/OIDC IdP. Wants its whole company admitted into its tenant. |
+| **Customer employee** | An end user signing in to the SaaS app; must resolve to the customer's tenant and qualify for it. |
+| **Consuming web app (our SaaS)** | Multi-tenant product. Onboards customers, calls OpenAuthFederated to create tenants / verify domains / admit users, and asks OpenAuthFederated "does this user qualify for this tenant?" on every tenant-scoped request. |
+| **OpenAuthFederated** | The identity/auth layer. Models tenants as organizations, enforces verified domains, federates to the customer's IdP, JIT-provisions members, and answers authorization questions. |
+| **Customer IdP** | (SAML company case) The customer's Google Workspace / Okta-style IdP that authenticates their employees. |
+
+## Why we do it this way
+
+* **Self-serve company onboarding.** The customer proves they own `acme.com` (DNS TXT) once;
+  thereafter their employees flow in automatically. We charge per company, not per manually
+  invited seat.
+* **The tenant boundary is authoritative and ours.** Each customer is an isolated
+  [organization](#tenants-are-organizations); domain → connection → org routing is enforced
+  server-side, so a user from `acme.com` can never land in `globex.com`'s tenant.
+* **Customers keep their own login.** A "SAML company" federates its own IdP; we never hold their
+  employees' passwords, and offboarding at the customer's IdP propagates to us.
+* **One runtime contract.** Whatever the admission shape, the web app asks the same question at
+  runtime — verify the token, confirm tenant membership, check permissions — and OpenAuthFederated
+  answers it.
+
+## Tenants are organizations
+
+A customer = an **Organization** (tenant) in OpenAuthFederated. The org is the unit of
+multi-tenancy and owns its SSO connection(s), verified domains, SCIM config, roles, members, and
+settings. Documented in:
+
+* `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/organizations.mdx` (control plane: create tenant, attach identity config, settings such as `enforce_domain`, `allow_jit_provisioning`, `default_role_id`).
+* `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/organizations.mdx` (runtime: `allowed_domains`, memberships, resolved permissions, `max_allowed_memberships` seat cap).
+
+The Organization object carries `allowed_domains` — "verified domains whose users auto-join this
+org (domain enforcement)" — which is precisely the "anybody on our domain gets into our tenant"
+rule the customer is asking for.
+
+## Two admission shapes
+
+### 1. Domain-based admission (the customer specifies a domain)
+
+The customer's domain is claimed by their org and **verified by DNS TXT**, then enforced. Any
+active, verified identity on that domain auto-joins the tenant via **Just-In-Time provisioning**
+on first sign-in — no per-user invite. Documented at
+`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/domains.mdx`.
+
+* Claim: `POST /v1/domains` with `organization_id` + `domain`.
+* Verify: `POST /v1/domains/{dmn_id}/verify` after the customer publishes the TXT record.
+* A domain can be claimed by **one org only** (a second claim returns `409`), which guarantees
+  tenant isolation by domain.
+* The org's `settings.enforce_domain` + `allow_jit_provisioning` (and `allowed_domains` on the
+  Backend org object) implement "everyone on this domain, automatically."
+
+### 2. Explicit values (allowlist / specific emails)
+
+For a pilot or a partial rollout the customer supplies explicit identifiers instead of (or in
+addition to) a domain. Documented at
+`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/invitations.mdx`:
+
+* **Allowlist identifiers** — `POST /v1/allowlist_identifiers` with a full email
+  (`alice@acme.com`) or a pattern (`*@acme.com`). Admits matching identities as explicit
+  exceptions, even outside the verified domain (e.g. a contractor at `partner.com`).
+* **Invitations** — `POST /v1/invitations` with `email_address`, `organization_id`, and `role`
+  to proactively place a named person into the tenant with a role on acceptance.
+* **Blocklist identifiers** — `POST /v1/blocklist_identifiers` to deny a specific address.
+
+The sign-in evaluation order (blocklist → domain enforcement → allowlist → pending invitation →
+otherwise reject) is specified in `invitations.mdx`, "How identifiers interact with domain
+enforcement." This is exactly how "a domain **or** sample/explicit values" coexist.
+
+### Optional overlay: the customer is a SAML company (brings its own IdP)
+
+When the customer runs its own IdP, create a per-tenant **SSO connection** federating that org to
+the customer's SAML/OIDC IdP — `POST /v1/sso_connections` with `organization_id`, then exchange
+metadata (`PATCH .../{conn_id}`). The customer's verified domain routes their employees' logins to
+*their* connection. Documented at
+`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/sso-connections.mdx`. The
+customer's IdP groups can be mapped to tenant roles via `group_mapping`
+(`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/rbac.mdx`), and lifecycle can
+be kept in sync with **SCIM 2.0** (`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/scim.mdx`).
+
+## End-to-end flow
+
+### A. Customer onboarding (driven by our SaaS app's admin UI / backend)
+
+When a customer signs up for a company plan, our SaaS backend calls the **Platform/Backend API**
+(secret key, `https://api.<your-domain>/v1`):
+
+1. **Create the tenant** — `POST /v1/organizations` with the customer's name and `allowed_domains`
+   (or set them after verification). Optionally `max_allowed_memberships` for seat caps and
+   `default_role_id` for the role JIT users get.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/organizations.mdx`.
+2. **Claim + verify the customer's domain** — `POST /v1/domains`, show the customer the DNS TXT
+   record, then `POST /v1/domains/{dmn_id}/verify`. Surface progress in our onboarding UI; listen
+   for the `domain.verified` webhook.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/domains.mdx`.
+3. **(SAML company) Create + activate the tenant's SSO connection** — `POST /v1/sso_connections`,
+   exchange IdP metadata, optionally set `group_mapping` and enable SCIM.
+   Refs: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/sso-connections.mdx`,
+   `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/scim.mdx`.
+4. **(Allowlist case) Add explicit identifiers / invitations** — `POST /v1/allowlist_identifiers`
+   and/or `POST /v1/invitations`.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/invitations.mdx`.
+5. **Define tenant roles** and a default role for JIT members — `POST /v1/roles`, set org
+   `default_role_id`.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/rbac.mdx`.
+
+The onboarding pages in our SaaS app may be assembled from drop-in components — `<CreateOrganization>`,
+`<OrganizationProfile>` (members/invitations/roles/settings) — documented at
+`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/components/organization.mdx`.
+
+### B. Employee sign-in (through the UI)
+
+1. Employee opens our SaaS app and starts sign-in. The **Frontend API**
+   (`https://auth.<your-domain>/v1`,
+   `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/frontend/overview.mdx`) creates a
+   `SignIn` and redirects to the appropriate IdP — the customer's own IdP (SAML company) or the
+   default federation.
+2. The IdP authenticates the human; OpenAuthFederated validates the assertion/token and applies
+   **domain enforcement**: the email's verified domain (`hd` + `email_verified` on OIDC) must match
+   a `verified` domain, which routes the identity to the owning tenant. Out-of-domain / unverified
+   identities are rejected with `domain_not_allowed`
+   (`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/domains.mdx`).
+3. The user is **JIT-provisioned** into that tenant (or matched if SCIM pre-provisioned), assigned
+   the default/mapped role, and a **session** is established with a short-lived JWT carrying the
+   org context and permissions
+   (`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/sessions.mdx`).
+4. For users who belong to more than one tenant, our app presents `<OrganizationSwitcher>` /
+   `<OrganizationList>` to pick the active org; switching sets `orgId` and re-scopes permissions
+   (`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/components/organization.mdx`).
+
+### C. Runtime authorization — "does this user qualify for this tenant?"
+
+This is the core question the SaaS app asks OpenAuthFederated on every tenant-scoped request. The
+answer comes from the token's claims, backed by a stateful check when certainty is required:
+
+* **Read the org + permissions from the token.** The session JWT carries `org`/`org_id`, `roles`,
+  and `permissions`. The app confirms the token's org matches the tenant being accessed and that
+  the required `<feature>:<action>` permission is present.
+  * Front end: `useAuth().has({ permission })`, `<Protect>`, `useOrganization()`
+    (`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/getting_started/read-the-user.mdx`,
+    `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/components/control.mdx`).
+  * Middleware: match the tenant route and `auth.protect((has) => has({ permission }))`
+    (`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/getting_started/protect-routes.mdx`).
+* **Backend (authoritative) verification.** The SaaS backend verifies the token and confirms tenant
+  membership:
+
+  ```ts
+  import { authClient } from '@auth/backend'
+
+  // 1. Verify the short-lived JWT (networkless).
+  const claims = await authClient.verifyToken(bearerToken)
+
+  // 2. Confirm the token is scoped to the tenant being accessed.
+  if (claims.org_id !== requestedOrgId) throw new ForbiddenException('wrong tenant')
+
+  // 3. Confirm the user still has a membership in that tenant (authoritative).
+  const { data: members } = await authClient.organizations.getOrganizationMembershipList({
+    organizationId: requestedOrgId,
+  })
+  const member = members.find(m => m.user_id === claims.sub)
+  if (!member) throw new ForbiddenException('not a member of this tenant')
+
+  // 4. Check the required permission.
+  if (!member.permissions.includes('jfk:read')) throw new ForbiddenException()
+  ```
+
+  Refs: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/backend-sdk.mdx`,
+  `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/organizations.mdx`.
+* **Immediate revocation for sensitive actions.** Call `POST /v1/sessions/{session_id}/verify`
+  (`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/sessions.mdx`) so a user
+  offboarded at the customer's IdP (SCIM deprovision → session revoke) cannot act on a
+  not-yet-expired token.
+
+### D. Offboarding / deprovision
+
+When the customer removes an employee in their own IdP, **SCIM** deactivates the user in the
+tenant, **force-revokes their sessions**, and emits `user.deleted` / `session.revoked` webhooks;
+short token TTLs finish the job. Documented at
+`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/scim.mdx` ("Deprovisioning and
+revocation") and `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/webhooks.mdx`.
+
+## Engineering flow (who calls whom)
+
+```
+Customer admin ──▶ Our SaaS onboarding UI ──▶ Our SaaS backend ──(secret key)──▶ OpenAuthFederated Platform/Backend API
+                                                                                   POST /v1/organizations        (create tenant)
+                                                                                   POST /v1/domains + /verify     (claim+verify acme.com)
+                                                                                   POST /v1/sso_connections       (SAML company: federate customer IdP)
+                                                                                   POST /v1/allowlist_identifiers (explicit values)
+
+Customer employee browser ──▶ Our SaaS app ──redirect──▶ OpenAuthFederated Frontend API ──▶ Customer IdP
+                                                              │  validate, domain-enforce → route to acme tenant,
+                                                              │  JIT-provision, issue short-lived JWT (org + permissions)
+                                                              ▼
+Customer employee browser ◀── Our SaaS app ──(Bearer JWT per request)──▶ Our SaaS backend
+                                                                              verifyToken() → claims.org_id == tenant?
+                                                                              getOrganizationMembershipList() → member?
+                                                                              has(permission)?  (sensitive: POST /sessions/{id}/verify)
+                                                                              ▼
+                                                                          Allow / 403
+```
+
+## Security
+
+* **Tenant isolation by verified domain.** A domain is claimed by exactly one org; domain
+  enforcement runs server-side after IdP validation and before a session is issued, so identities
+  can only enter their own tenant. (`/docs/apis/platform/domains.mdx`.)
+* **Domain ownership is proven, not asserted.** A customer cannot claim `acme.com` without
+  publishing the DNS TXT challenge; an unverified domain is never used for sign-in.
+* **No customer passwords held** when the customer federates its own IdP; we are the SP side only.
+  (`/docs/apis/platform/sso-connections.mdx`.)
+* **Authoritative, server-side tenant check.** The web app must verify `claims.org_id` matches the
+  tenant **and** confirm a live membership; front-end/token checks alone are not the boundary.
+* **Immediate revocation** via the hybrid session model + SCIM deprovision + short TTLs.
+* **Seat caps and abuse limits** via `max_allowed_memberships`; blocklist identifiers for known-bad
+  addresses. (`/docs/apis/backend/organizations.mdx`, `/docs/apis/backend/invitations.mdx`.)
+* **Strict CORS + public-safe keys** on the browser surface; secret keys stay server-side.
+  (`/docs/apis/frontend/overview.mdx`.)
+* **Full audit trail** per tenant: `user.sign_in`, `user.sign_in.rejected` (out-of-domain),
+  `user.provisioned`, `user.deprovisioned`, `session.revoked`, plus all config changes, filterable
+  by `organization_id`. (`/docs/apis/platform/audit-logs.mdx`.)
+
+## How to build it
+
+1. **Model each customer as an org** — `POST /v1/organizations`, set `allowed_domains`,
+   `default_role_id`, optional `max_allowed_memberships`.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/organizations.mdx`.
+2. **Claim + verify the customer domain** — `POST /v1/domains`, `POST /v1/domains/{id}/verify`;
+   subscribe to `domain.verified`.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/domains.mdx`.
+3. **(SAML company) Federate the customer IdP** — `POST /v1/sso_connections`, exchange metadata,
+   set `group_mapping`, enable SCIM.
+   Refs: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/sso-connections.mdx`,
+   `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/scim.mdx`.
+4. **(Allowlist case) Explicit admission** — `POST /v1/allowlist_identifiers`,
+   `POST /v1/invitations`; deny with `POST /v1/blocklist_identifiers`.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/invitations.mdx`.
+5. **Define tenant roles/permissions** — `POST /v1/permissions`, `POST /v1/roles`.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/rbac.mdx`.
+6. **Build sign-in + tenant switching UI** — `<AuthProvider>`, `<AuthenticateWithRedirectCallback>`,
+   `<OrganizationSwitcher>`, `<OrganizationList>`, `<CreateOrganization>`.
+   Refs: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/components/control.mdx`,
+   `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/components/organization.mdx`.
+7. **Gate tenant routes** — middleware `auth.protect((has) => has({ permission }))` plus a tenant
+   match.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/getting_started/protect-routes.mdx`.
+8. **Implement the runtime "does this user qualify for this tenant?" check** —
+   `authClient.verifyToken()` → compare `org_id` → `getOrganizationMembershipList()` → permission
+   check; `POST /v1/sessions/{id}/verify` for sensitive actions.
+   Refs: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/backend-sdk.mdx`,
+   `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/sessions.mdx`,
+   `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/organizations.mdx`.
+9. **(Optional) JWT template** carrying `{{org.id}}` + `{{org_membership.permissions}}` for
+   downstream tenant-scoped services.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/jwt-templates.mdx`.
+10. **Handle lifecycle webhooks** — `user.created/updated/deleted`, `session.revoked`,
+    `domain.verified`.
+    Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/webhooks.mdx`.
+
+## API and SDK reference index (full paths)
+
+| Capability | API / symbol | Documented at (full path) |
+| --- | --- | --- |
+| Control-plane overview, keys, base URLs | Platform API | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/overview.mdx` |
+| Tenant lifecycle + settings (control plane) | `/v1/organizations` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/organizations.mdx` |
+| Tenant runtime: `allowed_domains`, memberships, seats | `/v1/organizations`, `/memberships` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/organizations.mdx` |
+| Domain claim + DNS verify + enforcement | `/v1/domains`, `/v1/domains/{id}/verify` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/domains.mdx` |
+| Customer-owned SAML/OIDC federation | `/v1/sso_connections` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/sso-connections.mdx` |
+| Directory sync / deprovision | `/v1/sso_connections/{id}/scim`, `/scim/v2/*` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/scim.mdx` |
+| Explicit admission: allow/block, invites | `/v1/allowlist_identifiers`, `/v1/invitations`, `/v1/blocklist_identifiers` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/invitations.mdx` |
+| Tenant roles + permissions | `/v1/roles`, `/v1/permissions` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/rbac.mdx` |
+| Sessions: verify / revoke (immediate) | `/v1/sessions/*`, `/v1/tokens` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/sessions.mdx` |
+| Tenant-scoped downstream claims | `/v1/jwt_templates` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/jwt-templates.mdx` |
+| Lifecycle events (provision/revoke/verify) | `/v1/webhooks` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/webhooks.mdx` |
+| Per-tenant audit trail | `/v1/audit_logs?organization_id=` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/audit-logs.mdx` |
+| Key types (sk/pk/scim) | API keys | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/api-keys.mdx` |
+| Browser-facing sign-in surface | Frontend API | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/frontend/overview.mdx` |
+| Backend overview / token-verify model | Backend API | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/overview.mdx` |
+| `authClient.verifyToken()`, `organizations`, `sessions` | `@auth/backend` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/backend-sdk.mdx` |
+| `auth()`, `has()`, `useOrganization()` | server/client reads | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/getting_started/read-the-user.mdx` |
+| Tenant route gating | `authMiddleware`, `auth.protect` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/getting_started/protect-routes.mdx` |
+| Tenant UI: switcher/list/create/profile | organization components | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/components/organization.mdx` |
+| `<Protect>`, `<AuthProvider>`, SSO callback | control components | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/components/control.mdx` |
+
+## Acceptance criteria
+
+1. A customer can self-serve onboard: create a tenant, claim `acme.com`, publish a DNS TXT record,
+   and verify it; `domain.verified` fires and the tenant becomes live.
+2. With the domain verified + enforced, any active `@acme.com` employee signing in is
+   JIT-provisioned into the `acme.com` tenant with the default role — **no per-user invite**.
+3. An identity outside the tenant's verified domain (and not on its allowlist / without a pending
+   invitation) is **rejected** with `domain_not_allowed`, recorded as `user.sign_in.rejected`.
+4. The explicit-values path works: a customer-supplied `*@acme.com` allowlist entry or an
+   `alice@acme.com` invitation admits the right people, and a blocklist entry denies a specific
+   address.
+5. A "SAML company" customer's employees sign in through the **customer's own IdP**, land in the
+   correct tenant, and receive roles mapped from the customer's IdP groups.
+6. On every tenant-scoped request the web app can ask OpenAuthFederated "is this user authenticated
+   and a qualifying member of *this* tenant?" and get a correct verdict: token verified,
+   `org_id` matches the tenant, live membership confirmed, permission present.
+7. A user accessing a tenant they do not belong to is denied (wrong-tenant `403`), even with a
+   valid token for another tenant.
+8. Offboarding at the customer IdP (SCIM deprovision) revokes the tenant member's sessions
+   promptly; `user.deleted` + `session.revoked` are emitted and audited under that
+   `organization_id`.
