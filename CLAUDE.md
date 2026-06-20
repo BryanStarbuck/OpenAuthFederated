@@ -100,6 +100,8 @@ JFKSocial codebases):
   Bearer token from the auth store; response handles `401` (single-flight refresh + queued
   retry, then logout) and `403` (insufficient permission → toast).
 
+We don't want to use the word "Clerk" or "clark" in any of our code, comments, documentation or anything else. We don't want to talk about that product.  Only talk about us as "OpenAuthFederated".  Don't talk about "Clerk".  Output warnings if you find anything in this directory or lower that does that.
+
 ## Project structure
 
 ```
@@ -119,7 +121,7 @@ The product specs this charter is distilled from live in `~/BGit/all/app/pm/`:
   enforcement, JIT/SCIM, group-based RBAC, sessions, security, acceptance criteria).
 * `engineering.mdx` — the full Node/TypeScript engineering standards.
 
-Note: `~/BGit/all/app/pm/clerk_auth.mdx` is currently an empty stub (a TOC placeholder for the
+Note: `~/BGit/all/app/pm/identity_platform.mdx` is currently an empty stub (a TOC placeholder for the
 identity-platform capability reference). The capabilities above are captured here as the
 OpenAuthFederated charter; expand the spec doc as the platform grows — and keep the naming rule:
 never use the modeled provider's name in public material.
