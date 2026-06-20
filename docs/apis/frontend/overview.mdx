@@ -1,0 +1,177 @@
+---
+title: Frontend API overview
+description: The public, browser-facing API that OpenAuthFederated client SDKs call to run sign-in, sign-up, and session flows.
+---
+
+# Frontend API
+
+The **Frontend API** is the public, browser-facing surface of **OpenAuthFederated**. It is the
+API that runs directly in your end users' browsers (and native apps), driven by our client SDKs,
+to execute the interactive authentication lifecycle: creating a sign-in or sign-up attempt,
+redirecting to an upstream Identity Provider (IdP), verifying factors, establishing a session,
+and minting the short-lived tokens your application uses on every request.
+
+If you are building UI or wiring up a client, this is the API you talk to. If you are running
+server-to-server calls (verifying tokens, managing users, reading the org model with elevated
+privileges), see the [Backend API](../backend/overview.mdx) and the
+[Platform API](../platform/overview.mdx).
+
+## Who calls it
+
+The Frontend API is called by **untrusted, public clients** — browsers and native/mobile apps —
+almost always through one of our SDKs:
+
+* `@auth/react` — framework-agnostic React bindings.
+* `@auth/nextjs` — Next.js App Router + middleware integration.
+
+You can call the Frontend API directly over HTTPS (the SDKs are thin wrappers), but the request
+and response shapes documented here are exactly what the SDKs use under the hood.
+
+Because every caller is a public client, the Frontend API is designed so that **no secret ever
+reaches the browser**. It is authorized with a publishable key plus a short-lived session token,
+never the secret key.
+
+## Base URL
+
+```
+https://auth.<your-domain>/v1
+```
+
+Every instance has its own Frontend API host. For our reference deployment:
+
+```
+https://auth.whitehatengineering.com/v1
+```
+
+All endpoints in this reference are rooted at `/v1`. The Frontend API and the
+[Backend API](../backend/overview.mdx) (`https://api.<your-domain>/v1`) are distinct hosts with
+distinct authorization models — do not mix them.
+
+## Authorization
+
+The Frontend API uses a **two-part, public-safe** authorization model:
+
+1. **Publishable key** — identifies which OpenAuthFederated instance the request targets. It is
+   safe to embed in client code. The prefix tells you the environment:
+   * `pk_test_...` — a **development** instance.
+   * `pk_live_...` — a **production** instance.
+
+   Pass it on every request:
+
+   ```
+   Authorization: Bearer pk_test_b3BlbmF1dGhmZWRlcmF0ZWQ
+   ```
+
+2. **Session token** — a short-lived, instance-issued browser/session token (often delivered and
+   refreshed via the rotating `__session` HttpOnly cookie, or returned to the SDK after a flow
+   completes). It identifies the **current Client and its sessions**. The SDK attaches it
+   automatically; when calling directly, send it as a cookie or as documented per endpoint.
+
+> **Never use the secret key here.** The secret key (`sk_test_...` / `sk_live_...`) authorizes
+> the [Backend API](../backend/overview.mdx) only. It must never appear in browser code, client
+> bundles, or any request to `https://auth.<your-domain>`. If a secret key is ever exposed to a
+> client, rotate it immediately.
+
+## The object model
+
+The Frontend API is organized around five resources. The **Client** is the root object for a
+given browser; everything else hangs off it.
+
+| Object | What it represents |
+|---|---|
+| **Client** | The browser/device itself. Tracks all sessions on this device and any in-progress `SignIn` / `SignUp` attempts. One Client per browser. |
+| **Session** | An authenticated session for one user on this Client. Backed by a server-side session record so it can be revoked immediately. Mints the short-lived JWT access tokens. |
+| **SignIn** | A single, stateful attempt to authenticate an existing user. Moves through a status lifecycle (`needs_first_factor` → `needs_second_factor` → `complete`). |
+| **SignUp** | A single, stateful attempt to provision a new user (Just-In-Time on first valid federated sign-in). Mirrors the `SignIn` lifecycle. |
+| **User** | The authenticated end user (the "me" resource). The client-facing view exposes profile fields only — never secrets, password hashes, or other users' data. |
+
+Each of these is documented in detail:
+
+* [Client and sessions](./client-and-sessions.mdx)
+* [Sign-in flow](./sign-in.mdx)
+* [Sign-up flow](./sign-up.mdx)
+* [The current user (me)](./user.mdx)
+
+## Federation first
+
+OpenAuthFederated is a federated identity layer. The primary sign-in and sign-up paths run
+through an **upstream IdP via SAML 2.0 or OIDC** — by default **Google Workspace**. The Frontend
+API exposes this as a first-class redirect strategy: the client creates a `SignIn` (or `SignUp`),
+prepares a strategy such as `oauth_google` or `saml` with a `redirect_url`, sends the user to the
+IdP, and the IdP returns to a callback that completes the flow.
+
+**Domain enforcement is applied server-side.** Identities outside your verified domain(s) are
+rejected even if the upstream IdP authenticated them. On the OIDC path the platform verifies the
+hosted-domain (`hd`) claim and `email_verified`; identities that fail are refused with a domain
+error (see [sign-up](./sign-up.mdx#domain-enforcement)).
+
+## Hybrid session model
+
+Sessions use a hybrid stateless/stateful design so you get fast verification **and** instant
+revocation:
+
+* **Short-lived JWT access token** — a Bearer token (typically ~60s TTL) minted from a Session
+  and sent on each request to your application/Backend API. It is stateless and self-verifying.
+* **Rotating HttpOnly refresh cookie** — a longer-lived `__session` cookie (`HttpOnly`,
+  `Secure`, `SameSite=Lax`) that the browser cannot read from JavaScript. It is rotated on each
+  refresh.
+* **Server-side session record** — the authoritative record behind every Session. Revoking it
+  (sign-out, admin force-revoke, offboarding) immediately invalidates the session; short token
+  TTLs mean any outstanding JWT expires within seconds.
+
+The endpoints that drive this — touch, mint token, remove — are documented in
+[Client and sessions](./client-and-sessions.mdx).
+
+## CORS
+
+The Frontend API enforces strict CORS. Requests are only accepted from the origins you register
+for the instance (your `pk_test_` development origins such as `http://localhost:3000`, and your
+`pk_live_` production origins such as `https://app.whitehatengineering.com`).
+
+* Cross-origin requests must be sent with `credentials: 'include'` so the rotating `__session`
+  cookie travels with them.
+* The platform responds with `Access-Control-Allow-Credentials: true` and an explicit
+  `Access-Control-Allow-Origin` echoing the registered origin (never `*` when credentials are
+  used).
+* Unregistered origins are rejected at the CORS layer before authentication runs.
+
+## Development vs production instances
+
+| | Development (`pk_test_`) | Production (`pk_live_`) |
+|---|---|---|
+| Publishable key prefix | `pk_test_` | `pk_live_` |
+| Typical Frontend API host | `https://auth.<your-domain>` (test instance) | `https://auth.<your-domain>` (live instance) |
+| Allowed origins | localhost + dev origins | verified production origins only |
+| Email/redirect behavior | relaxed, test-friendly | strict, production-grade |
+| Domain enforcement | enforced (test domains) | enforced (verified domains) |
+
+Use the test instance and `pk_test_` keys during development; switch the publishable key to
+`pk_live_` for production. The flows are identical.
+
+## Versioning
+
+The Frontend API is versioned in the URL path (`/v1`). Within a version we make only additive,
+backward-compatible changes (new fields, new optional parameters, new endpoints). Breaking
+changes ship under a new path segment (`/v2`). Always pin to an explicit version; never depend on
+fields that are not documented here.
+
+## How it relates to the other APIs
+
+* **Frontend API** (this reference, `https://auth.<your-domain>/v1`) — public, browser-facing,
+  authorized by publishable key + session token. Runs the interactive auth flows.
+* **[Backend API](../backend/overview.mdx)** (`https://api.<your-domain>/v1`) — server-to-server,
+  authorized by the secret key. Verifies tokens, manages users/orgs/roles authoritatively.
+* **[Platform API](../platform/overview.mdx)** — instance/tenant administration: keys,
+  domains, IdP connections, SCIM, webhooks, audit.
+
+For the SDKs that wrap this API, see the [SDK overview](../../sdk/overview.mdx).
+
+## Next steps
+
+* [Client and sessions](./client-and-sessions.mdx)
+* [Sign-in flow](./sign-in.mdx)
+* [Sign-up flow](./sign-up.mdx)
+* [The current user (me)](./user.mdx)
+* [Backend API overview](../backend/overview.mdx)
+* [Platform API overview](../platform/overview.mdx)
+* [SDK overview](../../sdk/overview.mdx)

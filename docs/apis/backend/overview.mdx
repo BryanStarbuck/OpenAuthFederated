@@ -1,0 +1,223 @@
+---
+title: Backend API overview
+description: The server-to-server REST API for OpenAuthFederated, authorized with your secret key, for managing users, sessions, organizations, invitations, and JWT templates.
+---
+
+# Backend API
+
+The **OpenAuthFederated Backend API** is a server-to-server REST API for managing the resources
+in your deployment — users, sessions, organizations, organization memberships, invitations, and
+JWT templates. It is the authoritative, write-capable surface of the platform: you use it to
+create and ban users, revoke sessions immediately, provision organizations, map RBAC roles, and
+mint or verify session tokens.
+
+Because it is authorized with your **secret key**, every request must originate from a trusted
+backend. **Never call the Backend API from a browser, mobile app, or any client you do not
+control** — doing so exposes a credential with full administrative authority over your identity
+data.
+
+OpenAuthFederated is self-hosted, so the Backend API runs inside *your* deployment. There is no
+shared multi-tenant host: the base URL is your own domain.
+
+## Base URL
+
+All Backend API endpoints are served under the `/v1` path of your deployment's API host:
+
+```
+https://api.<your-domain>/v1
+```
+
+For example, the reference deployment that gates an internal app to Google Workspace uses:
+
+```
+https://api.whitehatengineering.com/v1
+```
+
+Substitute your own host throughout these docs.
+
+## Authorization
+
+The Backend API is authorized with your **secret key** (`AUTH_SECRET_KEY`), passed as a Bearer
+token:
+
+```
+Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY
+```
+
+* The secret key carries full administrative privileges. Treat it like a root password.
+* Store it in a server-side secret manager or environment variable — never in source control,
+  client bundles, `localStorage`, or front-end code.
+* Use `sk_test_...` keys against a test deployment and `sk_live_...` keys against production.
+* Rotate keys from the **Platform API** (see [Platform API overview](../platform/overview.mdx))
+  if a key is ever exposed; rotation revokes the old key immediately.
+
+Requests with a missing, malformed, or revoked key receive `401 Unauthorized`.
+
+A typical authenticated request:
+
+```bash
+curl https://api.whitehatengineering.com/v1/users \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+## Versioning
+
+The API is versioned in the URL path. The current version is **`v1`**. Breaking changes are
+introduced under a new path segment; additive, backward-compatible changes (new optional fields,
+new endpoints) ship within `v1` without a version bump. Pin your integration to `/v1` and treat
+unknown response fields as forward-compatible.
+
+## JSON conventions
+
+* All requests and responses use `Content-Type: application/json`.
+* Request bodies are JSON objects. Omit optional fields rather than sending `null`, unless you
+  intend to clear a value.
+* Timestamps are returned as **Unix epoch milliseconds** (e.g. `created_at: 1718841600000`).
+* Resource objects always include an `object` discriminator field (e.g. `"object": "user"`) and
+  an `id`.
+
+## Resource ID prefixes
+
+Every resource ID is prefixed with a short type tag, so IDs are self-describing and hard to
+confuse across endpoints:
+
+| Prefix      | Resource                  | Example                         |
+|-------------|---------------------------|---------------------------------|
+| `user_`     | User                      | `user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk` |
+| `sess_`     | Session                   | `sess_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk` |
+| `org_`      | Organization              | `org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk`  |
+| `orgmem_`   | Organization Membership   | `orgmem_2a1Bc3Df4Eg5Hh6Ii7Jj`  |
+| `inv_`      | Invitation                | `inv_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk`  |
+| `jtmpl_`    | JWT Template              | `jtmpl_2a1Bc3Df4Eg5Hh6Ii7Jj8K` |
+| `idn_`      | Identifier (allow/block)  | `idn_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk`  |
+
+## Pagination
+
+List endpoints accept two query parameters:
+
+| Parameter | Type    | Default | Max  | Description                                              |
+|-----------|---------|---------|------|---------------------------------------------------------|
+| `limit`   | integer | `10`    | `500`| Maximum number of records to return.                    |
+| `offset`  | integer | `0`     | —    | Number of records to skip before returning results.     |
+
+List responses are wrapped in an envelope with the page of results and the total number of
+records matching the query (ignoring `limit`/`offset`):
+
+```json
+{
+  "data": [ /* ... resource objects ... */ ],
+  "total_count": 1342
+}
+```
+
+Paginate by incrementing `offset` by `limit` until `offset >= total_count`:
+
+```bash
+curl "https://api.whitehatengineering.com/v1/users?limit=100&offset=0&order_by=-created_at" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+Many list endpoints also support `order_by`. Prefix a field with `+` for ascending or `-` for
+descending order (e.g. `order_by=-created_at`).
+
+## Rate limits
+
+The Backend API is rate limited per secret key. Default limits are generous for server-side
+automation; because the platform is self-hosted, the operator can tune them. When a limit is
+exceeded the API returns `429 Too Many Requests` with these response headers:
+
+| Header                  | Description                                              |
+|-------------------------|---------------------------------------------------------|
+| `X-RateLimit-Limit`     | The request ceiling for the current window.             |
+| `X-RateLimit-Remaining` | Requests remaining in the current window.               |
+| `X-RateLimit-Reset`     | Unix epoch seconds when the window resets.              |
+| `Retry-After`           | Seconds to wait before retrying.                         |
+
+Back off and retry after `Retry-After` seconds. Bulk operations (large user imports, mass
+revocation) should be batched and paced.
+
+## Error object
+
+Errors use a consistent shape and an appropriate HTTP status code. The body contains an `errors`
+array (so a single request can report multiple problems) plus a `trace_id` you can quote when
+contacting support or searching audit logs:
+
+```json
+{
+  "errors": [
+    {
+      "code": "form_identifier_not_found",
+      "message": "not found",
+      "long_message": "No user was found with the identifier provided.",
+      "meta": {
+        "param_name": "email_address"
+      }
+    }
+  ],
+  "trace_id": "trace_9f2c1ab7d4e0"
+}
+```
+
+| Field          | Type   | Description                                                              |
+|----------------|--------|-------------------------------------------------------------------------|
+| `errors`       | array  | One or more error entries.                                              |
+| `errors[].code`| string | Stable, machine-readable error code — branch on this, not the message.  |
+| `errors[].message` | string | Short human-readable summary.                                       |
+| `errors[].long_message` | string | Detailed, user-presentable explanation.                       |
+| `errors[].meta` | object | Optional context (e.g. the offending `param_name`).                    |
+| `trace_id`     | string | Correlates the request with platform audit logs.                       |
+
+Common status codes:
+
+| Status | Meaning                                                       |
+|--------|--------------------------------------------------------------|
+| `400`  | Malformed request or validation failure.                     |
+| `401`  | Missing, invalid, or revoked secret key.                     |
+| `403`  | Authenticated, but not permitted (e.g. domain enforcement).  |
+| `404`  | Resource does not exist.                                     |
+| `422`  | Semantically invalid (e.g. email already taken).             |
+| `429`  | Rate limited.                                                |
+| `5xx`  | Server error — safe to retry idempotent requests.            |
+
+## Idempotency
+
+To safely retry `POST` requests without creating duplicate resources (a user, an invitation, an
+organization), send an **`Idempotency-Key`** header with a unique value (a UUID) per logical
+operation:
+
+```bash
+curl https://api.whitehatengineering.com/v1/invitations \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 7e3a6c2e-2f4b-4f1a-9c3d-2b8e1f0a4d5c" \
+  -d '{ "email_address": "ada@whitehatengineering.com" }'
+```
+
+If a request with the same key is replayed within the retention window, the original response is
+returned and no second resource is created. Keys are scoped per endpoint and per secret key.
+`GET`, `PATCH`, and `DELETE` are already idempotent and ignore the header.
+
+## Resource map
+
+| Resource                                     | Description                                                                 |
+|----------------------------------------------|-----------------------------------------------------------------------------|
+| [Users](./users.mdx)                         | People in your deployment, including federated external IdP identities, metadata, ban/lock state. |
+| [Sessions](./sessions.mdx)                   | Hybrid sessions with server-side records — list, verify, and immediately revoke. |
+| [Organizations](./organizations.mdx)         | Orgs/tenants and their memberships; map upstream groups to RBAC roles.      |
+| [Invitations](./invitations.mdx)             | Invite people, and manage allowlist/blocklist identifiers alongside domain enforcement. |
+| [JWT Templates](./jwt-templates.mdx)         | Custom claim templates (including RBAC roles/permissions) for downstream services. |
+
+## Related
+
+* [Backend SDK (`@auth/backend`)](../../sdk/backend-sdk.mdx) — the typed `authClient` wrapper
+  over these endpoints.
+* [Frontend API overview](../frontend/overview.mdx) — the publishable-key API used by the
+  sign-in UI and browser session.
+* [Platform API overview](../platform/overview.mdx) — deployment, key rotation, IdP connection,
+  and SCIM configuration.
+
+## Next steps
+
+* [Manage users](./users.mdx)
+* [Verify and revoke sessions](./sessions.mdx)
+* [Model organizations and roles](./organizations.mdx)

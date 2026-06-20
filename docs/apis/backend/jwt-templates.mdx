@@ -1,0 +1,239 @@
+---
+title: JWT Templates
+description: Define custom claim templates — including RBAC roles and permissions — that shape the session tokens OpenAuthFederated mints for downstream services.
+---
+
+# JWT Templates
+
+A **JWT Template** defines the custom claims that OpenAuthFederated injects into a session token
+when it is minted. Downstream services — a database with row-level security, a third-party API, a
+microservice that does its own authorization — often expect claims in a particular shape. Rather
+than hardcoding that shape, you define a named template once and mint tokens against it. The most
+common use is injecting **RBAC roles and permissions** so a downstream service can authorize the
+request without calling back to OpenAuthFederated.
+
+All endpoints are relative to your base URL, e.g.
+`https://api.whitehatengineering.com/v1`.
+
+## The JWT Template object
+
+| Field            | Type    | Description                                                                |
+|------------------|---------|---------------------------------------------------------------------------|
+| `id`             | string  | Unique identifier, prefixed `jtmpl_`.                                      |
+| `object`         | string  | Always `"jwt_template"`.                                                   |
+| `name`           | string  | Unique template name; referenced when minting a token.                    |
+| `claims`         | object  | The custom claim set. Values may be static or use shorthand interpolation.|
+| `lifetime`       | integer | Token lifetime in seconds (kept short to preserve immediate revocation).  |
+| `allowed_clock_skew` | integer | Acceptable clock skew in seconds for downstream verifiers.            |
+| `created_at`     | integer | Creation timestamp (Unix ms).                                            |
+| `updated_at`     | integer | Last update timestamp (Unix ms).                                        |
+
+## Claim shorthand syntax
+
+Inside `claims`, wrap a path in double braces to interpolate live values at mint time:
+
+| Shorthand                         | Resolves to                                              |
+|-----------------------------------|---------------------------------------------------------|
+| `{{user.id}}`                     | The user's `user_...` ID.                               |
+| `{{user.primary_email_address}}`  | The user's primary email.                               |
+| `{{user.first_name}}`             | Given name.                                             |
+| `{{user.public_metadata}}`        | The full public metadata object.                       |
+| `{{user.public_metadata.department}}` | A single public-metadata field.                     |
+| `{{org.id}}`                      | The active organization's `org_...` ID.                |
+| `{{org.slug}}`                    | The active organization's slug.                        |
+| `{{org_membership.role}}`         | The user's role in the active organization.            |
+| `{{org_membership.permissions}}`  | The resolved RBAC permission array (`<feature>:<action>`).|
+| `{{session.id}}`                  | The `sess_...` ID.                                     |
+
+Static values (strings, numbers, booleans, nested objects/arrays) are emitted as-is. Reserved
+claims (`iss`, `sub`, `aud`, `exp`, `nbf`, `iat`, `sid`) are always set by the platform and cannot
+be overridden by a template.
+
+---
+
+## List JWT templates
+
+```
+GET /jwt_templates
+```
+
+### Request
+
+```bash
+curl "https://api.whitehatengineering.com/v1/jwt_templates" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+```json
+{
+  "data": [
+    {
+      "id": "jtmpl_2a1Bc3Df4Eg5Hh6Ii7Jj8K",
+      "object": "jwt_template",
+      "name": "downstream-api",
+      "claims": {
+        "email": "{{user.primary_email_address}}",
+        "org_id": "{{org.id}}",
+        "role": "{{org_membership.role}}",
+        "permissions": "{{org_membership.permissions}}"
+      },
+      "lifetime": 60,
+      "allowed_clock_skew": 5,
+      "created_at": 1701302400000,
+      "updated_at": 1718841600000
+    }
+  ],
+  "total_count": 1
+}
+```
+
+---
+
+## Create a JWT template
+
+```
+POST /jwt_templates
+```
+
+### Body parameters
+
+| Parameter            | Type    | Description                                                  |
+|----------------------|---------|--------------------------------------------------------------|
+| `name`               | string  | Unique template name. Required.                              |
+| `claims`             | object  | Custom claims (static + shorthand). Required.                |
+| `lifetime`           | integer | Token lifetime in seconds (default `60`).                   |
+| `allowed_clock_skew` | integer | Allowed clock skew in seconds (default `5`).               |
+
+### Request — an RBAC-injecting template
+
+This template puts the user's role and resolved permissions into the token so a downstream
+service can enforce `<feature>:<action>` authorization locally:
+
+```bash
+curl https://api.whitehatengineering.com/v1/jwt_templates \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "downstream-api",
+    "lifetime": 60,
+    "claims": {
+      "email": "{{user.primary_email_address}}",
+      "department": "{{user.public_metadata.department}}",
+      "org_id": "{{org.id}}",
+      "role": "{{org_membership.role}}",
+      "permissions": "{{org_membership.permissions}}"
+    }
+  }'
+```
+
+### Response
+
+Returns the created [JWT Template object](#the-jwt-template-object).
+
+The tokens minted from this template carry RBAC claims, for example:
+
+```json
+{
+  "iss": "https://api.whitehatengineering.com",
+  "sub": "user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+  "sid": "sess_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+  "exp": 1718841660,
+  "iat": 1718841600,
+  "email": "ada@whitehatengineering.com",
+  "department": "engineering",
+  "org_id": "org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+  "role": "org:admin",
+  "permissions": ["code:read", "code:write", "jfk:read"]
+}
+```
+
+---
+
+## Update a JWT template
+
+```
+PATCH /jwt_templates/{template_id}
+```
+
+### Path parameters
+
+| Parameter     | Type   | Description                       |
+|---------------|--------|-----------------------------------|
+| `template_id` | string | The template ID (`jtmpl_...`).    |
+
+### Body parameters
+
+Accepts `name`, `claims`, `lifetime`, and `allowed_clock_skew` (all optional).
+
+### Request
+
+```bash
+curl -X PATCH "https://api.whitehatengineering.com/v1/jwt_templates/jtmpl_2a1Bc3Df4Eg5Hh6Ii7Jj8K" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "lifetime": 120 }'
+```
+
+### Response
+
+Returns the updated [JWT Template object](#the-jwt-template-object).
+
+---
+
+## Delete a JWT template
+
+```
+DELETE /jwt_templates/{template_id}
+```
+
+### Request
+
+```bash
+curl -X DELETE "https://api.whitehatengineering.com/v1/jwt_templates/jtmpl_2a1Bc3Df4Eg5Hh6Ii7Jj8K" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+```json
+{
+  "id": "jtmpl_2a1Bc3Df4Eg5Hh6Ii7Jj8K",
+  "object": "jwt_template",
+  "deleted": true
+}
+```
+
+---
+
+## Minting a token from a template
+
+There are two ways to mint a token shaped by a template:
+
+* **Server-side (Backend API):** call
+  [`POST /tokens`](./sessions.mdx#mint-a-session-token) with `session_id` and `template` set to
+  the template name. Use this for service-to-service issuance.
+
+  ```bash
+  curl -X POST "https://api.whitehatengineering.com/v1/tokens" \
+    -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+    -H "Content-Type: application/json" \
+    -d '{ "session_id": "sess_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk", "template": "downstream-api" }'
+  ```
+
+* **Client-side (Frontend API):** the browser/app requests a templated token for the *current*
+  session via the Frontend session-tokens endpoint
+  (`POST /v1/client/sessions/{session_id}/tokens/{template_name}`), authorized by the publishable
+  key and the active session — never the secret key. See
+  [Frontend API overview](../frontend/overview.mdx).
+
+Keep template `lifetime` short. Because tokens are self-contained, a long lifetime widens the
+window in which a [revoked session](./sessions.mdx#revoke-a-session) could still present a valid
+token; a short lifetime preserves OpenAuthFederated's immediate-revocation guarantee.
+
+## Next steps
+
+* [Mint and verify session tokens](./sessions.mdx)
+* [Map roles to RBAC permissions](./organizations.mdx#roles-and-rbac-permissions)
+* [Frontend API overview](../frontend/overview.mdx) — client-side templated tokens.

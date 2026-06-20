@@ -1,0 +1,252 @@
+---
+title: Invitations
+description: Invite people to your OpenAuthFederated deployment and manage allowlist/blocklist identifiers alongside domain enforcement.
+---
+
+# Invitations
+
+An **Invitation** lets you proactively grant a specific person access before they have ever signed
+in. When they later authenticate through the upstream IdP (SAML/OIDC, Google Workspace), the
+pending invitation is consumed and the user is provisioned — optionally into a specific
+organization and role. Invitations work hand-in-hand with **allowlist / blocklist identifiers**
+and **domain enforcement** to control exactly who may enter your deployment.
+
+All endpoints are relative to your base URL, e.g.
+`https://api.whitehatengineering.com/v1`.
+
+## The Invitation object
+
+| Field             | Type    | Description                                                            |
+|-------------------|---------|------------------------------------------------------------------------|
+| `id`              | string  | Unique identifier, prefixed `inv_`.                                    |
+| `object`          | string  | Always `"invitation"`.                                                 |
+| `email_address`   | string  | The invited email address.                                            |
+| `status`          | string  | `pending`, `accepted`, or `revoked`.                                  |
+| `organization_id` | string  | Organization the invitee will join on acceptance, or `null`.          |
+| `role`            | string  | Role assigned on acceptance, or `null`.                               |
+| `public_metadata` | object  | Non-sensitive metadata attached to the invitation/user.               |
+| `url`             | string  | The acceptance link to send to the invitee.                           |
+| `expires_at`      | integer | When the invitation expires (Unix ms), or `null`.                     |
+| `created_at`      | integer | Creation timestamp (Unix ms).                                        |
+| `updated_at`      | integer | Last update timestamp (Unix ms).                                     |
+
+---
+
+## List invitations
+
+```
+GET /invitations
+```
+
+### Query parameters
+
+| Parameter | Type    | Description                                                |
+|-----------|---------|------------------------------------------------------------|
+| `status`  | string  | Filter by `pending`, `accepted`, or `revoked`.            |
+| `limit`   | integer | Page size (default `10`, max `500`).                      |
+| `offset`  | integer | Records to skip (default `0`).                            |
+
+### Request
+
+```bash
+curl "https://api.whitehatengineering.com/v1/invitations?status=pending" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+```json
+{
+  "data": [
+    {
+      "id": "inv_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+      "object": "invitation",
+      "email_address": "katherine@whitehatengineering.com",
+      "status": "pending",
+      "organization_id": "org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+      "role": "org:member",
+      "public_metadata": {},
+      "url": "https://app.whitehatengineering.com/accept?ticket=...",
+      "expires_at": 1721433600000,
+      "created_at": 1718841600000,
+      "updated_at": 1718841600000
+    }
+  ],
+  "total_count": 5
+}
+```
+
+---
+
+## Create an invitation
+
+```
+POST /invitations
+```
+
+Creates an invitation and (optionally) emails the acceptance link. The invited email must satisfy
+domain enforcement if it is enabled.
+
+### Body parameters
+
+| Parameter         | Type    | Description                                                          |
+|-------------------|---------|---------------------------------------------------------------------|
+| `email_address`   | string  | The email to invite. Required.                                      |
+| `organization_id` | string  | Organization to join on acceptance.                                |
+| `role`            | string  | Role to assign on acceptance.                                      |
+| `public_metadata` | object  | Metadata to attach to the resulting user.                          |
+| `redirect_url`    | string  | Where to send the invitee after acceptance.                        |
+| `notify`          | boolean | If `true`, send the invitation email (default `true`).             |
+| `expires_in_days` | integer | Days until the invitation expires.                                |
+
+### Request
+
+```bash
+curl https://api.whitehatengineering.com/v1/invitations \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f" \
+  -d '{
+    "email_address": "katherine@whitehatengineering.com",
+    "organization_id": "org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+    "role": "org:member"
+  }'
+```
+
+### Response
+
+Returns the created [Invitation object](#the-invitation-object).
+
+---
+
+## Revoke an invitation
+
+```
+POST /invitations/{invitation_id}/revoke
+```
+
+Revokes a `pending` invitation so its link can no longer be used.
+
+### Path parameters
+
+| Parameter       | Type   | Description                      |
+|-----------------|--------|----------------------------------|
+| `invitation_id` | string | The invitation ID (`inv_...`).   |
+
+### Request
+
+```bash
+curl -X POST "https://api.whitehatengineering.com/v1/invitations/inv_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk/revoke" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+Returns the [Invitation object](#the-invitation-object) with `"status": "revoked"`.
+
+---
+
+## Allowlist and blocklist identifiers
+
+Identifiers are explicit allow or deny rules evaluated at sign-in. An **allowlist identifier**
+permits a specific email or domain pattern; a **blocklist identifier** rejects one. They layer on
+top of domain enforcement to handle exceptions (a single contractor outside your domain, or one
+banned address inside it).
+
+### The Identifier object
+
+| Field        | Type    | Description                                                       |
+|--------------|---------|-------------------------------------------------------------------|
+| `id`         | string  | Unique identifier, prefixed `idn_`.                              |
+| `object`     | string  | `"allowlist_identifier"` or `"blocklist_identifier"`.           |
+| `identifier` | string  | An email (`user@example.com`) or domain pattern (`*@example.com`).|
+| `created_at` | integer | Creation timestamp (Unix ms).                                  |
+
+### List allowlist identifiers
+
+```
+GET /allowlist_identifiers
+```
+
+```bash
+curl "https://api.whitehatengineering.com/v1/allowlist_identifiers" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+```json
+{
+  "data": [
+    {
+      "id": "idn_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+      "object": "allowlist_identifier",
+      "identifier": "*@whitehatengineering.com",
+      "created_at": 1701302400000
+    }
+  ],
+  "total_count": 1
+}
+```
+
+### Add an allowlist identifier
+
+```
+POST /allowlist_identifiers
+```
+
+| Parameter    | Type    | Description                                              |
+|--------------|---------|----------------------------------------------------------|
+| `identifier` | string  | Email or domain pattern to allow. Required.              |
+| `notify`     | boolean | If `true`, invite the identifier if it is a full email.  |
+
+```bash
+curl https://api.whitehatengineering.com/v1/allowlist_identifiers \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "identifier": "contractor@partner.com" }'
+```
+
+Returns the created [Identifier object](#the-identifier-object).
+
+### Delete an allowlist identifier
+
+```
+DELETE /allowlist_identifiers/{identifier_id}
+```
+
+```bash
+curl -X DELETE "https://api.whitehatengineering.com/v1/allowlist_identifiers/idn_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+Returns the deleted [Identifier object](#the-identifier-object) with `"deleted": true`.
+
+> The blocklist works identically under `GET/POST/DELETE /blocklist_identifiers`; entries deny
+> sign-in for the matching identifier.
+
+---
+
+## How identifiers interact with domain enforcement
+
+OpenAuthFederated evaluates a sign-in attempt in this order:
+
+1. **Blocklist** — if the identity matches a blocklist identifier, reject immediately.
+2. **Domain enforcement** — if the identity's verified domain (the OIDC `hd` claim, with
+   `email_verified: true`) is an allowed company domain, **auto-accept**. This is the primary path
+   for the Google Workspace reference deployment: any active `@whitehatengineering.com` account is
+   admitted without a per-user invitation.
+3. **Allowlist** — if the identity is outside the allowed domains but matches an allowlist
+   identifier (a specific contractor email), admit it as an explicit exception.
+4. **Pending invitation** — if there is a `pending` invitation for the email, consume it and
+   provision the user (into its organization/role if specified).
+5. **Otherwise** — reject with `403` and a `domain_not_allowed` error code.
+
+Use **domain enforcement** for the broad "all employees" rule, **invitations** for inviting
+named people (especially into a specific org and role), and **allow/block identifiers** for the
+exceptions on either side of the domain boundary.
+
+## Next steps
+
+* [Organizations](./organizations.mdx) — the org/role an invitation grants on acceptance.
+* [Users](./users.mdx) — the user record created when an invitation is accepted.
+* [Platform API overview](../platform/overview.mdx) — configure allowed domains and IdP
+  connections.

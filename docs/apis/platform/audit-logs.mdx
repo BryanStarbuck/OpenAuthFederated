@@ -1,0 +1,160 @@
+---
+title: Audit logs
+description: Query the immutable record of sign-in, sign-out, refresh, permission-denied, and admin configuration events with actor, target, IP, and user-agent details.
+---
+
+# Audit logs
+
+The **audit log** is OpenAuthFederated's immutable, queryable record of security-relevant
+events: who signed in and out, when sessions were refreshed or revoked, when access was denied,
+and every administrative configuration change made through the Platform API. It is the system of
+record for compliance reviews, incident investigations, and offboarding verification.
+
+Each entry pairs an **actor** (who did it) with an **action** and a **target** (what was acted
+on), plus request context (`ip`, `user_agent`) and a `trace_id` you can correlate with API
+responses and [webhooks](./webhooks.mdx).
+
+## The Audit log object
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Unique identifier, prefixed `evt_`. |
+| `object` | string | Always `audit_log_event`. |
+| `action` | string | Dotted action name (see [catalog](#audited-actions)). |
+| `actor` | object | Who performed the action. |
+| `target` | object | The resource acted on. |
+| `organization_id` | string \| null | Org context, if any. |
+| `ip` | string | Source IP address. |
+| `user_agent` | string | Source user-agent. |
+| `outcome` | string | `success` or `failure`. |
+| `trace_id` | string | Correlation ID. |
+| `metadata` | object | Action-specific detail. |
+| `created_at` | string | ISO 8601 timestamp. |
+
+### `actor` and `target` objects
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `type` | string | `user`, `api_key`, `system`, or `idp`. |
+| `id` | string | Identifier of the actor/target (`usr_...`, `key_...`, `conn_...`, etc.). |
+| `display` | string | Human label (email, key name, resource name). |
+
+```json
+{
+  "id": "evt_a1b2c3d4e5f6",
+  "object": "audit_log_event",
+  "action": "user.sign_in",
+  "actor": { "type": "user", "id": "usr_5f6a7b8c", "display": "alice@whitehatengineering.com" },
+  "target": { "type": "sso_connection", "id": "conn_4d2f8a", "display": "Google Workspace" },
+  "organization_id": "org_2a9f1c0bd3e4",
+  "ip": "203.0.113.24",
+  "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ...",
+  "outcome": "success",
+  "trace_id": "trace_9af2c1d0e4b8",
+  "metadata": { "method": "saml", "roles": ["engineer"] },
+  "created_at": "2026-06-20T18:50:00Z"
+}
+```
+
+## List audit logs
+
+`GET /v1/audit_logs`
+
+| Param | Type | Description |
+| --- | --- | --- |
+| `action` | string | Filter by action (e.g. `user.sign_in`). |
+| `actor_id` | string | Filter by actor (`usr_...`, `key_...`). |
+| `target_id` | string | Filter by target resource. |
+| `organization_id` | string | Filter by org. |
+| `outcome` | string | `success` or `failure`. |
+| `start_date` | string | ISO 8601 lower bound (inclusive). |
+| `end_date` | string | ISO 8601 upper bound (exclusive). |
+| `limit` / `offset` | integer | Pagination (default `20`, max `100`). |
+
+```bash
+curl "https://api.whitehatengineering.com/v1/audit_logs?action=user.sign_in&organization_id=org_2a9f1c0bd3e4&start_date=2026-06-01T00:00:00Z&limit=50" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "evt_a1b2c3d4e5f6",
+      "object": "audit_log_event",
+      "action": "user.sign_in",
+      "actor": { "type": "user", "id": "usr_5f6a7b8c", "display": "alice@whitehatengineering.com" },
+      "outcome": "success",
+      "created_at": "2026-06-20T18:50:00Z"
+    }
+  ],
+  "limit": 50,
+  "offset": 0,
+  "total_count": 1
+}
+```
+
+## Retrieve a single event
+
+`GET /v1/audit_logs/{evt_id}`
+
+```bash
+curl https://api.whitehatengineering.com/v1/audit_logs/evt_a1b2c3d4e5f6 \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+Audit events are **append-only** — there are no create, update, or delete endpoints.
+
+## Audited actions
+
+### Authentication & sessions
+
+| Action | Description |
+| --- | --- |
+| `user.sign_in` | Successful sign-in (records `method`: `saml`/`oidc`). |
+| `user.sign_in.rejected` | Sign-in blocked (e.g. out-of-domain, unverified email). |
+| `user.sign_out` | User signed out. |
+| `session.refresh` | Access token refreshed via rotating cookie. |
+| `session.revoked` | Session force-revoked (offboarding/admin/deprovision). |
+| `permission_denied` | An authorized request was denied for lacking a permission. |
+
+### Provisioning
+
+| Action | Description |
+| --- | --- |
+| `user.provisioned` | JIT or SCIM user creation. |
+| `user.updated` | User attribute/role change. |
+| `user.deprovisioned` | SCIM delete / `active:false`. |
+
+### Admin configuration changes
+
+| Action | Description |
+| --- | --- |
+| `organization.created` / `.updated` / `.deleted` | Tenant changes. |
+| `sso_connection.created` / `.updated` / `.activated` / `.disabled` / `.deleted` | Connection changes. |
+| `domain.added` / `.verified` / `.verification_failed` / `.deleted` | Domain changes. |
+| `scim.enabled` / `.disabled` / `.token_rotated` | SCIM config changes. |
+| `webhook.created` / `.deleted` | Webhook changes. |
+| `role.created` / `.updated` / `.deleted` | RBAC role changes. |
+| `permission.created` / `.deleted` | RBAC permission changes. |
+| `api_key.created` / `.revoked` / `.rotated` | [API key](./api-keys.mdx) changes. |
+
+### Investigating an offboarding
+
+To confirm a departed employee's access was revoked, filter by their user ID across the
+deprovision and revocation actions:
+
+```bash
+curl "https://api.whitehatengineering.com/v1/audit_logs?actor_id=usr_5f6a7b8c&action=session.revoked" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+You should see `user.deprovisioned` followed by one or more `session.revoked` events at the same
+timestamp as the [SCIM](./scim.mdx#deprovisioning-and-revocation) deactivation.
+
+## Next steps
+
+* [Webhooks](./webhooks.mdx) — stream the same events to your systems in real time.
+* [SCIM](./scim.mdx) — the source of provisioning audit events.
+* [API keys](./api-keys.mdx) — secure the credentials whose use is audited here.

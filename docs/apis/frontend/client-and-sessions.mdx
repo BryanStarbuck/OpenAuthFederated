@@ -1,0 +1,282 @@
+---
+title: Client and sessions
+description: Read the browser Client, list and inspect sessions, touch and refresh the active session, mint short-lived JWTs, and sign out.
+---
+
+# Client and sessions
+
+The **Client** is the root object of the Frontend API for a single browser or device. It tracks
+every [Session](#the-session-object) on that device, the currently active session, and any
+in-progress [SignIn](./sign-in.mdx) or [SignUp](./sign-up.mdx) attempts. This page covers reading
+the Client, working with its sessions, the hybrid token/cookie model, and signing out.
+
+All requests use the Frontend API base URL and are authorized with the **publishable key** plus
+the rotating session cookie — never the secret key.
+
+```
+https://auth.whitehatengineering.com/v1
+```
+
+## The Client object
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique identifier for this Client (browser/device). Prefixed `client_`. |
+| `object` | string | Always `client`. |
+| `sessions` | array&lt;Session&gt; | All sessions known to this Client, active and ended. |
+| `active_sessions` | array&lt;Session&gt; | Sessions currently in `active` status. |
+| `last_active_session_id` | string \| null | The session the SDK treats as current. |
+| `sign_in` | SignIn \| null | The in-progress sign-in attempt, if any. |
+| `sign_up` | SignUp \| null | The in-progress sign-up attempt, if any. |
+| `created_at` | integer | Unix ms timestamp the Client was created. |
+| `updated_at` | integer | Unix ms timestamp the Client last changed. |
+
+## The Session object
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique session identifier. Prefixed `sess_`. |
+| `object` | string | Always `session`. |
+| `status` | string | `active`, `ended`, `removed`, `expired`, or `revoked`. |
+| `user_id` | string | The authenticated user this session belongs to. |
+| `last_active_at` | integer | Unix ms timestamp of the last `touch`. |
+| `expire_at` | integer | Unix ms timestamp when the session record expires. |
+| `abandon_at` | integer | Unix ms timestamp after which an idle session is abandoned. |
+| `actor` | object \| null | Set when the session is impersonated by an admin. |
+| `latest_activity` | object | Device/IP/user-agent metadata for the last request. |
+| `created_at` | integer | Unix ms timestamp the session was created. |
+| `updated_at` | integer | Unix ms timestamp the session last changed. |
+
+Every Session is backed by a **server-side session record**, which is what makes immediate
+revocation possible despite short-lived JWTs.
+
+## Get the current Client
+
+Returns the Client for the calling browser, including all sessions and any active flows. This is
+the first call most SDKs make on page load to rehydrate state.
+
+**`GET /v1/client`**
+
+```bash
+curl https://auth.whitehatengineering.com/v1/client \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>"
+```
+
+```json
+{
+  "object": "client",
+  "id": "client_2aF9kQ1mZ",
+  "sessions": [
+    {
+      "object": "session",
+      "id": "sess_2bG0lR2nA",
+      "status": "active",
+      "user_id": "user_2cH1mS3oB",
+      "last_active_at": 1750420000000,
+      "expire_at": 1751024800000,
+      "abandon_at": 1753012800000,
+      "actor": null,
+      "latest_activity": {
+        "device_type": "desktop",
+        "browser_name": "Chrome",
+        "ip_address": "203.0.113.24"
+      },
+      "created_at": 1750420000000,
+      "updated_at": 1750420000000
+    }
+  ],
+  "active_sessions": ["sess_2bG0lR2nA"],
+  "last_active_session_id": "sess_2bG0lR2nA",
+  "sign_in": null,
+  "sign_up": null,
+  "created_at": 1750419000000,
+  "updated_at": 1750420000000
+}
+```
+
+## List sessions
+
+Returns the sessions for the current Client. Use this to render a "your active sessions" or
+"sign out everywhere" UI.
+
+**`GET /v1/client/sessions`**
+
+```bash
+curl https://auth.whitehatengineering.com/v1/client/sessions \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>"
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "session",
+      "id": "sess_2bG0lR2nA",
+      "status": "active",
+      "user_id": "user_2cH1mS3oB",
+      "last_active_at": 1750420000000,
+      "expire_at": 1751024800000,
+      "abandon_at": 1753012800000,
+      "actor": null,
+      "latest_activity": {
+        "device_type": "desktop",
+        "browser_name": "Chrome",
+        "ip_address": "203.0.113.24"
+      },
+      "created_at": 1750420000000,
+      "updated_at": 1750420000000
+    }
+  ],
+  "total_count": 1
+}
+```
+
+The **active session** is the one identified by `last_active_session_id` on the Client. The SDK
+selects it automatically; multi-session apps may switch the active session by calling `touch`
+(below) on a different session id.
+
+## Touch a session
+
+Marks a session as recently active and updates its `last_active_at`. The SDK calls this
+periodically and on focus to keep the active session warm and to set it as the current session in
+a multi-session Client. Touching does **not** mint a token — it only refreshes activity.
+
+**`POST /v1/client/sessions/{id}/touch`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sessions/sess_2bG0lR2nA/touch \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>"
+```
+
+```json
+{
+  "object": "session",
+  "id": "sess_2bG0lR2nA",
+  "status": "active",
+  "user_id": "user_2cH1mS3oB",
+  "last_active_at": 1750420600000,
+  "expire_at": 1751024800000,
+  "abandon_at": 1753012800000,
+  "actor": null,
+  "created_at": 1750420000000,
+  "updated_at": 1750420600000
+}
+```
+
+## Mint a session token (refresh the JWT)
+
+Mints a fresh **short-lived JWT access token** from the session. This is the workhorse of the
+hybrid session model: the JWT typically lives ~60 seconds, so the SDK mints a new one whenever it
+is about to expire. The mint call is authorized by the rotating `__session` HttpOnly cookie; on
+each successful mint the platform **rotates** that cookie, so a stolen cookie is short-lived.
+
+**`POST /v1/client/sessions/{id}/tokens`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sessions/sess_2bG0lR2nA/tokens \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+To mint a token shaped for a specific audience/template, pass it in the body:
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sessions/sess_2bG0lR2nA/tokens \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{ "template": "backend_api" }'
+```
+
+```json
+{
+  "object": "token",
+  "jwt": "eyJhbGciOiJSUzI1Ni3...<short-lived-access-token>...",
+  "expires_at": 1750420660000
+}
+```
+
+Send the returned `jwt` as `Authorization: Bearer <jwt>` to your application or to the
+[Backend API](../backend/overview.mdx). The response also carries a rotated `__session` cookie via
+`Set-Cookie` — keep `credentials: 'include'` so the browser stores it.
+
+### How the cookie and JWT work together
+
+1. After a flow completes, the platform sets the rotating **`__session`** cookie
+   (`HttpOnly; Secure; SameSite=Lax`). JavaScript cannot read it.
+2. Your app needs a JWT to call protected endpoints. The SDK POSTs to
+   `…/sessions/{id}/tokens` to mint one (~60s TTL).
+3. Each mint **rotates** the `__session` cookie and returns the new short-lived JWT.
+4. The JWT is verified statelessly (signature + claims). Revocation is enforced statefully — if
+   the server-side session record is gone, the **next** mint fails and the JWT expires within
+   seconds.
+
+This is why a leaked JWT is low-risk (it expires almost immediately) and why sign-out / admin
+revocation takes effect right away.
+
+## Sign out a single session
+
+Ends one session: marks the server-side record `removed`/`revoked` and clears its cookie. Any
+outstanding JWT for that session expires on its next ~60s boundary and cannot be refreshed.
+
+**`POST /v1/client/sessions/{id}/remove`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sessions/sess_2bG0lR2nA/remove \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>"
+```
+
+```json
+{
+  "object": "session",
+  "id": "sess_2bG0lR2nA",
+  "status": "removed",
+  "user_id": "user_2cH1mS3oB",
+  "updated_at": 1750421000000
+}
+```
+
+## Sign out of all sessions
+
+Ends **every** session on the Client (full sign-out / "sign out everywhere"). Removes all
+server-side session records and clears the Client's cookies.
+
+**`DELETE /v1/client/sessions`**
+
+```bash
+curl -X DELETE https://auth.whitehatengineering.com/v1/client/sessions \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>"
+```
+
+```json
+{
+  "object": "client",
+  "id": "client_2aF9kQ1mZ",
+  "sessions": [],
+  "active_sessions": [],
+  "last_active_session_id": null,
+  "sign_in": null,
+  "sign_up": null,
+  "updated_at": 1750421100000
+}
+```
+
+> For server-initiated revocation (admin force-revoke, offboarding via SCIM deprovision), use the
+> [Backend API](../backend/overview.mdx). The short JWT TTL guarantees the user loses access
+> promptly regardless of which surface revoked the session.
+
+## Next steps
+
+* [Sign-in flow](./sign-in.mdx)
+* [Sign-up flow](./sign-up.mdx)
+* [The current user (me)](./user.mdx)
+* [Frontend API overview](./overview.mdx)
+* [Backend API overview](../backend/overview.mdx)

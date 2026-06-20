@@ -1,0 +1,175 @@
+---
+title: Domains
+description: Verify company domains via DNS TXT and enforce sign-in so only identities on a verified domain (with verified email) are accepted.
+---
+
+# Domains
+
+A **Domain** is a company email domain (e.g. `whitehatengineering.com`) that an
+[organization](./organizations.mdx) claims and verifies. Verified domains drive **domain
+enforcement** — the rule that an identity must belong to a verified company domain (and have a
+verified email) to sign in. Domains are how OpenAuthFederated guarantees that only members of
+*your* company can authenticate, even when the upstream IdP would happily authenticate anyone.
+
+A domain ties together the chain **domain → connection → org**: an inbound identity's email
+domain is matched to a verified domain, which routes to the org's
+[SSO connection](./sso-connections.mdx).
+
+## The Domain object
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Unique identifier, prefixed `dmn_`. |
+| `object` | string | Always `domain`. |
+| `organization_id` | string | Owning [org](./organizations.mdx). |
+| `domain` | string | The fully qualified domain (e.g. `whitehatengineering.com`). |
+| `status` | string | `pending`, `verified`, or `failed`. |
+| `verification` | object | DNS challenge details (see below). |
+| `enforced` | boolean | Whether this domain participates in [enforcement](#domain-enforcement). |
+| `created_at` | string | ISO 8601 timestamp. |
+| `verified_at` | string \| null | When verification last succeeded. |
+
+### `verification` object
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `method` | string | Always `dns_txt`. |
+| `record_name` | string | Host to create the TXT record on. |
+| `record_value` | string | The token to publish. |
+
+```json
+{
+  "id": "dmn_71be0c",
+  "object": "domain",
+  "organization_id": "org_2a9f1c0bd3e4",
+  "domain": "whitehatengineering.com",
+  "status": "pending",
+  "verification": {
+    "method": "dns_txt",
+    "record_name": "_openauthfederated.whitehatengineering.com",
+    "record_value": "oaf-verify=8f3a1c9d2b7e4a05"
+  },
+  "enforced": true,
+  "created_at": "2026-06-20T18:10:00Z",
+  "verified_at": null
+}
+```
+
+## List domains
+
+`GET /v1/domains`
+
+| Param | Type | Description |
+| --- | --- | --- |
+| `organization_id` | string | Filter by org. |
+| `status` | string | `pending`, `verified`, or `failed`. |
+| `limit` / `offset` | integer | Pagination. |
+
+```bash
+curl "https://api.whitehatengineering.com/v1/domains?organization_id=org_2a9f1c0bd3e4" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+## Add a domain
+
+`POST /v1/domains`
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `organization_id` | string | yes | Org claiming the domain. |
+| `domain` | string | yes | FQDN to claim. |
+| `enforced` | boolean | no | Default `true`. |
+
+```bash
+curl https://api.whitehatengineering.com/v1/domains \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "organization_id": "org_2a9f1c0bd3e4", "domain": "whitehatengineering.com" }'
+```
+
+The response includes the `verification` block. A domain stays `pending` and is **not** used for
+sign-in until verification succeeds. A domain can only be claimed by one org (a second claim
+returns `409 conflict`).
+
+## Verify a domain
+
+`POST /v1/domains/{dmn_id}/verify`
+
+1. Publish the TXT record from the `verification` block at your DNS provider:
+
+   ```
+   _openauthfederated.whitehatengineering.com.  IN  TXT  "oaf-verify=8f3a1c9d2b7e4a05"
+   ```
+
+2. Trigger verification (OpenAuthFederated performs the DNS lookup):
+
+   ```bash
+   curl -X POST https://api.whitehatengineering.com/v1/domains/dmn_71be0c/verify \
+     -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+   ```
+
+   ```json
+   {
+     "id": "dmn_71be0c",
+     "object": "domain",
+     "domain": "whitehatengineering.com",
+     "status": "verified",
+     "enforced": true,
+     "verified_at": "2026-06-20T18:25:11Z"
+   }
+   ```
+
+If the record is missing or wrong, the call returns `status: failed` with a `trace_id`; fix the
+record and retry. Successful and failed verifications are written to the
+[audit log](./audit-logs.mdx).
+
+## Retrieve / delete a domain
+
+`GET /v1/domains/{dmn_id}`
+
+`DELETE /v1/domains/{dmn_id}` — removes the claim. If it was the org's only verified domain and
+`enforce_domain` is on, sign-in for that org will fail until another domain is verified.
+
+```bash
+curl -X DELETE https://api.whitehatengineering.com/v1/domains/dmn_71be0c \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+## Domain enforcement
+
+When the org's [`enforce_domain`](./organizations.mdx#organization-settings) setting is on,
+OpenAuthFederated validates **every** inbound identity against the org's verified domains
+*after* the IdP assertion is validated but *before* a session is issued.
+
+An identity is **rejected** when:
+
+* the email's domain is **not** one of the org's `verified` domains;
+* the email is **unverified** — on the OIDC path, `email_verified` is not `true`;
+* (OIDC) the hosted-domain `hd` claim does not match a verified domain;
+* the account is outside the organization (e.g. a personal Gmail address routed through Google).
+
+Rejections produce a `permission_denied` / `domain_not_allowed` result and are recorded as a
+`sign_in.rejected` event in the [audit log](./audit-logs.mdx).
+
+### Worked example
+
+For **White Hat Engineering** with `whitehatengineering.com` verified and enforced:
+
+| Inbound identity | Outcome |
+| --- | --- |
+| `alice@whitehatengineering.com`, verified, active Workspace member | Accepted → session issued |
+| `bob@gmail.com` | Rejected — domain not verified |
+| `eve@whitehatengineering.com`, `email_verified: false` | Rejected — unverified email |
+| `carol@contractor.io` (external) | Rejected — out-of-domain |
+| Suspended Workspace account | Rejected upstream by Google; never reaches enforcement |
+
+This is what makes Google Workspace the single source of truth: only an active, verified member
+on a verified domain gets in. Offboarding a Workspace account (suspend/delete) — combined with
+[SCIM deprovision](./scim.mdx#deprovisioning-and-revocation) and short token lifetimes — revokes
+access promptly.
+
+## Next steps
+
+* [SSO connections](./sso-connections.mdx) — the connection a verified domain routes to.
+* [SCIM](./scim.mdx) — keep membership in sync and deprovision on offboarding.
+* [Audit logs](./audit-logs.mdx) — review accepted and rejected sign-ins.

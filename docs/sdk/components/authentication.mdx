@@ -1,0 +1,179 @@
+---
+title: Authentication Components
+description: Drop-in sign-in, sign-up, and session-control components that render the federated upstream-IdP flow.
+---
+
+# Authentication Components
+
+These components handle getting users in and out. With OpenAuthFederated, sign-in and
+sign-up render the **federated upstream-IdP flow** — in the reference deployment that means
+Google Workspace SSO restricted to the `whitehatengineering.com` domain. The platform stores
+no end-user passwords; credentials are handled entirely by the upstream IdP, and domain
+enforcement (OIDC `hd` + `email_verified`) rejects out-of-org accounts.
+
+All components must be rendered inside an [`<AuthProvider>`](./control.mdx#authprovider).
+
+## `<SignIn>`
+
+Renders the complete sign-in experience. Because authentication is federated, the rendered
+UI presents the upstream IdP (Google Workspace) as the way in rather than a password form.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `routing` | `'hash' \| 'path' \| 'virtual'` | How the multi-step flow is routed. |
+| `path` | `string` | Base path when `routing="path"` (e.g. `/sign-in`). |
+| `signUpUrl` | `string` | Link to the sign-up page. |
+| `forceRedirectUrl` | `string` | Always redirect here after sign-in. |
+| `fallbackRedirectUrl` | `string` | Redirect here if there's no return URL. |
+| `appearance` | `Appearance` | Theming overrides. |
+
+```tsx
+// app/sign-in/[[...sign-in]]/page.tsx
+import { SignIn } from '@auth/nextjs'
+
+export default function Page() {
+  return (
+    <SignIn
+      routing="path"
+      path="/sign-in"
+      fallbackRedirectUrl="/dashboard"
+      appearance={{ variables: { colorPrimary: '#0f766e' } }}
+    />
+  )
+}
+```
+
+## `<SignUp>`
+
+Renders the sign-up experience. Combined with **JIT provisioning**, a first valid federated
+sign-in usually creates the user automatically — so `<SignUp>` most often just funnels the
+user into the same Google Workspace flow.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `routing` | `'hash' \| 'path' \| 'virtual'` | Flow routing strategy. |
+| `path` | `string` | Base path when `routing="path"`. |
+| `signInUrl` | `string` | Link to the sign-in page. |
+| `forceRedirectUrl` | `string` | Always redirect here after sign-up. |
+| `fallbackRedirectUrl` | `string` | Default post-sign-up redirect. |
+| `appearance` | `Appearance` | Theming overrides. |
+
+```tsx
+// app/sign-up/[[...sign-up]]/page.tsx
+import { SignUp } from '@auth/nextjs'
+
+export default function Page() {
+  return <SignUp routing="path" path="/sign-up" signInUrl="/sign-in" />
+}
+```
+
+## `<SignInButton>`
+
+A lightweight trigger that opens the sign-in flow (modal by default). Wrap your own element
+with `asChild` to fully control styling.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `mode` | `'modal' \| 'redirect'` | Open in a modal or navigate to the sign-in page. |
+| `forceRedirectUrl` | `string` | Post-sign-in redirect. |
+| `fallbackRedirectUrl` | `string` | Default post-sign-in redirect. |
+| `asChild` | `boolean` | Render your child element as the trigger. |
+
+```tsx
+import { SignInButton } from '@auth/react'
+
+export function Cta() {
+  return (
+    <SignInButton mode="modal" fallbackRedirectUrl="/dashboard">
+      <button className="btn-primary">Sign in with Google Workspace</button>
+    </SignInButton>
+  )
+}
+```
+
+## `<SignUpButton>`
+
+Identical surface to `<SignInButton>`, but opens the sign-up flow.
+
+```tsx
+import { SignUpButton } from '@auth/react'
+
+<SignUpButton mode="redirect" forceRedirectUrl="/welcome">
+  <button>Create your account</button>
+</SignUpButton>
+```
+
+## `<SignOutButton>`
+
+Ends the current session and revokes its server-side record immediately.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `redirectUrl` | `string` | Where to send the user after sign-out. |
+| `signOutOptions` | `{ sessionId?: string }` | Sign out a specific session instead of the active one. |
+| `asChild` | `boolean` | Render your child element as the trigger. |
+
+```tsx
+import { SignOutButton } from '@auth/react'
+
+<SignOutButton redirectUrl="/">
+  <button>Sign out</button>
+</SignOutButton>
+```
+
+## `<GoogleOneTap>`
+
+Renders the Google One Tap prompt for near-frictionless Workspace sign-in. Domain
+enforcement still applies — only `whitehatengineering.com` accounts complete the flow.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `cancelOnTapOutside` | `boolean` | Dismiss the prompt when the user clicks away. |
+| `fallbackRedirectUrl` | `string` | Redirect after a successful sign-in. |
+| `signInForceRedirectUrl` | `string` | Always redirect here on sign-in. |
+
+```tsx
+import { GoogleOneTap } from '@auth/react'
+
+export function OneTap() {
+  return <GoogleOneTap fallbackRedirectUrl="/dashboard" />
+}
+```
+
+## `<Waitlist>`
+
+Collects prospective users before general access opens — useful while a tenant is being
+onboarded or before a domain is verified.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `afterJoinWaitlistUrl` | `string` | Where to send users after they join. |
+| `signInUrl` | `string` | Link for users who already have access. |
+| `appearance` | `Appearance` | Theming overrides. |
+
+```tsx
+import { Waitlist } from '@auth/react'
+
+export default function WaitlistPage() {
+  return <Waitlist afterJoinWaitlistUrl="/thanks" signInUrl="/sign-in" />
+}
+```
+
+## Next steps
+
+- [User components](./user.mdx)
+- [Control components — `<Protect>` and `<AuthProvider>`](./control.mdx)
+- [Client hooks — `useSignIn`, `useSignUp`](../hooks.mdx)
+- [Next.js SDK reference](../nextjs.mdx)

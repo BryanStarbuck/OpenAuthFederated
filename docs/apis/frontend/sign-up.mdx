@@ -1,0 +1,242 @@
+---
+title: Sign-up flow
+description: Create and drive a SignUp attempt — federated SSO/SAML/OIDC redirect, verification, Just-In-Time (JIT) user provisioning on first valid federated sign-in, and domain-enforcement rejection.
+---
+
+# Sign-up flow
+
+The **SignUp** object is a single, stateful attempt to provision a **new** user. It mirrors the
+[SignIn](./sign-in.mdx) lifecycle: you create it, satisfy any required verifications, and when its
+`status` reaches `complete` the user is created and a
+[Session](./client-and-sessions.mdx#the-session-object) is established on the Client.
+
+In OpenAuthFederated, sign-up is **federation-first and provisioning is Just-In-Time (JIT)**: when
+a user authenticates through the upstream IdP (by default **Google Workspace**) for the first
+time and passes domain enforcement, the platform **creates the user account automatically** on
+that first valid sign-in. There is usually no separate "register" form — the SSO redirect both
+authenticates and provisions.
+
+All requests use the Frontend API base URL with the **publishable key** + session cookie.
+
+```
+https://auth.whitehatengineering.com/v1
+```
+
+## The SignUp object
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique identifier. Prefixed `sua_`. |
+| `object` | string | Always `sign_up`. |
+| `status` | string | Lifecycle status — see [statuses](#status-lifecycle). |
+| `required_fields` | array&lt;string&gt; | Fields that must be present before completion. |
+| `optional_fields` | array&lt;string&gt; | Fields that may be supplied. |
+| `missing_fields` | array&lt;string&gt; | Required fields not yet satisfied. |
+| `unverified_fields` | array&lt;string&gt; | Fields awaiting verification (e.g. `email_address`). |
+| `verifications` | object | Per-strategy verification state, including `external_account` for SSO (carries `external_verification_redirect_url`). |
+| `email_address` | string \| null | The email being provisioned (set after SSO). |
+| `created_session_id` | string \| null | Set once `status` is `complete`. |
+| `created_user_id` | string \| null | The JIT-created user id, set on completion. |
+| `created_at` | integer | Unix ms timestamp. |
+| `updated_at` | integer | Unix ms timestamp. |
+
+## Status lifecycle
+
+| Status | Meaning |
+|---|---|
+| `missing_requirements` | One or more required fields/verifications are outstanding. |
+| `needs_first_factor` | A first-factor verification (SSO redirect or code) is required. |
+| `complete` | Provisioning finished. `created_user_id` and `created_session_id` are set. |
+| `abandoned` | The attempt expired or was superseded. |
+
+## Federated sign-up with JIT provisioning (recommended)
+
+### 1. Create the SignUp and prepare the SSO strategy
+
+Pass the `strategy` (`oauth_google` or `saml`), a `redirect_url` for the IdP callback, and a
+`redirect_url_complete` for the post-provisioning landing page.
+
+**`POST /v1/client/sign_ups`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sign_ups \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "strategy": "oauth_google",
+    "redirect_url": "https://app.whitehatengineering.com/sso-callback",
+    "redirect_url_complete": "https://app.whitehatengineering.com/welcome"
+  }'
+```
+
+```json
+{
+  "object": "sign_up",
+  "id": "sua_2hN7rX8tG",
+  "status": "missing_requirements",
+  "required_fields": ["email_address"],
+  "missing_fields": [],
+  "unverified_fields": ["email_address"],
+  "verifications": {
+    "external_account": {
+      "status": "unverified",
+      "strategy": "oauth_google",
+      "external_verification_redirect_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=...&hd=whitehatengineering.com&redirect_uri=https%3A%2F%2Fauth.whitehatengineering.com%2Fv1%2Foauth_callback&state=sua_2hN7rX8tG"
+    }
+  },
+  "email_address": null,
+  "created_user_id": null,
+  "created_session_id": null,
+  "created_at": 1750420000000,
+  "updated_at": 1750420000000
+}
+```
+
+### 2. Redirect the user to the IdP
+
+Navigate to `verifications.external_account.external_verification_redirect_url`:
+
+```js
+window.location.assign(
+  signUp.verifications.external_account.external_verification_redirect_url
+);
+```
+
+### 3. Callback validates, enforces domain, and JIT-creates the user
+
+Google redirects back to the OpenAuthFederated callback. The platform:
+
+1. Validates the SAML assertion / OIDC ID token.
+2. **Enforces domain** — on OIDC verifies the hosted-domain (`hd`) claim equals a verified domain
+   and `email_verified` is `true`; on SAML verifies the asserted email domain.
+3. **JIT-creates the user** if this is their first valid sign-in, mapping upstream
+   groups/attributes to roles per your configuration.
+4. Establishes a Session and redirects to your `redirect_url`.
+
+The completed SignUp:
+
+```json
+{
+  "object": "sign_up",
+  "id": "sua_2hN7rX8tG",
+  "status": "complete",
+  "email_address": "grace@whitehatengineering.com",
+  "unverified_fields": [],
+  "verifications": {
+    "external_account": { "status": "verified", "strategy": "oauth_google" }
+  },
+  "created_user_id": "user_2iO8sY9uH",
+  "created_session_id": "sess_2jP9tZ0vI",
+  "updated_at": 1750420050000
+}
+```
+
+A Session now exists; mint a JWT via
+[`POST /v1/client/sessions/{id}/tokens`](./client-and-sessions.mdx#mint-a-session-token-refresh-the-jwt).
+
+> JIT creates the user; full lifecycle (updates, deprovision on offboarding) is kept in sync via
+> SCIM 2.0 and webhooks, managed through the [Platform API](../platform/overview.mdx).
+
+## Domain enforcement
+
+Identities outside a verified domain are **rejected at the callback** — no user is created and no
+session is established. This applies even if the upstream IdP successfully authenticated the
+person. On the OIDC path the rejection covers a missing/mismatched `hd` claim or
+`email_verified: false`.
+
+Example: a user with `someone@gmail.com` (or any non-`whitehatengineering.com` domain) attempts
+the federated sign-up above. The callback refuses and the SDK surfaces:
+
+```json
+{
+  "errors": [
+    {
+      "code": "identity_domain_not_allowed",
+      "message": "Sign-up is restricted to verified company domains. The identity 'someone@gmail.com' is not part of an allowed domain.",
+      "long_message": "This OpenAuthFederated instance only permits identities on its verified domain(s). The upstream identity authenticated successfully but failed domain enforcement (hd claim / verified email did not match an allowed domain). No account was created.",
+      "meta": {
+        "allowed_domains": ["whitehatengineering.com"],
+        "presented_domain": "gmail.com",
+        "email_verified": true
+      }
+    }
+  ],
+  "sign_up": {
+    "object": "sign_up",
+    "id": "sua_2hN7rX8tG",
+    "status": "abandoned",
+    "created_user_id": null,
+    "created_session_id": null,
+    "updated_at": 1750420050000
+  }
+}
+```
+
+Returned with HTTP `403 Forbidden`. Surface a clear "use your company account" message to the
+user.
+
+## Non-federated sign-up verification
+
+For non-federated identities, complete an email verification before the user is created.
+
+### Prepare verification
+
+**`POST /v1/client/sign_ups/{id}/prepare_verification`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sign_ups/sua_2kQ0uA1wJ/prepare_verification \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{ "strategy": "email_code" }'
+```
+
+```json
+{
+  "object": "sign_up",
+  "id": "sua_2kQ0uA1wJ",
+  "status": "missing_requirements",
+  "unverified_fields": ["email_address"],
+  "verifications": {
+    "email_address": { "status": "unverified", "strategy": "email_code" }
+  },
+  "updated_at": 1750420010000
+}
+```
+
+### Attempt verification
+
+**`POST /v1/client/sign_ups/{id}/attempt_verification`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sign_ups/sua_2kQ0uA1wJ/attempt_verification \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{ "strategy": "email_code", "code": "552830" }'
+```
+
+```json
+{
+  "object": "sign_up",
+  "id": "sua_2kQ0uA1wJ",
+  "status": "complete",
+  "email_address": "ada@example.com",
+  "unverified_fields": [],
+  "verifications": {
+    "email_address": { "status": "verified", "strategy": "email_code" }
+  },
+  "created_user_id": "user_2lR1vB2xK",
+  "created_session_id": "sess_2mS2wC3yL",
+  "updated_at": 1750420020000
+}
+```
+
+## Next steps
+
+* [Sign-in flow](./sign-in.mdx)
+* [Client and sessions](./client-and-sessions.mdx)
+* [The current user (me)](./user.mdx)
+* [Frontend API overview](./overview.mdx)
+* [Platform API overview](../platform/overview.mdx)

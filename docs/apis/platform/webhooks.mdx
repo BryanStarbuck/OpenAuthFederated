@@ -1,0 +1,172 @@
+---
+title: Webhooks
+description: Register webhook endpoints to receive lifecycle, membership, and session events from OpenAuthFederated, with signed payloads, retries, and idempotency.
+---
+
+# Webhooks
+
+**Webhooks** let your backend react to identity events in real time instead of polling. When a
+user is provisioned, updated, or deprovisioned (via [SCIM](./scim.mdx) or JIT), when an
+organization membership changes, or when a session is created or revoked, OpenAuthFederated
+POSTs a **signed event** to the endpoints you register.
+
+## The Webhook endpoint object
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Unique identifier, prefixed `whk_`. |
+| `object` | string | Always `webhook_endpoint`. |
+| `url` | string | HTTPS URL OpenAuthFederated POSTs events to. |
+| `organization_id` | string \| null | Scope to one org, or `null` for all orgs. |
+| `enabled_events` | array | Event types to deliver (`["*"]` for all). |
+| `signing_secret` | string | Secret used to sign payloads (write-once; preview after). |
+| `status` | string | `enabled` or `disabled`. |
+| `created_at` | string | ISO 8601 timestamp. |
+
+```json
+{
+  "id": "whk_3c4d5e6f",
+  "object": "webhook_endpoint",
+  "url": "https://app.whitehatengineering.com/api/oaf/webhooks",
+  "organization_id": "org_2a9f1c0bd3e4",
+  "enabled_events": ["user.created", "user.updated", "user.deleted", "session.revoked"],
+  "signing_secret": "whsec_Xy9...redacted",
+  "status": "enabled",
+  "created_at": "2026-06-20T18:40:00Z"
+}
+```
+
+## Event catalog
+
+| Event | Fired when |
+| --- | --- |
+| `user.created` | A user is provisioned (JIT first sign-in or SCIM POST). |
+| `user.updated` | User attributes change (profile, `active`, role assignment). |
+| `user.deleted` | A user is deprovisioned (SCIM delete / `active:false`). |
+| `organizationMembership.created` | A user is added to an org. |
+| `organizationMembership.updated` | A membership's role changes. |
+| `organizationMembership.deleted` | A user is removed from an org. |
+| `group.created` / `group.updated` / `group.deleted` | A synced group changes. |
+| `groupMembership.created` / `groupMembership.deleted` | Group membership changes. |
+| `session.created` | A user signs in and a session is established. |
+| `session.revoked` | A session is force-revoked (offboarding, admin, deprovision). |
+| `sso_connection.activated` / `sso_connection.disabled` | A connection's status changes. |
+| `domain.verified` | A domain completes DNS verification. |
+
+## Event payload envelope
+
+Every delivery shares the same envelope. `type` names the event; `data` carries the affected
+object.
+
+```json
+{
+  "id": "evt_7a8b9c0d1e2f",
+  "object": "event",
+  "type": "user.deleted",
+  "api_version": "v1",
+  "created_at": "2026-06-20T18:45:12Z",
+  "organization_id": "org_2a9f1c0bd3e4",
+  "data": {
+    "id": "usr_5f6a7b8c",
+    "object": "user",
+    "email": "alice@whitehatengineering.com",
+    "active": false,
+    "deprovisioned_at": "2026-06-20T18:45:11Z"
+  }
+}
+```
+
+## Create a webhook endpoint
+
+`POST /v1/webhooks`
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `url` | string | yes | HTTPS endpoint. |
+| `enabled_events` | array | yes | Event types, or `["*"]`. |
+| `organization_id` | string | no | Scope to one org. |
+
+```bash
+curl https://api.whitehatengineering.com/v1/webhooks \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://app.whitehatengineering.com/api/oaf/webhooks",
+    "organization_id": "org_2a9f1c0bd3e4",
+    "enabled_events": ["user.created", "user.updated", "user.deleted", "session.revoked"]
+  }'
+```
+
+The response includes the `signing_secret` (prefixed `whsec_`) **once** — store it securely.
+
+## List / delete webhook endpoints
+
+`GET /v1/webhooks`
+
+```bash
+curl "https://api.whitehatengineering.com/v1/webhooks?organization_id=org_2a9f1c0bd3e4" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+`DELETE /v1/webhooks/{whk_id}`
+
+```bash
+curl -X DELETE https://api.whitehatengineering.com/v1/webhooks/whk_3c4d5e6f \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+## Signature verification
+
+Each request carries headers that let you verify authenticity and prevent replay:
+
+| Header | Description |
+| --- | --- |
+| `oaf-webhook-id` | Unique delivery ID (use for idempotency). |
+| `oaf-webhook-timestamp` | Unix seconds when the event was sent. |
+| `oaf-webhook-signature` | Space-separated `v1,<base64-hmac>` signatures. |
+
+The signature is an HMAC-SHA256 over `"{id}.{timestamp}.{raw_body}"` keyed by the part of the
+`signing_secret` after the `whsec_` prefix (base64-decoded). Verify in your handler:
+
+```ts
+import crypto from "crypto";
+
+function verify(req: { headers: Record<string, string>; rawBody: string }, secret: string) {
+  const id = req.headers["oaf-webhook-id"];
+  const ts = req.headers["oaf-webhook-timestamp"];
+  const sigHeader = req.headers["oaf-webhook-signature"]; // "v1,<b64>"
+
+  // Reject events older than 5 minutes (replay protection)
+  if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) throw new Error("timestamp too old");
+
+  const key = Buffer.from(secret.replace(/^whsec_/, ""), "base64");
+  const expected = crypto
+    .createHmac("sha256", key)
+    .update(`${id}.${ts}.${req.rawBody}`)
+    .digest("base64");
+
+  const provided = sigHeader.split(" ").map((s) => s.split(",")[1]);
+  const ok = provided.some((p) =>
+    crypto.timingSafeEqual(Buffer.from(p), Buffer.from(expected)),
+  );
+  if (!ok) throw new Error("invalid signature");
+}
+```
+
+Always verify against the **raw** request body (before JSON parsing) and use a constant-time
+comparison.
+
+## Retries and idempotency
+
+* **Acknowledge fast** — return `2xx` within 10 seconds. Do heavy work asynchronously.
+* **Retries** — non-`2xx` responses (or timeouts) are retried with exponential backoff over ~24
+  hours. After repeated failures the endpoint may be auto-`disabled`.
+* **Idempotency** — the same event may be delivered more than once. De-duplicate on
+  `oaf-webhook-id` (or the body's `evt_...` id) and treat handlers as idempotent.
+* **Ordering** — delivery is best-effort, not strictly ordered. Use `created_at` to reconcile.
+
+## Next steps
+
+* [SCIM](./scim.mdx) — the source of most lifecycle events.
+* [Audit logs](./audit-logs.mdx) — the durable, queryable record of the same events.
+* [Backend API](../backend/overview.mdx) — react to events in your application.

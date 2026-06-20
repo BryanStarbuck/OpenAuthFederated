@@ -1,0 +1,136 @@
+---
+title: Protect Routes
+description: Gate pages and APIs by authentication, role, and permission using authMiddleware and createRouteMatcher.
+---
+
+Route protection in OpenAuthFederated happens in `middleware.ts`. You decide which routes need authentication, which need a specific role or permission, and what should stay public. Because the authoritative authorization model lives in our own backend/DB, `has({ permission })` checks resolve against the roles mapped from your Google Workspace groups.
+
+## How it works
+
+`authMiddleware()` accepts a callback that receives `auth` and the request. Inside it you use `createRouteMatcher()` to test the URL, then call `auth.protect()` to require access or `has()` to make a custom decision. Everything not matched stays public by default.
+
+## Require authentication
+
+Match the routes you want to protect and call `auth.protect()` — unauthenticated users are redirected to sign-in automatically.
+
+```ts
+// middleware.ts
+import { authMiddleware, createRouteMatcher } from '@auth/nextjs/server'
+
+const isProtectedRoute = createRouteMatcher(['/dashboard(.*)', '/forum(.*)'])
+
+export default authMiddleware(async (auth, req) => {
+  if (isProtectedRoute(req)) {
+    await auth.protect()
+  }
+})
+
+export const config = {
+  matcher: [
+    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
+    '/(api|trpc)(.*)',
+  ],
+}
+```
+
+## Custom logic with `isAuthenticated()` + `redirectToSignIn()`
+
+When you want to run your own logic instead of letting `protect()` handle the redirect, read the auth state and redirect explicitly.
+
+```ts
+// middleware.ts
+import { authMiddleware, createRouteMatcher } from '@auth/nextjs/server'
+
+const isProtectedRoute = createRouteMatcher(['/dashboard(.*)'])
+
+export default authMiddleware(async (auth, req) => {
+  const { isAuthenticated, redirectToSignIn } = await auth()
+
+  if (!isAuthenticated && isProtectedRoute(req)) {
+    return redirectToSignIn()
+  }
+})
+```
+
+## Require a role or permission
+
+Pass a callback to `auth.protect()` that returns whether the user is authorized. Use `<feature>:<action>` permissions such as `code:read` or `jfk:write`.
+
+```ts
+// middleware.ts
+import { authMiddleware, createRouteMatcher } from '@auth/nextjs/server'
+
+const isCodeRoute = createRouteMatcher(['/code(.*)'])
+
+export default authMiddleware(async (auth, req) => {
+  if (isCodeRoute(req)) {
+    await auth.protect((has) => {
+      return has({ permission: 'code:read' }) || has({ permission: '*:read' })
+    })
+  }
+})
+```
+
+You can also check inline with `has()` and decide what to do yourself:
+
+```ts
+// middleware.ts
+import { authMiddleware, createRouteMatcher } from '@auth/nextjs/server'
+
+const isWriteRoute = createRouteMatcher(['/jfk/edit(.*)'])
+
+export default authMiddleware(async (auth, req) => {
+  const { has, redirectToSignIn } = await auth()
+
+  if (isWriteRoute(req) && !has({ permission: 'jfk:write' })) {
+    return redirectToSignIn()
+  }
+})
+```
+
+## Multiple route groups
+
+Real apps mix public, authenticated, and admin-only areas. Layer the matchers from most specific to least specific.
+
+```ts
+// middleware.ts
+import { authMiddleware, createRouteMatcher } from '@auth/nextjs/server'
+
+const isOrgRoute = createRouteMatcher(['/organization-selector(.*)', '/orgs/(.*)'])
+const isOrgAdminRoute = createRouteMatcher(['/orgs/(.*)/memberships', '/orgs/(.*)/domain'])
+const isCodeRoute = createRouteMatcher(['/code(.*)'])
+
+export default authMiddleware(async (auth, req) => {
+  // Admin-only org management requires an admin permission
+  if (isOrgAdminRoute(req)) {
+    await auth.protect((has) => {
+      return has({ permission: 'org:admin:manage' }) || has({ role: 'admin' })
+    })
+  }
+
+  // Any signed-in member can reach org pages
+  if (isOrgRoute(req)) {
+    await auth.protect()
+  }
+
+  // Feature area gated by a read permission
+  if (isCodeRoute(req)) {
+    await auth.protect((has) => has({ permission: 'code:read' }))
+  }
+})
+
+export const config = {
+  matcher: [
+    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
+    '/(api|trpc)(.*)',
+  ],
+}
+```
+
+> The same `has({ permission })` and `has({ role })` checks are available in Server Components, Route Handlers, and on the client via `useAuth()`. Always enforce on the backend — front-end checks are for UX only. See [Read the user](./read-the-user.mdx).
+
+## Next steps
+
+- [Read the user](./read-the-user.mdx) — `auth()`, `currentUser()`, and client hooks.
+- [Environment variables](./environment-variables.mdx) — keys the middleware relies on.
+- [Deploy](./deploy.mdx) — map Google Workspace groups to the roles checked here.

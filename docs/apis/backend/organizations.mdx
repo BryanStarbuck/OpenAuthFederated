@@ -1,0 +1,362 @@
+---
+title: Organizations
+description: Create and manage organizations (tenants) and their memberships, and map roles to RBAC permissions in OpenAuthFederated.
+---
+
+# Organizations
+
+An **Organization** is a tenant: a container that groups users and gates one app or customer.
+Organizations let a single OpenAuthFederated deployment serve multiple teams or accounts, each
+with its own members and role assignments. Upstream IdP groups (for example, Google Workspace
+groups) are mapped to organization roles, and roles map to RBAC permissions — but the
+**authoritative authorization model lives in your backend/DB**, with IdP groups treated only as
+inputs, to avoid lock-in.
+
+All endpoints are relative to your base URL, e.g.
+`https://api.whitehatengineering.com/v1`.
+
+## The Organization object
+
+| Field              | Type    | Description                                                       |
+|--------------------|---------|-------------------------------------------------------------------|
+| `id`               | string  | Unique identifier, prefixed `org_`.                               |
+| `object`           | string  | Always `"organization"`.                                          |
+| `name`             | string  | Human-readable organization name.                                |
+| `slug`             | string  | URL-safe unique slug.                                            |
+| `members_count`    | integer | Number of members.                                              |
+| `max_allowed_memberships` | integer | Seat cap, or `0` for unlimited.                          |
+| `allowed_domains`  | array   | Verified domains whose users auto-join this org (domain enforcement). |
+| `public_metadata`  | object  | Non-sensitive metadata, visible to the front end.               |
+| `private_metadata` | object  | Server-only metadata.                                           |
+| `created_at`       | integer | Creation timestamp (Unix ms).                                  |
+| `updated_at`       | integer | Last update timestamp (Unix ms).                              |
+
+## The Organization Membership object
+
+| Field             | Type    | Description                                                        |
+|-------------------|---------|-------------------------------------------------------------------|
+| `id`              | string  | Unique identifier, prefixed `orgmem_`.                            |
+| `object`          | string  | Always `"organization_membership"`.                              |
+| `organization_id` | string  | The organization (`org_...`).                                    |
+| `user_id`         | string  | The member (`user_...`).                                         |
+| `role`            | string  | The member's role within the org (e.g. `org:admin`, `org:member`).|
+| `permissions`     | array   | Resolved RBAC permissions for the role (e.g. `["jfk:read", "code:write"]`). |
+| `created_at`      | integer | Creation timestamp (Unix ms).                                   |
+| `updated_at`      | integer | Last update timestamp (Unix ms).                              |
+
+---
+
+## List organizations
+
+```
+GET /organizations
+```
+
+### Query parameters
+
+| Parameter | Type    | Description                                              |
+|-----------|---------|----------------------------------------------------------|
+| `query`   | string  | Filter by name or slug.                                  |
+| `order_by`| string  | Sort with `+`/`-` prefix. Supports `created_at`, `name`. |
+| `limit`   | integer | Page size (default `10`, max `500`).                    |
+| `offset`  | integer | Records to skip (default `0`).                          |
+
+### Request
+
+```bash
+curl "https://api.whitehatengineering.com/v1/organizations?limit=20&order_by=-created_at" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+```json
+{
+  "data": [
+    {
+      "id": "org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+      "object": "organization",
+      "name": "White Hat Engineering",
+      "slug": "white-hat-engineering",
+      "members_count": 42,
+      "max_allowed_memberships": 0,
+      "allowed_domains": ["whitehatengineering.com"],
+      "public_metadata": {},
+      "private_metadata": {},
+      "created_at": 1701302400000,
+      "updated_at": 1718841600000
+    }
+  ],
+  "total_count": 3
+}
+```
+
+---
+
+## Create an organization
+
+```
+POST /organizations
+```
+
+### Body parameters
+
+| Parameter           | Type   | Description                                              |
+|---------------------|--------|----------------------------------------------------------|
+| `name`              | string | Organization name. Required.                            |
+| `slug`              | string | URL-safe slug (generated from `name` if omitted).       |
+| `created_by`        | string | User ID to add as the first admin member.               |
+| `allowed_domains`   | array  | Domains whose users auto-join via domain enforcement.   |
+| `max_allowed_memberships` | integer | Seat cap (`0` = unlimited).                       |
+| `public_metadata`   | object | Non-sensitive metadata.                                 |
+| `private_metadata`  | object | Server-only metadata.                                   |
+
+### Request
+
+```bash
+curl https://api.whitehatengineering.com/v1/organizations \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 9c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f" \
+  -d '{
+    "name": "White Hat Engineering",
+    "allowed_domains": ["whitehatengineering.com"],
+    "created_by": "user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk"
+  }'
+```
+
+### Response
+
+Returns the created [Organization object](#the-organization-object).
+
+---
+
+## Get an organization
+
+```
+GET /organizations/{org_id}
+```
+
+`org_id` may be either the `org_...` ID or the organization slug.
+
+### Request
+
+```bash
+curl "https://api.whitehatengineering.com/v1/organizations/org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+Returns a single [Organization object](#the-organization-object).
+
+---
+
+## Update an organization
+
+```
+PATCH /organizations/{org_id}
+```
+
+### Body parameters
+
+| Parameter           | Type   | Description                            |
+|---------------------|--------|----------------------------------------|
+| `name`              | string | Updated name.                          |
+| `slug`              | string | Updated slug.                          |
+| `allowed_domains`   | array  | Updated allowed domains.               |
+| `max_allowed_memberships` | integer | Updated seat cap.                |
+| `public_metadata`   | object | Replaces public metadata.              |
+| `private_metadata`  | object | Replaces private metadata.             |
+
+### Request
+
+```bash
+curl -X PATCH "https://api.whitehatengineering.com/v1/organizations/org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "max_allowed_memberships": 100 }'
+```
+
+### Response
+
+Returns the updated [Organization object](#the-organization-object).
+
+---
+
+## Delete an organization
+
+```
+DELETE /organizations/{org_id}
+```
+
+Soft-deletes the organization and removes all of its memberships.
+
+### Request
+
+```bash
+curl -X DELETE "https://api.whitehatengineering.com/v1/organizations/org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+```json
+{
+  "id": "org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+  "object": "organization",
+  "deleted": true
+}
+```
+
+---
+
+## List organization memberships
+
+```
+GET /organizations/{org_id}/memberships
+```
+
+### Query parameters
+
+| Parameter | Type    | Description                                |
+|-----------|---------|--------------------------------------------|
+| `limit`   | integer | Page size (default `10`, max `500`).      |
+| `offset`  | integer | Records to skip (default `0`).            |
+
+### Request
+
+```bash
+curl "https://api.whitehatengineering.com/v1/organizations/org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk/memberships" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+```json
+{
+  "data": [
+    {
+      "id": "orgmem_2a1Bc3Df4Eg5Hh6Ii7Jj",
+      "object": "organization_membership",
+      "organization_id": "org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+      "user_id": "user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+      "role": "org:admin",
+      "permissions": ["jfk:read", "jfk:write", "code:read"],
+      "created_at": 1701302400000,
+      "updated_at": 1718841600000
+    }
+  ],
+  "total_count": 42
+}
+```
+
+---
+
+## Add a member
+
+```
+POST /organizations/{org_id}/memberships
+```
+
+Adds a user to the organization with a role. The role determines the RBAC permissions resolved
+for the member (see [Roles and RBAC](#roles-and-rbac-permissions)).
+
+### Body parameters
+
+| Parameter | Type   | Description                                       |
+|-----------|--------|---------------------------------------------------|
+| `user_id` | string | The user to add (`user_...`). Required.           |
+| `role`    | string | Role to assign (e.g. `org:admin`). Required.      |
+
+### Request
+
+```bash
+curl -X POST "https://api.whitehatengineering.com/v1/organizations/org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk/memberships" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "user_id": "user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk", "role": "org:member" }'
+```
+
+### Response
+
+Returns the created [Organization Membership object](#the-organization-membership-object).
+
+---
+
+## Update a member's role
+
+```
+PATCH /organizations/{org_id}/memberships/{user_id}
+```
+
+### Body parameters
+
+| Parameter | Type   | Description                |
+|-----------|--------|----------------------------|
+| `role`    | string | The new role. Required.    |
+
+### Request
+
+```bash
+curl -X PATCH "https://api.whitehatengineering.com/v1/organizations/org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk/memberships/user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "role": "org:admin" }'
+```
+
+### Response
+
+Returns the updated [Organization Membership object](#the-organization-membership-object).
+
+---
+
+## Remove a member
+
+```
+DELETE /organizations/{org_id}/memberships/{user_id}
+```
+
+Removes the user from the organization. Their app-wide user record is unaffected; only the
+membership and its resolved permissions are removed.
+
+### Request
+
+```bash
+curl -X DELETE "https://api.whitehatengineering.com/v1/organizations/org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk/memberships/user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+Returns the removed [Organization Membership object](#the-organization-membership-object) with
+`"deleted": true`.
+
+---
+
+## Roles and RBAC permissions
+
+A **role** is a named bundle of permissions. A **permission** uses the `<feature>:<action>`
+convention — for example `code:read`, `jfk:write`, or the wildcard `*:read`. When you assign a
+role to a membership, OpenAuthFederated resolves the role into its permission set and includes it
+in the member's authorization context (and, via a [JWT template](./jwt-templates.mdx), in their
+session tokens for downstream services).
+
+Typical mapping for the Google Workspace reference deployment:
+
+| Upstream Workspace group       | Org role      | Resolved permissions                      |
+|--------------------------------|---------------|-------------------------------------------|
+| `engineering-admins@…`         | `org:admin`   | `*:read`, `*:write`                       |
+| `engineering@…`                | `org:member`  | `code:read`, `code:write`, `jfk:read`     |
+| `auditors@…`                   | `org:viewer`  | `*:read`                                  |
+
+Upstream groups are **inputs** only. The mapping table and the permission definitions are stored
+authoritatively in your backend/DB, so you can change authorization without touching the IdP and
+without being locked into the provider's group model. Enforce permissions on **both** the front
+end (for UX) and the backend (authoritative).
+
+## Next steps
+
+* [JWT Templates](./jwt-templates.mdx) — inject roles/permissions into session tokens.
+* [Users](./users.mdx) — find users by `organization_id`.
+* [Invitations](./invitations.mdx) — invite people into an organization.

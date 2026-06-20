@@ -1,0 +1,316 @@
+---
+title: Client Hooks
+description: React hooks for reading auth state, users, sessions, organizations, and step-up reverification.
+---
+
+# Client Hooks
+
+These hooks come from `@auth/react` (and are re-exported by `@auth/nextjs`). They read the
+reactive auth state established by `<AuthProvider>` and must be called inside a component
+tree wrapped by it. Most expose an `isLoaded` flag — always check it before reading the
+rest, since auth state hydrates asynchronously.
+
+> Brandless names like `useUser`, `useAuth`, and `useSession` are kept as-is. The only
+> renamed hook is `useOpenAuth` (the imperative client object).
+
+## `useUser`
+
+Access and manage the current user's profile data.
+
+### Returns
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `isLoaded` | `boolean` | Whether user data has finished loading. |
+| `isSignedIn` | `boolean` | Whether a user is signed in. |
+| `user` | `User \| null` | The signed-in user, or `null`. Includes `id`, `firstName`, `lastName`, `primaryEmailAddress`, `imageUrl`, `publicMetadata`, and `update()` / `reload()` methods. |
+
+```tsx
+import { useUser } from '@auth/react'
+
+export function Greeting() {
+  const { isLoaded, isSignedIn, user } = useUser()
+  if (!isLoaded) return <div>Loading…</div>
+  if (!isSignedIn) return <div>Please sign in.</div>
+  return <div>Welcome, {user.firstName} ({user.primaryEmailAddress?.emailAddress})</div>
+}
+```
+
+## `useAuth`
+
+Access authentication state and tokens without hydrating the full user profile. Lighter
+than `useUser`.
+
+### Returns
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `isLoaded` | `boolean` | Whether auth state has loaded. |
+| `isSignedIn` | `boolean` | Whether a user is signed in. |
+| `userId` | `string \| null` | Signed-in user ID. |
+| `sessionId` | `string \| null` | Active server-side session ID. |
+| `orgId` | `string \| null` | Active organization/tenant ID. |
+| `getToken` | `(opts?: { template?: string }) => Promise<string \| null>` | Returns the short-lived JWT access token; refreshes via the rotating HttpOnly cookie when needed. |
+| `has` | `(p: { role?: string; permission?: string }) => boolean` | Checks a mapped role or `<feature>:<action>` permission. |
+| `signOut` | `(opts?: { redirectUrl?: string }) => Promise<void>` | Ends the session and revokes the server-side record. |
+
+```tsx
+import { useAuth } from '@auth/react'
+
+export function CallApi() {
+  const { isSignedIn, getToken, has } = useAuth()
+
+  async function load() {
+    if (!has({ permission: 'code:read' })) return
+    const token = await getToken()
+    await fetch('https://api.whitehatengineering.com/v1/cases', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+  }
+
+  return <button disabled={!isSignedIn} onClick={load}>Load cases</button>
+}
+```
+
+## `useSession`
+
+Access the currently active session record.
+
+### Returns
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `isLoaded` | `boolean` | Whether the session has loaded. |
+| `isSignedIn` | `boolean` | Whether a session is active. |
+| `session` | `Session \| null` | The active session: `id`, `status`, `lastActiveAt`, `expireAt`, the associated `user`, and `getToken()`. |
+
+```tsx
+import { useSession } from '@auth/react'
+
+export function SessionInfo() {
+  const { isLoaded, session } = useSession()
+  if (!isLoaded || !session) return null
+  return <p>Session {session.id} last active {session.lastActiveAt.toLocaleString()}</p>
+}
+```
+
+## `useSessionList`
+
+List all sessions for the current user across devices, and switch or end them.
+
+### Returns
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `isLoaded` | `boolean` | Whether the session list has loaded. |
+| `sessions` | `Session[]` | All active session records for the user. |
+| `setActive` | `(p: { session: string }) => Promise<void>` | Switches the active session. |
+
+```tsx
+import { useSessionList } from '@auth/react'
+
+export function Devices() {
+  const { isLoaded, sessions } = useSessionList()
+  if (!isLoaded) return null
+  return (
+    <ul>
+      {sessions.map((s) => (
+        <li key={s.id}>{s.id} — expires {s.expireAt.toLocaleDateString()}</li>
+      ))}
+    </ul>
+  )
+}
+```
+
+## `useSignIn`
+
+Drive a custom sign-in flow against the upstream IdP. With Google Workspace federation the
+common path is to start the redirect; the hook also exposes the flow state.
+
+### Returns
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `isLoaded` | `boolean` | Whether the sign-in resource is ready. |
+| `signIn` | `SignInResource` | Flow object; `authenticateWithRedirect({ strategy, redirectUrl, redirectUrlComplete })` starts SSO. |
+| `setActive` | `(p: { session: string }) => Promise<void>` | Activates the session created on success. |
+
+```tsx
+import { useSignIn } from '@auth/react'
+
+export function SsoButton() {
+  const { isLoaded, signIn } = useSignIn()
+  if (!isLoaded) return null
+
+  return (
+    <button
+      onClick={() =>
+        signIn.authenticateWithRedirect({
+          strategy: 'oauth_google_workspace',
+          redirectUrl: '/sso-callback',
+          redirectUrlComplete: '/dashboard',
+        })
+      }
+    >
+      Continue with Google Workspace
+    </button>
+  )
+}
+```
+
+## `useSignUp`
+
+The sign-up counterpart. With JIT provisioning, a first valid federated sign-in normally
+creates the user automatically, so most apps render the federated flow rather than a custom
+sign-up. The hook is available for flows that need explicit control.
+
+### Returns
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `isLoaded` | `boolean` | Whether the sign-up resource is ready. |
+| `signUp` | `SignUpResource` | Flow object with `authenticateWithRedirect(...)`. |
+| `setActive` | `(p: { session: string }) => Promise<void>` | Activates the new session. |
+
+```tsx
+import { useSignUp } from '@auth/react'
+
+export function JoinButton() {
+  const { isLoaded, signUp } = useSignUp()
+  if (!isLoaded) return null
+  return (
+    <button
+      onClick={() =>
+        signUp.authenticateWithRedirect({
+          strategy: 'oauth_google_workspace',
+          redirectUrl: '/sso-callback',
+          redirectUrlComplete: '/welcome',
+        })
+      }
+    >
+      Join with your work account
+    </button>
+  )
+}
+```
+
+## `useOrganization`
+
+Access the active organization/tenant and its membership.
+
+### Returns
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `isLoaded` | `boolean` | Whether org data has loaded. |
+| `organization` | `Organization \| null` | Active org: `id`, `name`, `slug`, `membersCount`, `publicMetadata`. |
+| `membership` | `OrganizationMembership \| null` | The current user's membership, including their role. |
+
+```tsx
+import { useOrganization } from '@auth/react'
+
+export function OrgHeader() {
+  const { isLoaded, organization, membership } = useOrganization()
+  if (!isLoaded || !organization) return null
+  return <h2>{organization.name} — your role: {membership?.role}</h2>
+}
+```
+
+## `useOrganizationList`
+
+List the organizations the user belongs to and switch the active one.
+
+### Returns
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `isLoaded` | `boolean` | Whether the list has loaded. |
+| `userMemberships` | `PaginatedResource<OrganizationMembership>` | The user's memberships. |
+| `setActive` | `(p: { organization: string }) => Promise<void>` | Switches the active organization. |
+
+```tsx
+import { useOrganizationList } from '@auth/react'
+
+export function OrgPicker() {
+  const { isLoaded, userMemberships, setActive } = useOrganizationList({
+    userMemberships: true,
+  })
+  if (!isLoaded) return null
+  return (
+    <ul>
+      {userMemberships.data?.map((m) => (
+        <li key={m.organization.id}>
+          <button onClick={() => setActive({ organization: m.organization.id })}>
+            {m.organization.name}
+          </button>
+        </li>
+      ))}
+    </ul>
+  )
+}
+```
+
+## `useReverification`
+
+Wrap a sensitive action so the platform requires a fresh, recently-verified session
+(step-up MFA inherited from the upstream IdP) before the action runs. If the session is too
+old, the user is prompted to reverify, then the action retries automatically.
+
+### Returns
+
+A wrapper: `const enhancedAction = useReverification(action)`. Calling `enhancedAction(...)`
+triggers reverification when required, then invokes the original action.
+
+```tsx
+import { useReverification } from '@auth/react'
+
+export function RotateKeysButton() {
+  // Sensitive: rotating signing keys requires a freshly reverified session.
+  const rotateKeys = useReverification(async () => {
+    await fetch('https://api.whitehatengineering.com/v1/keys/rotate', {
+      method: 'POST',
+    })
+  })
+
+  return <button onClick={() => rotateKeys()}>Rotate signing keys</button>
+}
+```
+
+## `useOpenAuth`
+
+Access the imperative client **Auth object** for actions not covered by the focused hooks —
+opening UI flows, signing out, and accessing low-level resources.
+
+### Returns — the Auth object
+
+| Member | Type | Description |
+| --- | --- | --- |
+| `loaded` | `boolean` | Whether the client has initialized. |
+| `user` | `User \| null` | The signed-in user. |
+| `session` | `Session \| null` | The active session. |
+| `organization` | `Organization \| null` | The active organization. |
+| `openSignIn(opts?)` | `(opts?) => void` | Opens the sign-in flow (modal or redirect). |
+| `openUserProfile(opts?)` | `(opts?) => void` | Opens the account-management UI. |
+| `signOut(opts?)` | `(opts?) => Promise<void>` | Ends the session and revokes it server-side. |
+
+```tsx
+import { useOpenAuth } from '@auth/react'
+
+export function AccountMenu() {
+  const auth = useOpenAuth()
+  return (
+    <>
+      <button onClick={() => auth.openUserProfile()}>Account</button>
+      <button onClick={() => auth.signOut({ redirectUrl: '/' })}>Sign out</button>
+    </>
+  )
+}
+```
+
+## Next steps
+
+- [Next.js SDK reference](./nextjs.mdx)
+- [Component overview](./components/overview.mdx)
+- [Authentication components](./components/authentication.mdx)
+- [Control components](./components/control.mdx)
+- [Frontend API overview](../apis/frontend/overview.mdx)

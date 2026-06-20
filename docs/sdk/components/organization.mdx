@@ -1,0 +1,123 @@
+---
+title: Organization Components
+description: Drop-in components for switching, creating, listing, and managing organizations in a multi-tenant app.
+---
+
+# Organization Components
+
+These components power OpenAuthFederated's organizations/multi-tenancy model. An organization
+maps to a tenant; members carry roles derived from upstream IdP groups, and those roles map
+to `<feature>:<action>` permissions (authoritative in our DB). Mount them inside an
+[`<AuthProvider>`](./control.mdx#authprovider).
+
+## `<OrganizationSwitcher>`
+
+A dropdown for switching the active organization and (optionally) creating new ones. Setting
+the active org updates the `orgId` available throughout the SDK and changes which permissions
+apply.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `hidePersonal` | `boolean` | Hide the personal (no-org) workspace. |
+| `createOrganizationMode` | `'modal' \| 'navigation'` | Open create-org in a modal or navigate. |
+| `createOrganizationUrl` | `string` | Path to the create-org page when navigating. |
+| `organizationProfileMode` | `'modal' \| 'navigation'` | Open org management in a modal or navigate. |
+| `organizationProfileUrl` | `string` | Path to `<OrganizationProfile>`. |
+| `afterSelectOrganizationUrl` | `string` | Redirect after selecting an org. |
+| `appearance` | `Appearance` | Theming overrides. |
+
+```tsx
+import { OrganizationSwitcher } from '@auth/react'
+
+export function TenantPicker() {
+  return (
+    <OrganizationSwitcher
+      hidePersonal
+      afterSelectOrganizationUrl="/dashboard"
+      createOrganizationMode="modal"
+    />
+  )
+}
+```
+
+## `<OrganizationProfile>`
+
+A full management UI for a single organization: members, invitations, roles, and org
+settings. Visible actions respect the current member's role and permissions.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `routing` | `'hash' \| 'path' \| 'virtual'` | How the multi-tab UI is routed. |
+| `path` | `string` | Base path when `routing="path"` (e.g. `/organization`). |
+| `appearance` | `Appearance` | Theming overrides. |
+
+Add custom tabs with `<OrganizationProfile.Page>`.
+
+```tsx
+// app/organization/[[...organization]]/page.tsx
+import { OrganizationProfile } from '@auth/nextjs'
+
+export default function OrgPage() {
+  return <OrganizationProfile routing="path" path="/organization" />
+}
+```
+
+## `<CreateOrganization>`
+
+A standalone form for creating a new organization/tenant.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `routing` | `'hash' \| 'path' \| 'virtual'` | Flow routing strategy. |
+| `path` | `string` | Base path when `routing="path"`. |
+| `afterCreateOrganizationUrl` | `string` | Redirect after the org is created. |
+| `appearance` | `Appearance` | Theming overrides. |
+
+```tsx
+import { CreateOrganization } from '@auth/react'
+
+export default function NewOrg() {
+  return <CreateOrganization afterCreateOrganizationUrl="/dashboard" />
+}
+```
+
+## `<OrganizationList>`
+
+Lists the organizations the user belongs to so they can select one (or create a new one).
+Useful as a post-sign-in landing page for multi-tenant users.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `hidePersonal` | `boolean` | Hide the personal workspace entry. |
+| `afterSelectOrganizationUrl` | `string` | Redirect after selecting an org. |
+| `afterCreateOrganizationUrl` | `string` | Redirect after creating an org. |
+| `appearance` | `Appearance` | Theming overrides. |
+
+```tsx
+import { OrganizationList } from '@auth/react'
+
+export default function ChooseOrg() {
+  return (
+    <OrganizationList
+      hidePersonal
+      afterSelectOrganizationUrl="/dashboard"
+      afterCreateOrganizationUrl="/dashboard"
+    />
+  )
+}
+```
+
+## Next steps
+
+- [Control components — `<Protect>`](./control.mdx#protect)
+- [Client hooks — `useOrganization`, `useOrganizationList`](../hooks.mdx)
+- [User components](./user.mdx)
+- [Backend SDK — `authClient.organizations`](../backend-sdk.mdx)

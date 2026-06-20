@@ -1,0 +1,192 @@
+---
+title: Roles & permissions (RBAC)
+description: Define <feature>:<action> permissions, group them into roles, map upstream IdP groups to roles, and surface them in session JWT claims.
+---
+
+# Roles & permissions (RBAC)
+
+OpenAuthFederated's **RBAC** model keeps the **authoritative authorization model in our own
+database**, using the upstream IdP's groups only as *inputs*. This avoids lock-in: you can
+re-map groups, rename roles, or change permissions without touching Google Workspace.
+
+The model has three layers:
+
+1. **Permissions** — atomic `<feature>:<action>` grants, e.g. `code:read`, `jfk:write`, `*:read`.
+2. **Roles** — named sets of permissions, e.g. `Engineer`, `Viewer`, `Admin`.
+3. **Assignments** — roles attached to a user's [org membership](./organizations.mdx), usually
+   derived from [IdP group mappings](#map-upstream-idp-groups-to-roles).
+
+At sign-in, resolved permissions are flattened into the user's session and exposed as JWT claims
+your app enforces.
+
+## The Permission object
+
+A permission is the string `<feature>:<action>`. `feature` and `action` may each be `*` for
+wildcards (`*:read` = read everything; `code:*` = all actions on `code`).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Unique identifier, prefixed `perm_`. |
+| `object` | string | Always `permission`. |
+| `key` | string | The `<feature>:<action>` string. |
+| `feature` | string | Feature/resource (e.g. `code`, `jfk`, `*`). |
+| `action` | string | Action (e.g. `read`, `write`, `*`). |
+| `description` | string | Human description. |
+| `created_at` | string | ISO 8601 timestamp. |
+
+```json
+{
+  "id": "perm_code_read",
+  "object": "permission",
+  "key": "code:read",
+  "feature": "code",
+  "action": "read",
+  "description": "Read access to the code feature",
+  "created_at": "2026-06-10T12:00:00Z"
+}
+```
+
+### Manage permissions
+
+`GET /v1/permissions` · `POST /v1/permissions` · `PATCH /v1/permissions/{perm_id}` ·
+`DELETE /v1/permissions/{perm_id}`
+
+```bash
+curl https://api.whitehatengineering.com/v1/permissions \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "key": "jfk:write", "description": "Write access to the JFK feature" }'
+```
+
+## The Role object
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Unique identifier, prefixed `role_`. |
+| `object` | string | Always `role`. |
+| `name` | string | Display name (e.g. `Engineer`). |
+| `key` | string | Stable handle (e.g. `engineer`). |
+| `organization_id` | string \| null | Org-scoped, or `null` for a global role. |
+| `permissions` | array | Permission keys this role grants. |
+| `created_at` | string | ISO 8601 timestamp. |
+| `updated_at` | string | ISO 8601 timestamp. |
+
+```json
+{
+  "id": "role_eng",
+  "object": "role",
+  "name": "Engineer",
+  "key": "engineer",
+  "organization_id": "org_2a9f1c0bd3e4",
+  "permissions": ["code:read", "code:write", "jfk:read"],
+  "created_at": "2026-06-10T12:05:00Z",
+  "updated_at": "2026-06-18T09:00:00Z"
+}
+```
+
+### Manage roles
+
+`GET /v1/roles`
+
+```bash
+curl "https://api.whitehatengineering.com/v1/roles?organization_id=org_2a9f1c0bd3e4" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+`POST /v1/roles`
+
+```bash
+curl https://api.whitehatengineering.com/v1/roles \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Engineer",
+    "key": "engineer",
+    "organization_id": "org_2a9f1c0bd3e4",
+    "permissions": ["code:read", "code:write", "jfk:read"]
+  }'
+```
+
+`PATCH /v1/roles/{role_id}` — change the permission set or name.
+
+```bash
+curl -X PATCH https://api.whitehatengineering.com/v1/roles/role_viewer \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "permissions": ["*:read"] }'
+```
+
+`DELETE /v1/roles/{role_id}` — removes the role and unassigns it from memberships.
+
+## Assign roles to org memberships
+
+`POST /v1/organizations/{org_id}/memberships/{user_id}/roles`
+
+```bash
+curl https://api.whitehatengineering.com/v1/organizations/org_2a9f1c0bd3e4/memberships/usr_5f6a7b8c/roles \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "role_ids": ["role_eng"] }'
+```
+
+Remove with `DELETE /v1/organizations/{org_id}/memberships/{user_id}/roles/{role_id}`. Changes
+emit an `organizationMembership.updated` [webhook](./webhooks.mdx) and take effect on the next
+token refresh.
+
+## Map upstream IdP groups to roles
+
+Most assignments are automatic: map Google Workspace groups to roles on the
+[SSO connection](./sso-connections.mdx#5-map-workspace-groups-to-roles). On each sign-in, the
+`groups` attribute from the assertion (SAML) or claim (OIDC) is matched to these mappings, and
+the resulting roles' permissions become the session's effective permissions.
+
+```bash
+curl -X PATCH https://api.whitehatengineering.com/v1/sso_connections/conn_4d2f8a \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_mapping": [
+      { "idp_group": "gws-engineering@whitehatengineering.com", "role_id": "role_eng" },
+      { "idp_group": "gws-readonly@whitehatengineering.com",    "role_id": "role_viewer" }
+    ]
+  }'
+```
+
+Example resolution for `alice@whitehatengineering.com` in `gws-engineering`:
+
+```
+groups: ["gws-engineering@whitehatengineering.com"]
+  → role_eng (Engineer)
+    → permissions: ["code:read", "code:write", "jfk:read"]
+```
+
+If a user matches no mapping, they receive the org's
+[`default_role_id`](./organizations.mdx#organization-settings) (if set).
+
+## Permissions in session / JWT claims
+
+Resolved roles and a flattened, de-duplicated permission set are embedded in the short-lived
+access JWT and returned to your app:
+
+```json
+{
+  "sub": "usr_5f6a7b8c",
+  "org": "org_2a9f1c0bd3e4",
+  "email": "alice@whitehatengineering.com",
+  "roles": ["engineer"],
+  "permissions": ["code:read", "code:write", "jfk:read"],
+  "exp": 1782328911
+}
+```
+
+Your backend enforces these authoritatively (the [Backend API](../backend/overview.mdx) ships
+RBAC guards), and the [Frontend API](../frontend/overview.mdx) uses them to show/hide UI.
+Wildcards expand at check time: a user with `*:read` satisfies a `code:read` requirement; a user
+with `code:*` satisfies `code:write`. Always enforce on the backend — front-end checks are UX
+only.
+
+## Next steps
+
+* [SSO connections](./sso-connections.mdx) — where group-to-role mappings live.
+* [Organizations](./organizations.mdx) — set a default role for JIT users.
+* [Audit logs](./audit-logs.mdx) — review `permission_denied` events.

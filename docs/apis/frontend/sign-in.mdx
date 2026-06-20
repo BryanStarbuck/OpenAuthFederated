@@ -1,0 +1,285 @@
+---
+title: Sign-in flow
+description: Create and drive a SignIn attempt — federated SSO/SAML/OIDC redirect (default Google Workspace), first-factor and second-factor (MFA) verification, and status lifecycle.
+---
+
+# Sign-in flow
+
+The **SignIn** object is a single, stateful attempt to authenticate an **existing** user. You
+create it, advance it through one or more verification factors, and when its `status` reaches
+`complete` a [Session](./client-and-sessions.mdx#the-session-object) is created on the Client.
+
+In OpenAuthFederated the **primary path is federated**: the user is redirected to an upstream IdP
+(by default **Google Workspace**) via SAML 2.0 or OIDC, and returns through a callback that
+completes the SignIn. Direct-credential factors exist for non-federated identities, but the
+Google Workspace SSO path below is the canonical flow.
+
+All requests use the Frontend API base URL with the **publishable key** + session cookie.
+
+```
+https://auth.whitehatengineering.com/v1
+```
+
+## The SignIn object
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique identifier. Prefixed `sia_`. |
+| `object` | string | Always `sign_in`. |
+| `status` | string | Lifecycle status — see [statuses](#status-lifecycle). |
+| `identifier` | string \| null | The identifier being authenticated (email/username). |
+| `supported_identifiers` | array&lt;string&gt; | Identifier types accepted by this instance. |
+| `supported_first_factors` | array&lt;object&gt; | First-factor strategies available for this identity. |
+| `supported_second_factors` | array&lt;object&gt; | Second-factor strategies, if MFA applies. |
+| `first_factor_verification` | object \| null | State of the current/last first-factor attempt (includes `status`, `strategy`, and `external_verification_redirect_url` for SSO). |
+| `second_factor_verification` | object \| null | State of the current/last second-factor attempt. |
+| `created_session_id` | string \| null | Set once `status` is `complete`. |
+| `user_data` | object \| null | Minimal public profile preview for UI. |
+| `created_at` | integer | Unix ms timestamp. |
+| `updated_at` | integer | Unix ms timestamp. |
+
+## Status lifecycle
+
+| Status | Meaning |
+|---|---|
+| `needs_identifier` | No identifier yet; provide one to create the attempt. |
+| `needs_first_factor` | Identifier accepted; complete a first factor (SSO redirect, password, or email code). |
+| `needs_second_factor` | First factor passed; MFA required (inherited from the upstream IdP or a step-up). |
+| `complete` | Verification finished. `created_session_id` is set and a Session now exists. |
+| `abandoned` | The attempt expired or was superseded. |
+
+## Federated sign-in with Google Workspace (recommended)
+
+This is the default path. Strategy values are `oauth_google` (OIDC) or `saml` (SAML 2.0 via the
+Google Workspace custom app). Other upstream OIDC providers use `oauth_<provider>`.
+
+### 1. Create the SignIn and prepare the SSO strategy
+
+You can create the attempt and request the redirect in a single call by passing the `strategy`
+and a `redirect_url` (where the IdP returns the user) plus a `redirect_url_complete` (where to
+land after the session is established).
+
+**`POST /v1/client/sign_ins`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sign_ins \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "strategy": "oauth_google",
+    "redirect_url": "https://app.whitehatengineering.com/sso-callback",
+    "redirect_url_complete": "https://app.whitehatengineering.com/dashboard"
+  }'
+```
+
+```json
+{
+  "object": "sign_in",
+  "id": "sia_2dJ3nT4pC",
+  "status": "needs_first_factor",
+  "identifier": null,
+  "supported_first_factors": [
+    { "strategy": "oauth_google" },
+    { "strategy": "saml" }
+  ],
+  "first_factor_verification": {
+    "status": "unverified",
+    "strategy": "oauth_google",
+    "external_verification_redirect_url": "https://accounts.google.com/o/oauth2/v2/auth?client_id=...&hd=whitehatengineering.com&redirect_uri=https%3A%2F%2Fauth.whitehatengineering.com%2Fv1%2Foauth_callback&state=sia_2dJ3nT4pC"
+  },
+  "created_session_id": null,
+  "created_at": 1750420000000,
+  "updated_at": 1750420000000
+}
+```
+
+### 2. Redirect the user to the IdP
+
+Send the browser to `first_factor_verification.external_verification_redirect_url`. The SDK does
+this for you; calling directly, perform a full-page navigation:
+
+```js
+window.location.assign(
+  signIn.first_factor_verification.external_verification_redirect_url
+);
+```
+
+The user authenticates with Google Workspace (including any MFA enforced upstream). Note the `hd`
+parameter scopes the request to your verified domain.
+
+### 3. The IdP callback completes the SignIn
+
+Google redirects back to the OpenAuthFederated callback, which validates the SAML assertion / OIDC
+ID token, **enforces the domain** (verifies the `hd` claim and `email_verified` on the OIDC path;
+verifies the asserted domain on SAML), resolves the user, and then redirects the browser to your
+`redirect_url`. The SDK finalizes by reading the Client; the SignIn is now:
+
+```json
+{
+  "object": "sign_in",
+  "id": "sia_2dJ3nT4pC",
+  "status": "complete",
+  "identifier": "ada@whitehatengineering.com",
+  "first_factor_verification": {
+    "status": "verified",
+    "strategy": "oauth_google"
+  },
+  "created_session_id": "sess_2bG0lR2nA",
+  "updated_at": 1750420050000
+}
+```
+
+A Session now exists on the Client; mint a JWT via
+[`POST /v1/client/sessions/{id}/tokens`](./client-and-sessions.mdx#mint-a-session-token-refresh-the-jwt).
+
+> **Domain enforcement.** If the authenticated identity is outside a verified domain (or the OIDC
+> `hd` / `email_verified` checks fail), the callback refuses to complete the SignIn and returns a
+> domain error instead of a session. See the
+> [sign-up domain enforcement example](./sign-up.mdx#domain-enforcement).
+
+## Non-federated first factor
+
+For identities that authenticate without the upstream IdP, create the attempt with an
+`identifier`, then prepare and attempt a first factor.
+
+### Create with an identifier
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sign_ins \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{ "identifier": "ada@example.com" }'
+```
+
+```json
+{
+  "object": "sign_in",
+  "id": "sia_2eK4oU5qD",
+  "status": "needs_first_factor",
+  "identifier": "ada@example.com",
+  "supported_first_factors": [
+    { "strategy": "password" },
+    { "strategy": "email_code", "email_address_id": "idn_2fL5pV6rE" }
+  ],
+  "first_factor_verification": null,
+  "created_session_id": null,
+  "created_at": 1750420000000,
+  "updated_at": 1750420000000
+}
+```
+
+### Prepare the first factor
+
+Triggers delivery for strategies that need it (e.g. emails a one-time code). Not required for
+`password`.
+
+**`POST /v1/client/sign_ins/{id}/prepare_first_factor`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sign_ins/sia_2eK4oU5qD/prepare_first_factor \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{ "strategy": "email_code", "email_address_id": "idn_2fL5pV6rE" }'
+```
+
+```json
+{
+  "object": "sign_in",
+  "id": "sia_2eK4oU5qD",
+  "status": "needs_first_factor",
+  "first_factor_verification": {
+    "status": "unverified",
+    "strategy": "email_code"
+  },
+  "updated_at": 1750420010000
+}
+```
+
+### Attempt the first factor
+
+Submit the proof (the code, or the password). On success the status advances to
+`needs_second_factor` (if MFA applies) or `complete`.
+
+**`POST /v1/client/sign_ins/{id}/attempt_first_factor`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sign_ins/sia_2eK4oU5qD/attempt_first_factor \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{ "strategy": "email_code", "code": "428193" }'
+```
+
+```json
+{
+  "object": "sign_in",
+  "id": "sia_2eK4oU5qD",
+  "status": "complete",
+  "first_factor_verification": { "status": "verified", "strategy": "email_code" },
+  "created_session_id": "sess_2gM6qW7sF",
+  "updated_at": 1750420020000
+}
+```
+
+## Second factor (MFA)
+
+When `status` is `needs_second_factor`, complete a second factor. MFA is typically inherited from
+the upstream IdP, but the platform also supports step-up reverification for sensitive actions.
+
+### Prepare the second factor
+
+**`POST /v1/client/sign_ins/{id}/prepare_second_factor`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sign_ins/sia_2eK4oU5qD/prepare_second_factor \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{ "strategy": "totp" }'
+```
+
+```json
+{
+  "object": "sign_in",
+  "id": "sia_2eK4oU5qD",
+  "status": "needs_second_factor",
+  "second_factor_verification": { "status": "unverified", "strategy": "totp" },
+  "updated_at": 1750420030000
+}
+```
+
+### Attempt the second factor
+
+**`POST /v1/client/sign_ins/{id}/attempt_second_factor`**
+
+```bash
+curl -X POST https://auth.whitehatengineering.com/v1/client/sign_ins/sia_2eK4oU5qD/attempt_second_factor \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{ "strategy": "totp", "code": "771204" }'
+```
+
+```json
+{
+  "object": "sign_in",
+  "id": "sia_2eK4oU5qD",
+  "status": "complete",
+  "second_factor_verification": { "status": "verified", "strategy": "totp" },
+  "created_session_id": "sess_2gM6qW7sF",
+  "updated_at": 1750420040000
+}
+```
+
+When `status` is `complete`, mint a JWT for the new session and proceed. New users who do not yet
+exist follow the [sign-up flow](./sign-up.mdx) (JIT provisioning).
+
+## Next steps
+
+* [Sign-up flow](./sign-up.mdx)
+* [Client and sessions](./client-and-sessions.mdx)
+* [The current user (me)](./user.mdx)
+* [Frontend API overview](./overview.mdx)

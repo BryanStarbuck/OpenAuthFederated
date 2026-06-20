@@ -1,0 +1,198 @@
+---
+title: Organizations
+description: Tenants/organizations are the unit of multi-tenancy in OpenAuthFederated — each org owns its own SSO connections, verified domains, SCIM config, roles, and settings.
+---
+
+# Organizations
+
+An **Organization** (org) is the unit of **multi-tenancy** in OpenAuthFederated. Every other
+control-plane resource hangs off an org: SSO connections, verified domains, SCIM configuration,
+roles, memberships, webhooks scoped to the tenant, and tenant-level settings. One org typically
+maps to one internal application or one external customer.
+
+For the reference deployment, you create a single org — **White Hat Engineering** — and federate
+it to Google Workspace on `whitehatengineering.com`. A SaaS deployment gating many customers
+would create one org per customer, each with its own connection and domains.
+
+> The Backend API also exposes an [organizations resource](../backend/overview.mdx) for runtime
+> reads (memberships, current org context). This page covers the **platform/admin** side:
+> creating tenants and attaching identity configuration. Names and IDs (`org_...`) are shared
+> across both APIs.
+
+## The Organization object
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Unique identifier, prefixed `org_`. |
+| `object` | string | Always `organization`. |
+| `name` | string | Human-readable display name. |
+| `slug` | string | URL-safe unique handle (e.g. `whitehat`). |
+| `domains` | array | Verified [domains](./domains.mdx) attached to this org. |
+| `sso_connection_id` | string \| null | The active [SSO connection](./sso-connections.mdx) (`conn_...`), if any. |
+| `scim_enabled` | boolean | Whether [SCIM](./scim.mdx) directory sync is active. |
+| `settings` | object | Tenant policy (see [Settings](#organization-settings)). |
+| `members_count` | integer | Number of provisioned members. |
+| `metadata` | object | Arbitrary key/value pairs you attach for your own use. |
+| `created_at` | string | ISO 8601 timestamp. |
+| `updated_at` | string | ISO 8601 timestamp. |
+
+```json
+{
+  "id": "org_2a9f1c0bd3e4",
+  "object": "organization",
+  "name": "White Hat Engineering",
+  "slug": "whitehat",
+  "domains": [
+    { "id": "dmn_71be0c", "domain": "whitehatengineering.com", "status": "verified" }
+  ],
+  "sso_connection_id": "conn_4d2f8a",
+  "scim_enabled": true,
+  "settings": {
+    "enforce_domain": true,
+    "allow_jit_provisioning": true,
+    "session_max_age_seconds": 3600,
+    "require_mfa": "inherit"
+  },
+  "members_count": 42,
+  "metadata": { "cost_center": "eng" },
+  "created_at": "2026-06-01T17:04:22Z",
+  "updated_at": "2026-06-18T09:12:55Z"
+}
+```
+
+## Create an organization
+
+`POST /v1/organizations`
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes | Display name. |
+| `slug` | string | no | URL-safe handle; auto-derived from `name` if omitted. |
+| `settings` | object | no | Initial [settings](#organization-settings). |
+| `metadata` | object | no | Arbitrary key/value pairs. |
+
+```bash
+curl https://api.whitehatengineering.com/v1/organizations \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "White Hat Engineering",
+    "slug": "whitehat",
+    "settings": { "enforce_domain": true, "allow_jit_provisioning": true }
+  }'
+```
+
+```json
+{
+  "id": "org_2a9f1c0bd3e4",
+  "object": "organization",
+  "name": "White Hat Engineering",
+  "slug": "whitehat",
+  "domains": [],
+  "sso_connection_id": null,
+  "scim_enabled": false,
+  "settings": { "enforce_domain": true, "allow_jit_provisioning": true },
+  "members_count": 0,
+  "created_at": "2026-06-20T18:00:00Z",
+  "updated_at": "2026-06-20T18:00:00Z"
+}
+```
+
+## List organizations
+
+`GET /v1/organizations`
+
+| Param | Type | Description |
+| --- | --- | --- |
+| `limit` | integer | Page size (default `20`, max `100`). |
+| `offset` | integer | Page offset. |
+| `slug` | string | Filter by exact slug. |
+
+```bash
+curl "https://api.whitehatengineering.com/v1/organizations?limit=20" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    { "id": "org_2a9f1c0bd3e4", "object": "organization", "name": "White Hat Engineering", "slug": "whitehat" }
+  ],
+  "limit": 20,
+  "offset": 0,
+  "total_count": 1
+}
+```
+
+## Retrieve an organization
+
+`GET /v1/organizations/{org_id}`
+
+```bash
+curl https://api.whitehatengineering.com/v1/organizations/org_2a9f1c0bd3e4 \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+## Update an organization
+
+`PATCH /v1/organizations/{org_id}`
+
+Send only the fields you wish to change.
+
+```bash
+curl -X PATCH https://api.whitehatengineering.com/v1/organizations/org_2a9f1c0bd3e4 \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "settings": { "session_max_age_seconds": 1800 } }'
+```
+
+## Delete an organization
+
+`DELETE /v1/organizations/{org_id}`
+
+Soft-deletes the org and revokes all sessions for its members. Attached connections, domains,
+and SCIM tokens are disabled. This action is recorded in the [audit log](./audit-logs.mdx).
+
+```bash
+curl -X DELETE https://api.whitehatengineering.com/v1/organizations/org_2a9f1c0bd3e4 \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+## Attaching identity configuration
+
+Once the org exists, attach the pieces that make federation work. Each is created against the
+org and referenced by its `org_id`:
+
+* **SSO connection** — `POST /v1/sso_connections` with `organization_id`.
+  See [SSO connections](./sso-connections.mdx).
+* **Domain** — `POST /v1/domains` with `organization_id`, then verify via DNS TXT.
+  See [Domains](./domains.mdx).
+* **SCIM** — enable on the connection to receive directory pushes.
+  See [SCIM](./scim.mdx).
+
+```bash
+# attach a SAML connection to the org
+curl https://api.whitehatengineering.com/v1/sso_connections \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "organization_id": "org_2a9f1c0bd3e4", "type": "saml", "name": "Google Workspace" }'
+```
+
+## Organization settings
+
+The `settings` object is the tenant's identity policy.
+
+| Setting | Type | Default | Description |
+| --- | --- | --- | --- |
+| `enforce_domain` | boolean | `true` | Reject identities outside the org's [verified domains](./domains.mdx#domain-enforcement). |
+| `allow_jit_provisioning` | boolean | `true` | JIT-create a user on first valid sign-in (vs. requiring SCIM pre-provisioning). |
+| `session_max_age_seconds` | integer | `3600` | Lifetime of the rotating refresh session before forced re-auth. |
+| `require_mfa` | string | `inherit` | `inherit` (trust upstream IdP MFA), `always` (require step-up), or `off`. |
+| `default_role_id` | string \| null | `null` | Role (`role_...`) granted to JIT-created members lacking a group mapping. |
+
+## Next steps
+
+* [SSO connections](./sso-connections.mdx) — federate this org to Google Workspace.
+* [Domains](./domains.mdx) — verify and enforce `whitehatengineering.com`.
+* [RBAC](./rbac.mdx) — define the roles members will receive.

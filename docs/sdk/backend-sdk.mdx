@@ -1,0 +1,186 @@
+---
+title: Backend SDK
+description: Reference for @auth/backend — create an authClient with a secret key and administer users, sessions, and organizations.
+---
+
+# Backend SDK (`@auth/backend`)
+
+`@auth/backend` is a typed wrapper over the [Backend REST API](../apis/backend/overview.mdx).
+It runs only in trusted server environments — NestJS services, cron jobs, SCIM handlers,
+webhook processors, CLI scripts — and authenticates with your **secret key**
+(`AUTH_SECRET_KEY`). It is the administrative surface: you act with platform privilege, not
+as an end user.
+
+> Never ship `AUTH_SECRET_KEY` to the browser or embed it in client bundles. It grants full
+> read/write access to your identity data.
+
+## Installation
+
+```bash
+pnpm add @auth/backend
+```
+
+```bash
+# .env
+AUTH_SECRET_KEY=sk_live_...
+AUTH_API_URL=https://api.whitehatengineering.com/v1   # optional override
+```
+
+## `createAuthClient()`
+
+Constructs a configured `authClient`. Pass the secret key explicitly, or let it read
+`AUTH_SECRET_KEY` from the environment.
+
+### Signature
+
+```ts
+function createAuthClient(options: {
+  secretKey?: string        // defaults to process.env.AUTH_SECRET_KEY
+  apiUrl?: string           // defaults to https://api.<your-domain>/v1
+}): AuthClient
+```
+
+### Example
+
+```ts
+import { createAuthClient } from '@auth/backend'
+
+export const authClient = createAuthClient({
+  secretKey: process.env.AUTH_SECRET_KEY,
+  apiUrl: 'https://api.whitehatengineering.com/v1',
+})
+```
+
+A preconfigured singleton named `authClient` is also exported for the common case where the
+secret key is in the environment:
+
+```ts
+import { authClient } from '@auth/backend'
+```
+
+## Users — `authClient.users`
+
+### `getUser(userId)`
+
+```ts
+const user = await authClient.users.getUser('user_2a...')
+console.log(user.primaryEmailAddress, user.publicMetadata)
+```
+
+### `getUserList(params?)`
+
+Paginated, filterable listing.
+
+```ts
+const { data, totalCount } = await authClient.users.getUserList({
+  emailAddress: ['bryan@whitehatengineering.com'],
+  limit: 20,
+  offset: 0,
+  orderBy: '-created_at',
+})
+```
+
+### Lifecycle helpers
+
+```ts
+// Update mapped public metadata (e.g. RBAC overrides authoritative in our DB).
+await authClient.users.updateUserMetadata('user_2a...', {
+  publicMetadata: { roles: ['editor'] },
+})
+
+// Deprovision (soft-delete) — typically driven by SCIM offboarding.
+await authClient.users.deleteUser('user_2a...')
+```
+
+## Sessions — `authClient.sessions`
+
+Inspect and revoke server-side session records. Because sessions are stateful, revocation is
+immediate even though access tokens are short-lived.
+
+```ts
+// List a user's active sessions.
+const { data } = await authClient.sessions.getSessionList({
+  userId: 'user_2a...',
+  status: 'active',
+})
+
+// Force-revoke a single session (e.g. on offboarding).
+await authClient.sessions.revokeSession('sess_9f...')
+
+// Verify a JWT access token without a network round trip on every call.
+const claims = await authClient.verifyToken(bearerToken)
+console.log(claims.sub, claims.org_id, claims.permissions)
+```
+
+## Organizations — `authClient.organizations`
+
+```ts
+// Fetch an organization/tenant.
+const org = await authClient.organizations.getOrganization({
+  organizationId: 'org_3b...',
+})
+
+// List members and their mapped roles.
+const { data: members } = await authClient.organizations.getOrganizationMembershipList({
+  organizationId: 'org_3b...',
+})
+
+// Create an org (multi-tenancy onboarding).
+const created = await authClient.organizations.createOrganization({
+  name: 'White Hat Engineering',
+  slug: 'whitehat',
+})
+```
+
+## `verifyToken()`
+
+Validate a short-lived JWT access token presented by a client and read its claims —
+including the mapped RBAC permissions and the upstream domain (`hd`) claim. Use this to
+gate your own API routes.
+
+```ts
+import { authClient } from '@auth/backend'
+
+export async function requirePermission(token: string, permission: string) {
+  const claims = await authClient.verifyToken(token)
+  const granted: string[] = claims.permissions ?? []
+  const ok =
+    granted.includes(permission) ||
+    granted.includes(`${permission.split(':')[0]}:*`) ||
+    granted.includes('*:read')
+  if (!ok) throw new Error('Forbidden')
+  return claims
+}
+```
+
+## Use in NestJS
+
+```ts
+import { Injectable } from '@nestjs/common'
+import { createAuthClient, type AuthClient } from '@auth/backend'
+
+@Injectable()
+export class IdentityService {
+  private readonly client: AuthClient = createAuthClient({
+    secretKey: process.env.AUTH_SECRET_KEY,
+  })
+
+  findUser(id: string) {
+    return this.client.users.getUser(id)
+  }
+}
+```
+
+## Relationship to the Backend API
+
+Every method above maps to a Backend REST endpoint under `https://api.<your-domain>/v1`.
+The SDK adds typing, retries, pagination helpers, and secret-key auth headers. When you
+need an endpoint the SDK does not yet wrap, call the REST API directly. See the
+[Backend API overview](../apis/backend/overview.mdx).
+
+## Next steps
+
+- [Backend API overview](../apis/backend/overview.mdx)
+- [Next.js SDK reference](./nextjs.mdx)
+- [SDK overview](./overview.mdx)
+- [Platform API overview](../apis/platform/overview.mdx)

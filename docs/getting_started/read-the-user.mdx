@@ -1,0 +1,153 @@
+---
+title: Read the User
+description: Access the current user and session on the server and the client with OpenAuthFederated.
+---
+
+OpenAuthFederated gives you the current user and session in two contexts: on the **server** (Server Components, Route Handlers, Server Actions) with `auth()` and `currentUser()`, and on the **client** (React components) with the `useUser()` and `useAuth()` hooks. Both require the [middleware](./protect-routes.mdx) and the `<AuthProvider>` from the [quickstart](./quickstart-nextjs.mdx).
+
+## On the server
+
+### `auth()` — session and authorization
+
+`auth()` returns the lightweight session context without a network round-trip: `userId`, `sessionId`, `isAuthenticated`, `getToken()`, `has()`, and `redirectToSignIn()`. It only works server-side.
+
+```tsx
+// app/dashboard/page.tsx
+import { auth } from '@auth/nextjs/server'
+
+export default async function Page() {
+  const { isAuthenticated, redirectToSignIn, userId } = await auth()
+
+  if (!isAuthenticated) return redirectToSignIn()
+
+  return <h1>Hello, {userId}</h1>
+}
+```
+
+### `currentUser()` — the full user record
+
+`currentUser()` returns the full backend User object (name, email, metadata). It calls the Backend API, so it makes a network request (deduped per request) and counts toward your Backend API rate limit. Use it when you need profile fields, not just the ID.
+
+```tsx
+// app/profile/page.tsx
+import { currentUser } from '@auth/nextjs/server'
+
+export default async function Page() {
+  const user = await currentUser()
+
+  if (!user) return <div>Not signed in</div>
+
+  return <div>Hello {user?.firstName}</div>
+}
+```
+
+> Don't pass the entire `currentUser()` object to the client — it can include private metadata. Forward only the specific fields the browser needs.
+
+### `getToken()` — call your own API
+
+Use `getToken()` from `auth()` to mint a short-lived JWT for authenticated calls to your Backend API.
+
+```tsx
+// app/reports/page.tsx
+import { auth } from '@auth/nextjs/server'
+
+export default async function Page() {
+  const { isAuthenticated, getToken, redirectToSignIn } = await auth()
+
+  if (!isAuthenticated) return redirectToSignIn()
+
+  const token = await getToken()
+  const res = await fetch('https://api.whitehatengineering.com/v1/reports', {
+    headers: { Authorization: `Bearer ${token}` },
+  })
+  const reports = await res.json()
+
+  return <pre>{JSON.stringify(reports, null, 2)}</pre>
+}
+```
+
+### Authorization check on the server
+
+`has()` resolves `<feature>:<action>` permissions and roles mapped from Google Workspace groups.
+
+```tsx
+// app/code/page.tsx
+import { auth } from '@auth/nextjs/server'
+
+export default async function Page() {
+  const { has } = await auth()
+
+  if (!has({ permission: 'code:read' })) {
+    return <div>You don't have access to this area.</div>
+  }
+
+  return <h1>Codebase dashboard</h1>
+}
+```
+
+## On the client
+
+Client hooks come from `@auth/react`. Always handle the loading and signed-out states before reading user data — the auth state hydrates asynchronously in the browser.
+
+### `useUser()` — user profile and state
+
+Returns `isLoaded`, `isSignedIn`, and the `user` object.
+
+```tsx
+'use client'
+import { useUser } from '@auth/react'
+
+export default function ProfileCard() {
+  const { isLoaded, isSignedIn, user } = useUser()
+
+  if (!isLoaded) return <div>Loading...</div>
+  if (!isSignedIn) return <div>Sign in to view this page</div>
+
+  return (
+    <div>
+      <p>First name: {user.firstName}</p>
+      <p>Last name: {user.lastName}</p>
+    </div>
+  )
+}
+```
+
+### `useAuth()` — session, tokens, and permissions
+
+Returns `isLoaded`, `isSignedIn`, `userId`, `sessionId`, `getToken()`, `has()`, and `signOut()`. Use it to call your API with a Bearer token and to gate UI by permission.
+
+```tsx
+'use client'
+import { useAuth } from '@auth/react'
+
+export default function ProtectedPanel() {
+  const { isLoaded, isSignedIn, userId, sessionId, getToken, has } = useAuth()
+
+  const fetchProtectedData = async () => {
+    const token = await getToken()
+    const res = await fetch('https://api.whitehatengineering.com/v1/data', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    return res.json()
+  }
+
+  if (!isLoaded) return <div>Loading...</div>
+  if (!isSignedIn) return <div>Sign in required</div>
+  if (!has({ permission: 'code:read' })) return <div>Unauthorized</div>
+
+  return (
+    <div>
+      <p>User {userId} • Session {sessionId}</p>
+      <button onClick={fetchProtectedData}>Fetch data</button>
+    </div>
+  )
+}
+```
+
+> Client-side `has()` checks are for showing and hiding UI. They are not a security boundary — always re-check permissions on the server and in [middleware](./protect-routes.mdx).
+
+## Next steps
+
+- [Protect routes](./protect-routes.mdx) — enforce these checks before pages render.
+- [Environment variables](./environment-variables.mdx) — keys behind the Frontend and Backend APIs.
+- [Deploy](./deploy.mdx) — map groups to the roles `has()` evaluates.

@@ -1,0 +1,246 @@
+---
+title: Next.js SDK
+description: Server-side reference for @auth/nextjs — authMiddleware, auth(), currentUser(), getAuth(), and buildAuthProps().
+---
+
+# Next.js SDK (`@auth/nextjs`)
+
+`@auth/nextjs` is the full-stack SDK for OpenAuthFederated. This page covers the
+**server-side** surface: the middleware that protects routes, and the helpers that read
+the authenticated identity inside Server Components, Route Handlers, Server Actions, and
+Pages Router code. For the client hooks and UI components re-exported by this package, see
+the [client hooks reference](./hooks.mdx) and [component overview](./components/overview.mdx).
+
+## Installation
+
+```bash
+pnpm add @auth/nextjs
+```
+
+```bash
+# .env.local
+NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.whitehatengineering.com
+AUTH_SECRET_KEY=sk_live_...
+```
+
+## `authMiddleware()`
+
+Integrates OpenAuthFederated into your Next.js request pipeline. It runs on every matched
+request, attaches the auth context, and is the place to declare which routes require a
+signed-in user from the upstream IdP.
+
+### Signature
+
+```ts
+function authMiddleware(
+  handler?: (auth: AuthFn, req: NextRequest) => Response | Promise<Response> | void,
+  options?: AuthMiddlewareOptions,
+): NextMiddleware
+```
+
+### Example
+
+```ts
+// middleware.ts
+import { authMiddleware, createRouteMatcher } from '@auth/nextjs/server'
+
+// Anything under /dashboard or /admin requires authentication.
+const isProtectedRoute = createRouteMatcher(['/dashboard(.*)', '/admin(.*)'])
+
+export default authMiddleware(async (auth, req) => {
+  if (isProtectedRoute(req)) {
+    // Enforces a signed-in whitehatengineering.com Workspace user;
+    // redirects to the federated sign-in flow if not.
+    await auth.protect()
+  }
+})
+
+export const config = {
+  matcher: ['/((?!_next|.*\\..*).*)', '/(api|trpc)(.*)'],
+}
+```
+
+## `createRouteMatcher()`
+
+Builds a predicate that tests a request path against one or more glob patterns. Use it to
+group routes for protection inside `authMiddleware()`.
+
+```ts
+import { createRouteMatcher } from '@auth/nextjs/server'
+
+const isAdminRoute = createRouteMatcher(['/admin(.*)'])
+// isAdminRoute(req) === true for /admin, /admin/users, etc.
+```
+
+## `auth()`
+
+The primary server helper in the App Router. Call it (and `await` it) inside Server
+Components, Route Handlers, and Server Actions to read the current **Auth object**.
+
+### Returns — the Auth object
+
+| Property | Type | Description |
+| --- | --- | --- |
+| `userId` | `string \| null` | ID of the signed-in user, or `null` if signed out. |
+| `sessionId` | `string \| null` | ID of the active server-side session record (revocable). |
+| `orgId` | `string \| null` | Active organization/tenant ID, if any. |
+| `sessionClaims` | `object \| null` | Decoded claims from the short-lived JWT access token (includes mapped roles/permissions and the upstream `hd` domain). |
+| `isAuthenticated` | `boolean` | `true` when a valid session is present. |
+| `redirectToSignIn(opts?)` | `(opts?: { returnBackUrl?: string }) => never` | Redirects to the federated sign-in flow. |
+| `has(params)` | `(params: { role?: string; permission?: string }) => boolean` | Checks a mapped RBAC role or `<feature>:<action>` permission. |
+| `getToken(opts?)` | `(opts?: { template?: string }) => Promise<string \| null>` | Returns the current JWT access token (or a custom template token). |
+| `protect(opts?)` | `(opts?: ProtectOptions) => Promise<Auth>` | Enforces auth/authorization. Returns the Auth object if allowed; responds `404` if authenticated-but-unauthorized; redirects to sign-in if unauthenticated. |
+
+`protect()` accepts `{ role?, permission?, has?, unauthorizedUrl?, unauthenticatedUrl? }`.
+
+### Example — Server Component
+
+```tsx
+// app/dashboard/page.tsx
+import { auth } from '@auth/nextjs/server'
+
+export default async function DashboardPage() {
+  const { isAuthenticated, redirectToSignIn, userId, has } = await auth()
+
+  if (!isAuthenticated) {
+    return redirectToSignIn({ returnBackUrl: '/dashboard' })
+  }
+
+  const canWriteJfk = has({ permission: 'jfk:write' })
+
+  return (
+    <main>
+      <h1>Signed in as {userId}</h1>
+      {canWriteJfk && <NewCaseButton />}
+    </main>
+  )
+}
+```
+
+### Example — Route Handler
+
+```ts
+// app/api/cases/route.ts
+import { auth } from '@auth/nextjs/server'
+import { NextResponse } from 'next/server'
+
+export async function GET() {
+  const { userId, has, getToken } = await auth()
+  if (!userId) {
+    return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  }
+  if (!has({ permission: 'code:read' })) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+  }
+
+  // Forward the user's access token to a downstream service.
+  const token = await getToken()
+  return NextResponse.json({ ok: true, token })
+}
+```
+
+### Example — Server Action with `protect()`
+
+```ts
+// app/admin/actions.ts
+'use server'
+
+import { auth } from '@auth/nextjs/server'
+
+export async function deactivateUser(targetUserId: string) {
+  // Requires the mapped admin permission; otherwise 404 / redirect.
+  await auth.protect({ permission: 'users:write' })
+
+  // ...perform the privileged action
+}
+```
+
+## `currentUser()`
+
+Returns the full **User** object for the signed-in user (not just the ID), fetching it on
+the server. Returns `null` when no user is signed in. Use it when you need profile fields
+(name, email, image, public metadata) rather than just `userId`.
+
+```tsx
+// app/profile/page.tsx
+import { currentUser } from '@auth/nextjs/server'
+
+export default async function ProfilePage() {
+  const user = await currentUser()
+  if (!user) return <p>Not signed in.</p>
+
+  return (
+    <section>
+      <img src={user.imageUrl} alt="" />
+      <h1>{user.firstName} {user.lastName}</h1>
+      <p>{user.primaryEmailAddress?.emailAddress}</p>
+    </section>
+  )
+}
+```
+
+> `auth()` is lightweight — it reads claims from the session JWT. `currentUser()` makes a
+> round trip to the Backend API to hydrate the full profile. Prefer `auth()` when the ID
+> and claims are enough.
+
+## Pages Router — `getAuth()` and `buildAuthProps()`
+
+In the Pages Router, read auth from API routes and `getServerSideProps` with `getAuth()`,
+and pass the auth context down to `<AuthProvider>` on the client with `buildAuthProps()`.
+
+### `getAuth()`
+
+```ts
+// pages/api/me.ts
+import { getAuth } from '@auth/nextjs/server'
+import type { NextApiRequest, NextApiResponse } from 'next'
+
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+  const { userId, sessionId, orgId, has } = getAuth(req)
+  if (!userId) return res.status(401).json({ error: 'Unauthorized' })
+  return res.status(200).json({ userId, sessionId, orgId, admin: has({ role: 'admin' }) })
+}
+```
+
+### `buildAuthProps()`
+
+```tsx
+// pages/dashboard.tsx
+import { getAuth, buildAuthProps } from '@auth/nextjs/server'
+import type { GetServerSideProps } from 'next'
+
+export const getServerSideProps: GetServerSideProps = async (ctx) => {
+  const { userId } = getAuth(ctx.req)
+  if (!userId) {
+    return { redirect: { destination: '/sign-in', permanent: false } }
+  }
+  // Serialize auth state so <AuthProvider> hydrates without a flash.
+  return { props: { ...buildAuthProps(ctx.req) } }
+}
+
+export default function Dashboard() {
+  return <h1>Dashboard</h1>
+}
+```
+
+```tsx
+// pages/_app.tsx
+import { AuthProvider } from '@auth/nextjs'
+import type { AppProps } from 'next/app'
+
+export default function App({ Component, pageProps }: AppProps) {
+  return (
+    <AuthProvider {...pageProps}>
+      <Component {...pageProps} />
+    </AuthProvider>
+  )
+}
+```
+
+## Next steps
+
+- [Client hooks reference](./hooks.mdx)
+- [Component overview](./components/overview.mdx)
+- [Control components — `<Protect>` and `<AuthProvider>`](./components/control.mdx)
+- [Backend SDK reference](./backend-sdk.mdx)
+- [Backend API overview](../apis/backend/overview.mdx)

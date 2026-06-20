@@ -1,0 +1,87 @@
+---
+title: Deploy to Production
+description: Go live with a custom domain, a Google Workspace SAML/OIDC connection, domain enforcement, MFA, and offboarding.
+---
+
+Going to production means pointing your app at a live OpenAuthFederated instance, federating to Google Workspace, and turning on the enforcement and revocation controls that make the platform safe. This page walks through the reference deployment that gates an internal app to the `whitehatengineering.com` Google Workspace — only active employees can sign in, with no app passwords, no social logins, and no anonymous access.
+
+## 1. Switch to live keys and a custom domain
+
+Production uses `*_live_*` keys and your own auth/API hostnames. Set these in your hosting provider's environment configuration (never commit secrets).
+
+```env
+NEXT_PUBLIC_AUTH_PUBLISHABLE_KEY=pk_live_your_publishable_key
+AUTH_SECRET_KEY=sk_live_your_secret_key
+
+NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.whitehatengineering.com
+AUTH_BACKEND_API=https://api.whitehatengineering.com/v1
+```
+
+Configure DNS so the Frontend API resolves at `auth.whitehatengineering.com` and the Backend API at `api.whitehatengineering.com`, each served over HTTPS only. See [Environment variables](./environment-variables.mdx) for the full list.
+
+## 2. Register a SAML / OIDC connection to Google Workspace
+
+OpenAuthFederated is the Service Provider; Google Workspace is the Identity Provider. SAML 2.0 via a Google Workspace custom app is the go-forward default; OIDC is an acceptable equivalent with the same domain restriction.
+
+**SAML 2.0 (recommended):**
+
+1. In OpenAuthFederated → **Connections → New SAML connection**, copy the SP **ACS (Assertion Consumer Service) URL** and **Entity ID**.
+2. In the Google Admin console → **Apps → Web and mobile apps → Add custom SAML app**.
+3. Paste the ACS URL and Entity ID; download Google's IdP metadata (or copy the SSO URL, Entity ID, and X.509 certificate) back into OpenAuthFederated.
+4. Configure attribute mapping: `email`, `first_name`, `last_name`, and a **groups** attribute so memberships flow through.
+5. Turn the app **ON for everyone** (or the relevant Org Units) in Google.
+
+**OIDC (alternative):** register OpenAuthFederated as an OAuth client in Google, set the redirect URI to your callback, and request the `openid email profile` scopes. On this path the platform verifies the hosted-domain (`hd`) claim and `email_verified` on every sign-in.
+
+## 3. Enable domain enforcement
+
+Restrict sign-in to your verified company domain so any identity outside the org is rejected — including unverified emails and out-of-org Google accounts.
+
+```env
+AUTH_ALLOWED_DOMAINS=whitehatengineering.com
+```
+
+In the dashboard, set **Domain enforcement → Allowed domains** to `whitehatengineering.com`. With this on:
+
+- Only `@whitehatengineering.com` Workspace accounts pass.
+- On the OIDC path, the `hd` claim must equal `whitehatengineering.com` and `email_verified` must be `true`.
+- First valid sign-in triggers **JIT provisioning**; **SCIM 2.0** keeps the directory in sync thereafter.
+
+## 4. Map groups to roles and enable MFA
+
+- **RBAC:** in **Authorization**, map Google Workspace groups → roles → `<feature>:<action>` permissions (for example `code:read`, `jfk:write`, `*:read`). The IdP's groups are inputs; the authoritative model lives in our own backend/DB. These are the permissions your [route protection](./protect-routes.mdx) and `has()` checks evaluate.
+- **MFA:** MFA is inherited from the upstream Google Workspace IdP — enforce 2-Step Verification in the Google Admin console. For sensitive actions, enable **optional step-up reverification** in OpenAuthFederated so the user must re-authenticate before the action proceeds.
+
+## 5. Confirm session and security behavior
+
+The hybrid session model is on by default in production:
+
+- **Short-lived JWT access token** (Bearer) for stateless verification.
+- **Rotating, HttpOnly refresh cookie** with `SameSite` set for CSRF defense — never stored in `localStorage`.
+- **Server-side session records** so a session can be revoked immediately despite the short token lifetime.
+- HTTPS only, CSP headers, and full audit logging of sign-in / sign-out / refresh / permission-denied / admin actions. No end-user passwords are ever stored.
+
+## 6. Offboarding and revocation
+
+When an employee leaves, suspend or delete their Google Workspace account. Access is cut off promptly through three layers working together:
+
+1. **SCIM deprovision** — the `user.deleted` (or suspend) event removes the user from OpenAuthFederated and fires your webhooks.
+2. **Short token lifetime** — the existing access token expires quickly and cannot be refreshed once the upstream account is gone.
+3. **Force-revoke** — admins can immediately invalidate all active sessions for a user from the dashboard or Backend API, killing access without waiting for token expiry.
+
+## Production checklist
+
+- [ ] Live `pk_live_*` / `sk_live_*` keys set; secret key server-only.
+- [ ] `auth.` and `api.` custom domains serving HTTPS.
+- [ ] Google Workspace SAML (or OIDC) connection registered and attribute/group mapping verified.
+- [ ] `AUTH_ALLOWED_DOMAINS=whitehatengineering.com` and domain enforcement on.
+- [ ] Groups mapped to roles and `<feature>:<action>` permissions.
+- [ ] MFA enforced upstream; step-up reverification configured for sensitive actions.
+- [ ] Webhook signing secret set; SCIM deprovision tested with a suspend.
+- [ ] Force-revoke verified from the admin dashboard.
+
+## Next steps
+
+- [Protect routes](./protect-routes.mdx) — enforce the roles you just mapped.
+- [Read the user](./read-the-user.mdx) — read identity and permissions in app code.
+- [Overview](./overview.mdx) — revisit the federation flow end to end.

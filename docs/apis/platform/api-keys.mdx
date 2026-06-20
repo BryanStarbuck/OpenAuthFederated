@@ -1,0 +1,190 @@
+---
+title: API keys
+description: Manage publishable and secret API keys plus SCIM provisioning tokens — create, scope, rotate, and revoke credentials securely.
+---
+
+# API keys
+
+API keys authenticate callers to OpenAuthFederated. There are three credential types, each for a
+distinct surface:
+
+| Type | Prefix | Used by | Surface |
+| --- | --- | --- | --- |
+| **Secret key** | `sk_live_` / `sk_test_` | Your backend / IaC | Platform API + Backend API (server-side only) |
+| **Publishable key** | `pk_live_` / `pk_test_` | Browser / mobile clients | [Frontend API](../frontend/overview.mdx) (safe to embed) |
+| **SCIM token** | `scim_tok_` | Upstream IdP | [SCIM](./scim.mdx) endpoints, scoped per connection |
+
+* **Secret keys** are the `AUTH_SECRET_KEY` used throughout this reference as
+  `Authorization: Bearer sk_live_...`. They are powerful — treat them like passwords.
+* **Publishable keys** identify your deployment to client apps and carry no privileged scope;
+  they are designed to be public.
+* **SCIM tokens** are managed alongside the connection that owns them (see
+  [SCIM provisioning tokens](#scim-provisioning-tokens)).
+
+## The API key object
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Unique identifier, prefixed `key_`. |
+| `object` | string | Always `api_key`. |
+| `type` | string | `secret` or `publishable`. |
+| `name` | string | Human label (e.g. `ci-provisioning`). |
+| `key` | string | The full secret — returned **only** at creation. |
+| `key_preview` | string | Masked form for display (e.g. `sk_live_...p7dc`). |
+| `scopes` | array | Allowed scopes (see [Scoping](#scoping)). |
+| `organization_id` | string \| null | Restrict to one org, or `null` for all. |
+| `last_used_at` | string \| null | When the key was last presented. |
+| `status` | string | `active` or `revoked`. |
+| `created_at` | string | ISO 8601 timestamp. |
+
+```json
+{
+  "id": "key_8d9e0f1a",
+  "object": "api_key",
+  "type": "secret",
+  "name": "ci-provisioning",
+  "key_preview": "sk_live_...p7dc",
+  "scopes": ["organizations:write", "sso_connections:write", "domains:write"],
+  "organization_id": null,
+  "last_used_at": "2026-06-20T17:55:00Z",
+  "status": "active",
+  "created_at": "2026-06-01T10:00:00Z"
+}
+```
+
+## List API keys
+
+`GET /v1/api_keys`
+
+| Param | Type | Description |
+| --- | --- | --- |
+| `type` | string | `secret` or `publishable`. |
+| `status` | string | `active` or `revoked`. |
+| `limit` / `offset` | integer | Pagination. |
+
+```bash
+curl "https://api.whitehatengineering.com/v1/api_keys?type=secret&status=active" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+The full `key` is never returned by list/retrieve — only `key_preview`.
+
+## Create an API key
+
+`POST /v1/api_keys`
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `type` | string | yes | `secret` or `publishable`. |
+| `name` | string | yes | Human label. |
+| `scopes` | array | no | Restrict the key (defaults to full for `secret`). |
+| `organization_id` | string | no | Restrict to one org. |
+
+```bash
+curl https://api.whitehatengineering.com/v1/api_keys \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "secret",
+    "name": "ci-provisioning",
+    "scopes": ["organizations:write", "sso_connections:write", "domains:write"]
+  }'
+```
+
+```json
+{
+  "id": "key_8d9e0f1a",
+  "object": "api_key",
+  "type": "secret",
+  "name": "ci-provisioning",
+  "key": "sk_live_REDACTED_EXAMPLE_KEY",
+  "key_preview": "sk_live_...8hJ",
+  "scopes": ["organizations:write", "sso_connections:write", "domains:write"],
+  "status": "active",
+  "created_at": "2026-06-20T19:00:00Z"
+}
+```
+
+> The full `key` is shown **once**. Copy it into your secret manager immediately — it cannot be
+> retrieved again.
+
+## Rotate a key
+
+`POST /v1/api_keys/{key_id}/rotate`
+
+Rotation issues a new secret and returns it once. The old secret is invalidated after an
+optional grace period so you can deploy the new value without downtime.
+
+```bash
+curl -X POST https://api.whitehatengineering.com/v1/api_keys/key_8d9e0f1a/rotate \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "grace_period_seconds": 3600 }'
+```
+
+## Revoke a key
+
+`DELETE /v1/api_keys/{key_id}`
+
+Immediately invalidates the key. Calls presenting it then receive `401`. Revocation is recorded
+in the [audit log](./audit-logs.mdx) (`api_key.revoked`).
+
+```bash
+curl -X DELETE https://api.whitehatengineering.com/v1/api_keys/key_8d9e0f1a \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+## Scoping
+
+Restrict secret keys to the least privilege a caller needs. Scopes follow `<resource>:<action>`:
+
+| Scope | Grants |
+| --- | --- |
+| `organizations:read` / `:write` | Read / manage [organizations](./organizations.mdx). |
+| `sso_connections:read` / `:write` | Read / manage [SSO connections](./sso-connections.mdx). |
+| `domains:read` / `:write` | Read / manage [domains](./domains.mdx). |
+| `scim:write` | Enable/disable SCIM and rotate SCIM tokens. |
+| `webhooks:read` / `:write` | Read / manage [webhooks](./webhooks.mdx). |
+| `roles:read` / `:write` | Read / manage [RBAC](./rbac.mdx). |
+| `audit_logs:read` | Read [audit logs](./audit-logs.mdx). |
+| `api_keys:write` | Manage API keys. |
+| `*` | Full access (default for an unscoped secret key). |
+
+A call that exceeds its key's scopes returns `403` with code `insufficient_scope`.
+
+## SCIM provisioning tokens
+
+SCIM tokens (`scim_tok_`) are created and rotated through the SCIM resource, not the generic
+`/api_keys` endpoint, because each is bound to one connection:
+
+* Create / view config: `POST` / `GET /v1/sso_connections/{conn_id}/scim`
+  (see [Enable SCIM](./scim.mdx#enable-scim-on-a-connection)).
+* Rotate the token: `POST /v1/sso_connections/{conn_id}/scim/rotate_token`.
+
+```bash
+curl -X POST https://api.whitehatengineering.com/v1/sso_connections/conn_4d2f8a/scim/rotate_token \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+Like other secrets, a rotated SCIM token is shown once — update the IdP's auto-provisioning
+config with the new value.
+
+## Security guidance
+
+* **Never expose secret keys client-side.** Secret and SCIM tokens are server-only. Only
+  publishable keys (`pk_...`) belong in browsers or mobile apps.
+* **No long-lived secrets in `localStorage`** — keep tokens in server config / a secret manager.
+* **Rotate on exposure.** If a key may have leaked (commit, log, screenshot), rotate or revoke
+  immediately, then check the [audit log](./audit-logs.mdx) for unexpected `last_used_at` /
+  source IPs.
+* **Scope tightly.** Give CI and automation only the scopes they need (often
+  `*:write` for the few resources they touch, never blanket `*`).
+* **Use `sk_test_` / `pk_test_`** in non-production deployments so test traffic is never mistaken
+  for production.
+* **Audit regularly.** Review active keys and their `last_used_at`; revoke anything unused.
+
+## Next steps
+
+* [Platform API overview](./overview.mdx) — how keys authenticate every control-plane call.
+* [SCIM](./scim.mdx) — where SCIM provisioning tokens are configured.
+* [Audit logs](./audit-logs.mdx) — monitor key creation, rotation, and use.

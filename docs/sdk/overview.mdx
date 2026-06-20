@@ -1,0 +1,118 @@
+---
+title: SDK Overview
+description: Choose the right OpenAuthFederated SDK for your app — full-stack Next.js, client-side React, or server-side REST wrapper.
+---
+
+# SDK Overview
+
+OpenAuthFederated ships three official SDKs. Each one wraps a different layer of the
+platform and is tuned for a specific runtime. Together they cover the full request
+lifecycle: from rendering federated sign-in UI, to reading the current user on the
+server, to administering users and organizations from a trusted backend.
+
+All three SDKs assume the OpenAuthFederated charter: federated SSO over **SAML 2.0 / OIDC**
+with **Google Workspace** as the default upstream identity provider, **domain-enforced**
+sign-in (the reference deployment restricts access to the `whitehatengineering.com`
+Workspace), **JIT provisioning + SCIM 2.0**, organizations/multi-tenancy, group-derived
+**RBAC** (`<feature>:<action>` permissions such as `code:read` or `jfk:write`), and a
+**hybrid session model** — a short-lived JWT access token paired with a rotating
+HttpOnly refresh cookie and server-side session records for immediate revocation.
+
+## The three SDKs
+
+| Package | Layer | Use it when |
+| --- | --- | --- |
+| `@auth/nextjs` | Full-stack (client + server) | You build with Next.js (App Router or Pages Router). This is the recommended default. |
+| `@auth/react` | Client only | You build a React SPA (Vite, React Router, etc.) without a Next.js server. |
+| `@auth/backend` | Server only | You call OpenAuthFederated from a trusted Node backend (NestJS, scripts, jobs) using a secret key. |
+
+There is also `@auth/ui`, the styling/theming package that powers the appearance of the
+drop-in components. You rarely install it directly — it comes in transitively through
+`@auth/nextjs` and `@auth/react`.
+
+## `@auth/nextjs` — full-stack
+
+The full-stack SDK is the one most apps should reach for. It bundles everything:
+
+- **Server helpers** — `auth()`, `currentUser()`, `getAuth()`, `buildAuthProps()` for
+  reading identity inside Server Components, Route Handlers, Server Actions, and Pages
+  Router API routes.
+- **Middleware** — `authMiddleware()` and `createRouteMatcher()` to protect routes at
+  the edge.
+- **Client hooks and components** — re-exports everything from `@auth/react`
+  (`useUser`, `<SignIn>`, `<UserButton>`, `<Protect>`, and the rest).
+
+```bash
+pnpm add @auth/nextjs
+```
+
+See the [Next.js SDK reference](./nextjs.mdx).
+
+## `@auth/react` — client only
+
+For React apps that do not run a Next.js server. It provides the React context provider
+(`<AuthProvider>`), all client hooks, and all UI components. Identity is established by
+the browser talking directly to the Frontend API at `https://auth.<your-domain>`.
+
+```bash
+pnpm add @auth/react
+```
+
+```tsx
+// main.tsx
+import { AuthProvider } from '@auth/react'
+
+createRoot(document.getElementById('root')!).render(
+  <AuthProvider frontendApi="https://auth.whitehatengineering.com">
+    <App />
+  </AuthProvider>,
+)
+```
+
+See the [client hooks reference](./hooks.mdx) and the
+[component reference](./components/overview.mdx).
+
+## `@auth/backend` — server only
+
+A typed wrapper over the **Backend REST API**. Instantiate an `authClient` with your
+`AUTH_SECRET_KEY` and call resources like `authClient.users.getUser(...)`,
+`authClient.organizations.getOrganization(...)`, or `authClient.verifyToken(...)`. Use it
+in NestJS services, cron jobs, SCIM handlers, and webhook processors — anywhere you act
+with platform-level privilege rather than as an end user.
+
+```bash
+pnpm add @auth/backend
+```
+
+See the [backend SDK reference](./backend-sdk.mdx).
+
+## How the SDKs map to the APIs
+
+Every SDK is a thin, typed layer over one of the platform's HTTP APIs:
+
+- `@auth/react` and the client side of `@auth/nextjs` talk to the
+  [**Frontend API**](../apis/frontend/overview.mdx) at `https://auth.<your-domain>` —
+  public, scoped to the signed-in user, drives the UI components and hooks.
+- The server side of `@auth/nextjs` and all of `@auth/backend` talk to the
+  [**Backend API**](../apis/backend/overview.mdx) at `https://api.<your-domain>/v1` —
+  secret-key authenticated, full administrative surface.
+- Platform configuration — IdP connections (Google Workspace SAML/OIDC), domain
+  enforcement, SCIM, webhooks, and RBAC definitions — is managed through the
+  [**Platform API**](../apis/platform/overview.mdx).
+
+## Choosing quickly
+
+- Building with Next.js? → `@auth/nextjs`.
+- Building a non-Next React SPA? → `@auth/react`.
+- Need to read or mutate users/orgs from a trusted server with a secret key? →
+  `@auth/backend`.
+
+## Next steps
+
+- [Next.js SDK reference](./nextjs.mdx)
+- [Client hooks reference](./hooks.mdx)
+- [Backend SDK reference](./backend-sdk.mdx)
+- [Component overview](./components/overview.mdx)
+- [Backend API overview](../apis/backend/overview.mdx)
+- [Frontend API overview](../apis/frontend/overview.mdx)
+- [Platform API overview](../apis/platform/overview.mdx)

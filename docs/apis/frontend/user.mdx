@@ -1,0 +1,227 @@
+---
+title: The current user (me)
+description: Browser-facing endpoints for the signed-in user — read and update the profile, list sessions, and list organization memberships.
+---
+
+# The current user (me)
+
+The **me** endpoints expose the **currently signed-in user** to the browser. They resolve the
+user from the active [Session](./client-and-sessions.mdx#the-session-object) on the Client, so no
+user id is ever passed by the client — you always operate on "yourself."
+
+These endpoints return a **client-safe view** of the [User](#the-user-object): profile fields
+only. They never expose password hashes, secret keys, raw IdP tokens, internal flags, or any other
+user's data. Authoritative reads and writes (and reading other users) belong to the
+[Backend API](../backend/overview.mdx).
+
+All requests use the Frontend API base URL with the **publishable key** + session cookie/JWT.
+
+```
+https://auth.whitehatengineering.com/v1
+```
+
+## The User object (client view)
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string | Unique user identifier. Prefixed `user_`. |
+| `object` | string | Always `user`. |
+| `primary_email_address` | string | The user's primary email (from the upstream IdP). |
+| `email_addresses` | array&lt;object&gt; | Known emails with `id`, `email_address`, `verified`. |
+| `first_name` | string \| null | Given name. |
+| `last_name` | string \| null | Family name. |
+| `username` | string \| null | Optional username, if your instance enables it. |
+| `image_url` | string \| null | Avatar URL. |
+| `public_metadata` | object | Read-only metadata set by the backend; visible to the client. |
+| `unsafe_metadata` | object | Client-writable metadata (treat as untrusted on the server). |
+| `external_accounts` | array&lt;object&gt; | Linked IdP accounts (provider + masked identifier only). |
+| `created_at` | integer | Unix ms timestamp the user was created (JIT). |
+| `updated_at` | integer | Unix ms timestamp of the last change. |
+
+> Fields owned by the upstream IdP (for our reference deployment, Google Workspace) — such as the
+> verified email and group/role membership — are **read-only** from the browser. They change only
+> via federation/SCIM, not via this API. Attempts to write them are ignored or rejected.
+
+## Get the current user
+
+Returns the signed-in user. The SDK calls this to hydrate the user object after a flow completes.
+
+**`GET /v1/me`**
+
+```bash
+curl https://auth.whitehatengineering.com/v1/me \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>"
+```
+
+```json
+{
+  "object": "user",
+  "id": "user_2cH1mS3oB",
+  "primary_email_address": "ada@whitehatengineering.com",
+  "email_addresses": [
+    {
+      "id": "idn_2fL5pV6rE",
+      "email_address": "ada@whitehatengineering.com",
+      "verified": true
+    }
+  ],
+  "first_name": "Ada",
+  "last_name": "Lovelace",
+  "username": null,
+  "image_url": "https://cdn.whitehatengineering.com/avatars/user_2cH1mS3oB.png",
+  "public_metadata": { "department": "Engineering" },
+  "unsafe_metadata": { "theme": "dark" },
+  "external_accounts": [
+    { "provider": "oauth_google", "identifier": "a••••@whitehatengineering.com" }
+  ],
+  "created_at": 1750300000000,
+  "updated_at": 1750420000000
+}
+```
+
+If there is no active session, the endpoint returns `401 Unauthorized`.
+
+## Update the current user
+
+Updates **profile fields that the IdP does not own** — display fields and client-writable
+metadata. Fields sourced from the upstream IdP (verified email, groups/roles) are read-only and
+cannot be changed here.
+
+**`PATCH /v1/me`**
+
+| Updatable field | Notes |
+|---|---|
+| `first_name` | Display name override (if not locked to the IdP). |
+| `last_name` | Display name override (if not locked to the IdP). |
+| `username` | Only if usernames are enabled for the instance. |
+| `unsafe_metadata` | Client-writable; never trust server-side without validation. |
+
+```bash
+curl -X PATCH https://auth.whitehatengineering.com/v1/me \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "first_name": "Ada",
+    "last_name": "King",
+    "unsafe_metadata": { "theme": "light" }
+  }'
+```
+
+```json
+{
+  "object": "user",
+  "id": "user_2cH1mS3oB",
+  "primary_email_address": "ada@whitehatengineering.com",
+  "first_name": "Ada",
+  "last_name": "King",
+  "unsafe_metadata": { "theme": "light" },
+  "updated_at": 1750420700000
+}
+```
+
+Sending a read-only / IdP-owned field returns `422 Unprocessable Entity` with a
+`field_not_editable` error.
+
+## List the current user's sessions
+
+Returns the sessions belonging to the signed-in user across their Clients/devices — useful for an
+account "active devices" screen. To act on the **current browser's** sessions (touch, remove),
+use the [Client and sessions](./client-and-sessions.mdx) endpoints.
+
+**`GET /v1/me/sessions`**
+
+```bash
+curl https://auth.whitehatengineering.com/v1/me/sessions \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>"
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "session",
+      "id": "sess_2bG0lR2nA",
+      "status": "active",
+      "user_id": "user_2cH1mS3oB",
+      "last_active_at": 1750420600000,
+      "latest_activity": {
+        "device_type": "desktop",
+        "browser_name": "Chrome",
+        "ip_address": "203.0.113.24"
+      },
+      "created_at": 1750420000000,
+      "updated_at": 1750420600000
+    },
+    {
+      "object": "session",
+      "id": "sess_2nT3xD4zM",
+      "status": "active",
+      "user_id": "user_2cH1mS3oB",
+      "last_active_at": 1750410000000,
+      "latest_activity": {
+        "device_type": "mobile",
+        "browser_name": "Safari",
+        "ip_address": "198.51.100.7"
+      },
+      "created_at": 1750409000000,
+      "updated_at": 1750410000000
+    }
+  ],
+  "total_count": 2
+}
+```
+
+## List the current user's organization memberships
+
+Returns the organizations/tenants the user belongs to, with the role mapped from their upstream
+IdP groups. The browser may use this to render an org switcher and to drive role-based UX; the
+**authoritative** authorization decision is always enforced server-side via the
+[Backend API](../backend/overview.mdx).
+
+**`GET /v1/me/organization_memberships`**
+
+```bash
+curl https://auth.whitehatengineering.com/v1/me/organization_memberships \
+  -H "Authorization: Bearer pk_live_b3BlbmF1dGhmZWRlcmF0ZWQ" \
+  --cookie "__session=<rotating-session-cookie>"
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "object": "organization_membership",
+      "id": "orgmem_2oU4yE5aN",
+      "role": "admin",
+      "permissions": ["jfk:read", "jfk:write", "code:read"],
+      "organization": {
+        "object": "organization",
+        "id": "org_2pV5zF6bO",
+        "name": "WhiteHat Engineering",
+        "slug": "whitehat-engineering"
+      },
+      "created_at": 1750300000000,
+      "updated_at": 1750300000000
+    }
+  ],
+  "total_count": 1
+}
+```
+
+> Roles and permissions originate from upstream IdP groups but are resolved against the
+> authoritative authorization model in the OpenAuthFederated backend. Treat the values returned
+> here as **inputs to UX**, never as the final security boundary — enforce permissions on the
+> server.
+
+## Next steps
+
+* [Client and sessions](./client-and-sessions.mdx)
+* [Sign-in flow](./sign-in.mdx)
+* [Sign-up flow](./sign-up.mdx)
+* [Frontend API overview](./overview.mdx)
+* [Backend API overview](../backend/overview.mdx)

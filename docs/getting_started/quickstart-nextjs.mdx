@@ -1,0 +1,133 @@
+---
+title: Next.js Quickstart
+description: Add OpenAuthFederated to a Next.js App Router app and get a user signed in.
+---
+
+This quickstart gets you from an empty Next.js App Router project to a working sign-in in a few minutes. You will install `@auth/nextjs`, configure your keys, add middleware, wrap your app in `<AuthProvider>`, and read the signed-in user on the server. The examples target the `whitehatengineering.com` Google Workspace reference deployment.
+
+> Prerequisites: a Next.js project on the App Router and your publishable + secret keys from the OpenAuthFederated dashboard.
+
+## 1. Install the SDK
+
+Use the CLI to scaffold the integration, or install the package directly.
+
+```bash
+# Recommended: scaffold and link your project
+npm install -g @auth/nextjs
+auth login
+auth init
+```
+
+```bash
+# Or install the package directly
+npm install @auth/nextjs
+```
+
+## 2. Set your environment variables
+
+Create a `.env.local` at the project root. The publishable key is safe in the browser; the secret key must stay server-side only.
+
+```env
+NEXT_PUBLIC_AUTH_PUBLISHABLE_KEY=pk_test_your_publishable_key
+AUTH_SECRET_KEY=sk_test_your_secret_key
+
+# Self-hosted endpoints for your deployment
+NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.whitehatengineering.com
+AUTH_BACKEND_API=https://api.whitehatengineering.com/v1
+
+# Where the UI sends users for sign-in / sign-up
+NEXT_PUBLIC_AUTH_SIGN_IN_URL=/sign-in
+NEXT_PUBLIC_AUTH_SIGN_UP_URL=/sign-up
+```
+
+See [Environment variables](./environment-variables.mdx) for the full reference.
+
+## 3. Add the middleware
+
+Create `middleware.ts` at the root of your project (next to `app/`). `authMiddleware()` makes the auth context available to every request and is required for the server helpers to work.
+
+```ts
+// middleware.ts
+import { authMiddleware } from '@auth/nextjs/server'
+
+export default authMiddleware()
+
+export const config = {
+  matcher: [
+    // Skip Next.js internals and static files, unless found in search params
+    '/((?!_next|[^?]*\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',
+    // Always run for API routes
+    '/(api|trpc)(.*)',
+  ],
+}
+```
+
+## 4. Wrap your app in `<AuthProvider>`
+
+In `app/layout.tsx`, wrap everything in `<AuthProvider>`. Use the `<Show>` control component to render different controls for signed-in and signed-out users.
+
+```tsx
+// app/layout.tsx
+import { AuthProvider, SignInButton, SignUpButton, Show, UserButton } from '@auth/nextjs'
+import './globals.css'
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <AuthProvider>
+      <html lang="en">
+        <body>
+          <header>
+            <Show when="signed-out">
+              <SignInButton />
+              <SignUpButton />
+            </Show>
+            <Show when="signed-in">
+              <UserButton />
+            </Show>
+          </header>
+          {children}
+        </body>
+      </html>
+    </AuthProvider>
+  )
+}
+```
+
+## 5. Read the user on the server
+
+In any Server Component, Route Handler, or Server Action, call `auth()` for the session and `currentUser()` for the full user record. Both require the middleware from step 3.
+
+```tsx
+// app/page.tsx
+import { auth, currentUser } from '@auth/nextjs/server'
+
+export default async function Page() {
+  const { isAuthenticated, redirectToSignIn, userId } = await auth()
+
+  if (!isAuthenticated) return redirectToSignIn()
+
+  const user = await currentUser()
+
+  return (
+    <main>
+      <h1>Welcome, {user?.firstName ?? userId}</h1>
+      <p>You are signed in via your whitehatengineering.com Google Workspace account.</p>
+    </main>
+  )
+}
+```
+
+## 6. Run it
+
+```bash
+npm run dev
+```
+
+Open the app, click **Sign in**, and complete the Google Workspace flow. Only active employees in the `whitehatengineering.com` Workspace will be allowed through; everyone else is rejected by domain enforcement. After sign-in you will see the `<UserButton />` and your name from `currentUser()`.
+
+## Next steps
+
+- [Protect routes](./protect-routes.mdx) — require auth, roles, and permissions on pages and APIs.
+- [Read the user](./read-the-user.mdx) — server and client patterns in depth.
+- [Environment variables](./environment-variables.mdx) — public vs secret keys.
+- [Deploy](./deploy.mdx) — register the Google Workspace connection and turn on domain enforcement.

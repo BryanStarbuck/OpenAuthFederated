@@ -1,0 +1,102 @@
+---
+title: User Components
+description: Drop-in components for the user avatar menu, self-service account management, and avatar display.
+---
+
+# User Components
+
+These components render the signed-in user's identity and let them manage their own account.
+Mount them inside an [`<AuthProvider>`](./control.mdx#authprovider); they read the active
+user from context. Profile fields come from the federated identity (Google Workspace) plus
+any metadata the platform stores.
+
+## `<UserButton>`
+
+An avatar that opens a menu with account actions — manage account, switch sessions, and sign
+out. The most common way to surface the signed-in user in a navbar.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `afterSignOutUrl` | `string` | Where to redirect after sign-out. |
+| `showName` | `boolean` | Show the user's name next to the avatar. |
+| `userProfileMode` | `'modal' \| 'navigation'` | Open account management in a modal or navigate to it. |
+| `userProfileUrl` | `string` | Path to `<UserProfile>` when `userProfileMode="navigation"`. |
+| `appearance` | `Appearance` | Theming overrides. |
+
+`<UserButton>` also supports custom menu items and pages via `<UserButton.MenuItems>` and
+`<UserButton.UserProfilePage>` children.
+
+```tsx
+import { UserButton } from '@auth/react'
+
+export function NavBar() {
+  return (
+    <nav className="flex items-center justify-between">
+      <span>White Hat Engineering</span>
+      <UserButton afterSignOutUrl="/" showName />
+    </nav>
+  )
+}
+```
+
+## `<UserProfile>`
+
+A full self-service account-management UI: profile details, connected accounts, active
+devices/sessions, and security settings. Because authentication is federated, password
+management is delegated to the upstream IdP — this surface focuses on profile, sessions, and
+linked-account management.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `routing` | `'hash' \| 'path' \| 'virtual'` | How the multi-tab UI is routed. |
+| `path` | `string` | Base path when `routing="path"` (e.g. `/account`). |
+| `appearance` | `Appearance` | Theming overrides. |
+
+Add custom tabs with `<UserProfile.Page>` and reorder built-in links with
+`<UserProfile.Link>`.
+
+```tsx
+// app/account/[[...account]]/page.tsx
+import { UserProfile } from '@auth/nextjs'
+
+export default function AccountPage() {
+  return <UserProfile routing="path" path="/account" />
+}
+```
+
+## `<UserAvatar>`
+
+Renders just the current user's avatar image, with sensible fallbacks (initials when no
+image is set). Useful in comment threads, member lists, and compact UI.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `size` | `number` | Pixel size of the avatar. |
+| `appearance` | `Appearance` | Theming overrides. |
+| `className` | `string` | Extra classes for layout. |
+
+```tsx
+import { UserAvatar } from '@auth/react'
+
+export function CommentAuthor() {
+  return (
+    <div className="flex items-center gap-2">
+      <UserAvatar size={28} />
+      <span>commented just now</span>
+    </div>
+  )
+}
+```
+
+## Next steps
+
+- [Organization components](./organization.mdx)
+- [Authentication components](./authentication.mdx)
+- [Client hooks — `useUser`](../hooks.mdx)
+- [Control components](./control.mdx)

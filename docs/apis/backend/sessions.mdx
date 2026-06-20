@@ -1,0 +1,259 @@
+---
+title: Sessions
+description: List, inspect, verify, and immediately revoke OpenAuthFederated sessions, and verify session JWTs server-side.
+---
+
+# Sessions
+
+A **Session** is a server-side record of a signed-in user. OpenAuthFederated uses a **hybrid
+session model**: a short-lived **JWT access token** (sent as a `Bearer` token) is verified
+statelessly by your services, while a longer-lived, rotating, **HttpOnly** refresh cookie keeps
+the user signed in. The key property is that **every session is backed by a server-side record**,
+so a session can be **revoked immediately** even though the access token is self-contained — this
+endpoint set is how you do that.
+
+All endpoints are relative to your base URL, e.g.
+`https://api.whitehatengineering.com/v1`.
+
+## The Session object
+
+| Field            | Type    | Description                                                                       |
+|------------------|---------|-----------------------------------------------------------------------------------|
+| `id`             | string  | Unique identifier, prefixed `sess_`.                                              |
+| `object`         | string  | Always `"session"`.                                                               |
+| `user_id`        | string  | The user this session belongs to (`user_...`).                                   |
+| `status`         | string  | `active`, `revoked`, or `expired`.                                               |
+| `last_active_at` | integer | Last activity timestamp (Unix ms).                                               |
+| `expire_at`      | integer | When the session expires if idle/unrefreshed (Unix ms).                          |
+| `abandon_at`     | integer | Absolute end-of-life regardless of activity (Unix ms).                           |
+| `revoked_at`     | integer | When the session was revoked, or `null`.                                         |
+| `client_id`      | string  | The client (browser/device) that owns the session.                              |
+| `created_at`     | integer | Creation timestamp (Unix ms).                                                    |
+| `updated_at`     | integer | Last update timestamp (Unix ms).                                                 |
+
+### Status values
+
+| Status    | Meaning                                                                 |
+|-----------|------------------------------------------------------------------------|
+| `active`  | The session is valid; access tokens minted from it will verify.        |
+| `revoked` | The session was explicitly revoked (logout, ban, admin action). Terminal. |
+| `expired` | The session passed `expire_at` or `abandon_at`. Terminal.              |
+
+---
+
+## List sessions
+
+```
+GET /sessions
+```
+
+Returns a paginated list of sessions. Filter by user and/or status to audit who is signed in.
+
+### Query parameters
+
+| Parameter | Type    | Description                                                       |
+|-----------|---------|-------------------------------------------------------------------|
+| `user_id` | string  | Filter to sessions for a single user.                             |
+| `status`  | string  | Filter by status: `active`, `revoked`, or `expired`.             |
+| `limit`   | integer | Page size (default `10`, max `500`).                             |
+| `offset`  | integer | Records to skip (default `0`).                                   |
+
+### Request
+
+```bash
+curl -G "https://api.whitehatengineering.com/v1/sessions" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  --data-urlencode "user_id=user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  --data-urlencode "status=active"
+```
+
+### Response
+
+```json
+{
+  "data": [
+    {
+      "id": "sess_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+      "object": "session",
+      "user_id": "user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+      "status": "active",
+      "last_active_at": 1718841600000,
+      "expire_at": 1718845200000,
+      "abandon_at": 1719446400000,
+      "revoked_at": null,
+      "client_id": "client_5d4Ef6Gh7Ij8",
+      "created_at": 1718838000000,
+      "updated_at": 1718841600000
+    }
+  ],
+  "total_count": 1
+}
+```
+
+---
+
+## Get a session
+
+```
+GET /sessions/{session_id}
+```
+
+### Path parameters
+
+| Parameter    | Type   | Description                  |
+|--------------|--------|------------------------------|
+| `session_id` | string | The session ID (`sess_...`). |
+
+### Request
+
+```bash
+curl "https://api.whitehatengineering.com/v1/sessions/sess_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+Returns a single [Session object](#the-session-object).
+
+---
+
+## Revoke a session
+
+```
+POST /sessions/{session_id}/revoke
+```
+
+Immediately revokes the session. This sets the server-side record's status to `revoked`, which is
+the authoritative state. Subsequent calls to [verify a session](#verify-a-session) return a
+non-active status, and the rotating refresh cookie can no longer mint new access tokens.
+
+> **Why this matters.** Access tokens are short-lived JWTs that your services verify
+> *networklessly* for performance. A JWT remains cryptographically valid until it expires — you
+> cannot "un-sign" it. OpenAuthFederated closes that window two ways: (1) access-token lifetimes
+> are short (typically 60 seconds), so a revoked session loses access almost immediately on the
+> next refresh; and (2) for sensitive operations you can additionally check the server-side
+> record via the verify endpoint so revocation takes effect on the very next request. Use revoke
+> for logout-everywhere, offboarding, ban, and compromised-credential response.
+
+### Request
+
+```bash
+curl -X POST "https://api.whitehatengineering.com/v1/sessions/sess_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk/revoke" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+Returns the [Session object](#the-session-object) with `"status": "revoked"`. A
+`session.revoked` event is written to the audit log.
+
+---
+
+## Verify a session
+
+```
+POST /sessions/{session_id}/verify
+```
+
+Verifies that a session token corresponds to the given session **and** that the server-side
+record is still `active`. Use this for the stateful check when you need certainty that the
+session has not been revoked since the token was minted (sensitive actions, step-up flows).
+
+### Body parameters
+
+| Parameter | Type   | Description                                              |
+|-----------|--------|---------------------------------------------------------|
+| `token`   | string | The session JWT presented by the client. Required.      |
+
+### Request
+
+```bash
+curl -X POST "https://api.whitehatengineering.com/v1/sessions/sess_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk/verify" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "token": "eyJhbGciOiJSUzI1NiIsImtpZCI6Imluc18..." }'
+```
+
+### Response
+
+Returns the [Session object](#the-session-object) if the token is valid and the session is
+active; otherwise an error with code `session_not_active` or `token_invalid`.
+
+---
+
+## Mint a session token
+
+```
+POST /tokens
+```
+
+Mints a new short-lived access token (JWT) for an active session, optionally shaped by a
+[JWT template](./jwt-templates.mdx) so it carries custom claims (e.g. RBAC roles/permissions)
+for a downstream service. The standard client refresh flow mints tokens automatically; use this
+endpoint for server-side, service-to-service token issuance.
+
+### Body parameters
+
+| Parameter      | Type   | Description                                                        |
+|----------------|--------|--------------------------------------------------------------------|
+| `session_id`   | string | The active session to mint a token for. Required.                  |
+| `template`     | string | Name of a JWT template to apply. Optional.                         |
+| `expires_in`   | integer| Token lifetime in seconds (defaults to the deployment's short TTL).|
+
+### Request
+
+```bash
+curl -X POST "https://api.whitehatengineering.com/v1/tokens" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "session_id": "sess_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk", "template": "downstream-api" }'
+```
+
+### Response
+
+```json
+{
+  "object": "token",
+  "jwt": "eyJhbGciOiJSUzI1NiIsImtpZCI6Imluc18...",
+  "expires_at": 1718841660000
+}
+```
+
+---
+
+## Verifying a session JWT server-side
+
+Most of your backend authorization should **not** call the Backend API on every request. Instead,
+verify the access token *networklessly*:
+
+1. **Read the token.** Read it from the `Authorization: Bearer <jwt>` header (or the session
+   cookie for browser requests).
+2. **Verify the signature.** Verify the JWT against your deployment's public signing key (JWKS).
+   Fetch the JWKS once from `GET /.well-known/jwks.json` on your Frontend API host and cache it;
+   verification is then fully local with no network call.
+3. **Check the standard claims.** Confirm `exp` (not expired), `nbf`, `iss` (your deployment),
+   and `azp`/`aud` (the expected front-end application) — this protects against tokens minted for
+   a different app.
+4. **Read identity & RBAC claims.** Use `sub` (the `user_...` id), `sid` (the `sess_...` id), and
+   any custom claims from your JWT template (roles/permissions, org context).
+
+The `@auth/backend` SDK does all of this in one call:
+`authClient.verifyToken(jwt, { jwtKey, authorizedParties })`.
+
+### When to additionally call the verify endpoint
+
+Networkless verification is fast but cannot see a revocation that happened *after* the token was
+minted (until that short-lived token expires). For most read paths, the short TTL is sufficient.
+For **sensitive or irreversible actions** — money movement, permission changes, deleting data,
+step-up reverification — also call [`POST /sessions/{session_id}/verify`](#verify-a-session) so
+the server-side record is consulted and an immediate revocation is honored on the next request.
+
+This is the short-lived-JWT vs revocation tradeoff: stateless verification gives you speed and
+horizontal scale; the server-side session record gives you immediate revocation. Combine them —
+verify networklessly by default, and check the record where the cost of a stale token is high.
+
+## Next steps
+
+* [JWT Templates](./jwt-templates.mdx) — shape token claims for downstream services.
+* [Users](./users.mdx) — ban a user (revokes all their sessions).
+* [Frontend API overview](../frontend/overview.mdx) — JWKS endpoint and client refresh flow.

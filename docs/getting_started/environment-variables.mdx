@@ -1,0 +1,67 @@
+---
+title: Environment Variables
+description: Every OpenAuthFederated environment variable, what it does, where to get it, and which are public vs secret.
+---
+
+OpenAuthFederated is configured with a small set of environment variables. Anything prefixed with `NEXT_PUBLIC_` is exposed to the browser and must be safe to ship publicly; everything else is server-only and must never reach client code. The values come from your OpenAuthFederated dashboard and from your self-hosted deployment's domains.
+
+## Quick start
+
+Add these to `.env.local` for local development. For production, set them in your hosting provider's environment configuration — never commit secret keys.
+
+```env
+# Public (browser-safe)
+NEXT_PUBLIC_AUTH_PUBLISHABLE_KEY=pk_test_your_publishable_key
+NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.whitehatengineering.com
+NEXT_PUBLIC_AUTH_SIGN_IN_URL=/sign-in
+NEXT_PUBLIC_AUTH_SIGN_UP_URL=/sign-up
+
+# Secret (server-only)
+AUTH_SECRET_KEY=sk_test_your_secret_key
+AUTH_BACKEND_API=https://api.whitehatengineering.com/v1
+```
+
+## Public variables
+
+These are read in the browser. The `NEXT_PUBLIC_` prefix is required so Next.js inlines them into the client bundle.
+
+| Variable | Required | Description | Where to get it |
+| --- | --- | --- | --- |
+| `NEXT_PUBLIC_AUTH_PUBLISHABLE_KEY` | Yes | Identifies your instance to the Frontend API. Prefixed `pk_test_` (development) or `pk_live_` (production). Safe to expose. | Dashboard → API Keys |
+| `NEXT_PUBLIC_AUTH_FRONTEND_API` | Yes | Base URL of your self-hosted Frontend API that the browser SDK and UI components talk to. | Your deployment: `https://auth.<your-domain>` |
+| `NEXT_PUBLIC_AUTH_SIGN_IN_URL` | No | Path the SDK redirects to for sign-in. Defaults to `/sign-in`. | You choose |
+| `NEXT_PUBLIC_AUTH_SIGN_UP_URL` | No | Path the SDK redirects to for sign-up. Defaults to `/sign-up`. | You choose |
+
+## Secret variables
+
+These are read only on the server. Treat them like passwords: never log them, never inline them into the client, never commit them.
+
+| Variable | Required | Description | Where to get it |
+| --- | --- | --- | --- |
+| `AUTH_SECRET_KEY` | Yes | Authenticates server-to-server calls to the Backend API and verifies tokens. Prefixed `sk_test_` (development) or `sk_live_` (production). **Never expose to the browser.** | Dashboard → API Keys |
+| `AUTH_BACKEND_API` | Yes | Base URL of your self-hosted Backend API for server SDK calls (`authClient`). | Your deployment: `https://api.<your-domain>/v1` |
+
+## Optional / advanced variables
+
+| Variable | Description |
+| --- | --- |
+| `AUTH_WEBHOOK_SIGNING_SECRET` | Verifies the signature on incoming webhooks (`user.created`, `user.updated`, `user.deleted`, group changes). Set this if you consume webhooks. |
+| `AUTH_JWT_ISSUER` | Expected `iss` claim when verifying access tokens. Usually your Frontend API URL. |
+| `AUTH_ALLOWED_DOMAINS` | Comma-separated list of verified company domains permitted to sign in. For the reference deployment: `whitehatengineering.com`. Enforced server-side. |
+
+## Key prefixes at a glance
+
+| Prefix | Meaning |
+| --- | --- |
+| `pk_test_` | Publishable key, development instance |
+| `pk_live_` | Publishable key, production instance |
+| `sk_test_` | Secret key, development instance |
+| `sk_live_` | Secret key, production instance |
+
+> Public keys can ship to the browser. Secret keys cannot — keep `sk_*` values exclusively on the server, and rotate them from the dashboard if one is ever exposed.
+
+## Next steps
+
+- [Next.js quickstart](./quickstart-nextjs.mdx) — wire these values into a running app.
+- [Protect routes](./protect-routes.mdx) — use the keys to enforce auth and permissions.
+- [Deploy](./deploy.mdx) — switch from `*_test_*` to `*_live_*` and set domain enforcement.

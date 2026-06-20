@@ -1,0 +1,343 @@
+---
+title: Users
+description: Create, read, update, ban, lock, and delete users in your OpenAuthFederated deployment, including federated external IdP identities and metadata.
+---
+
+# Users
+
+A **User** represents a person who can authenticate to an application gated by OpenAuthFederated.
+Because the platform federates to upstream identity providers (SAML 2.0 / OIDC, Google
+Workspace), a user typically has no password of its own — instead it carries one or more
+**external identities** asserted by the upstream IdP. Users are created automatically through
+**Just-In-Time (JIT) provisioning** on first valid sign-in, synced via **SCIM 2.0**, or created
+explicitly with the admin endpoint below.
+
+All endpoints are relative to your base URL, e.g.
+`https://api.whitehatengineering.com/v1`.
+
+## The User object
+
+| Field                  | Type    | Description                                                                                  |
+|------------------------|---------|----------------------------------------------------------------------------------------------|
+| `id`                   | string  | Unique identifier, prefixed `user_`.                                                          |
+| `object`               | string  | Always `"user"`.                                                                              |
+| `primary_email_address`| string  | The user's primary verified email.                                                           |
+| `email_addresses`      | array   | All email addresses, each with `id`, `email_address`, and `verified` status.                 |
+| `external_identities`  | array   | Federated identities from upstream IdPs (see below). The authoritative link to SAML/OIDC.     |
+| `first_name`           | string  | Given name (mapped from IdP attributes when available).                                       |
+| `last_name`            | string  | Family name.                                                                                  |
+| `image_url`            | string  | Avatar URL.                                                                                   |
+| `role`                 | string  | The user's application-level RBAC role (e.g. `member`, `admin`).                              |
+| `public_metadata`      | object  | Readable by the front end and included in session tokens. Non-sensitive.                      |
+| `private_metadata`     | object  | Server-only. Never exposed to the front end or in tokens.                                     |
+| `unsafe_metadata`      | object  | Writable by the end user from the front end. Treat as untrusted input.                        |
+| `banned`               | boolean | If `true`, the user cannot sign in and active sessions are revoked.                           |
+| `locked`               | boolean | If `true`, sign-in is temporarily blocked (e.g. after suspicious activity).                   |
+| `lockout_expires_at`   | integer | When a lock auto-expires (Unix ms), or `null`.                                                |
+| `last_active_at`       | integer | Last activity timestamp (Unix ms).                                                            |
+| `last_sign_in_at`      | integer | Last successful sign-in (Unix ms).                                                            |
+| `created_at`           | integer | Creation timestamp (Unix ms).                                                                 |
+| `updated_at`           | integer | Last update timestamp (Unix ms).                                                              |
+
+### External identity object
+
+| Field            | Type    | Description                                                              |
+|------------------|---------|-------------------------------------------------------------------------|
+| `provider`       | string  | Upstream IdP, e.g. `saml_google_workspace`, `oidc_google`, `oidc_okta`. |
+| `provider_user_id` | string| The subject (`sub` / NameID) asserted by the upstream IdP.              |
+| `email_address`  | string  | Email asserted by the IdP.                                              |
+| `email_verified` | boolean | Whether the upstream IdP asserted a verified email (`email_verified`).  |
+| `hosted_domain`  | string  | The `hd` claim / domain the identity belongs to (used for domain enforcement). |
+
+---
+
+## List users
+
+```
+GET /users
+```
+
+Returns a paginated list of users. Combine filters to narrow the result set.
+
+### Query parameters
+
+| Parameter         | Type    | Description                                                                       |
+|-------------------|---------|-----------------------------------------------------------------------------------|
+| `email_address`   | array   | Filter to users owning one or more of these email addresses.                      |
+| `organization_id` | array   | Filter to users who are members of one or more of these organizations.            |
+| `query`           | string  | Full-text search across name and email.                                           |
+| `order_by`        | string  | Sort field with `+`/`-` prefix. Supports `created_at`, `updated_at`, `last_sign_in_at`, `email_address`. Default `-created_at`. |
+| `limit`           | integer | Page size (default `10`, max `500`).                                              |
+| `offset`          | integer | Records to skip (default `0`).                                                    |
+
+### Request
+
+```bash
+curl -G "https://api.whitehatengineering.com/v1/users" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  --data-urlencode "organization_id=org_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  --data-urlencode "order_by=-created_at" \
+  --data-urlencode "limit=20"
+```
+
+### Response
+
+```json
+{
+  "data": [
+    {
+      "id": "user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+      "object": "user",
+      "primary_email_address": "ada@whitehatengineering.com",
+      "email_addresses": [
+        { "id": "idn_3b2Cd4Ef5Gh6", "email_address": "ada@whitehatengineering.com", "verified": true }
+      ],
+      "external_identities": [
+        {
+          "provider": "saml_google_workspace",
+          "provider_user_id": "117624...",
+          "email_address": "ada@whitehatengineering.com",
+          "email_verified": true,
+          "hosted_domain": "whitehatengineering.com"
+        }
+      ],
+      "first_name": "Ada",
+      "last_name": "Lovelace",
+      "role": "admin",
+      "public_metadata": { "department": "engineering" },
+      "private_metadata": {},
+      "unsafe_metadata": {},
+      "banned": false,
+      "locked": false,
+      "last_sign_in_at": 1718841600000,
+      "created_at": 1701302400000,
+      "updated_at": 1718841600000
+    }
+  ],
+  "total_count": 87
+}
+```
+
+---
+
+## Get a user
+
+```
+GET /users/{user_id}
+```
+
+### Path parameters
+
+| Parameter  | Type   | Description                  |
+|------------|--------|------------------------------|
+| `user_id`  | string | The user ID (`user_...`).    |
+
+### Request
+
+```bash
+curl "https://api.whitehatengineering.com/v1/users/user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+Returns a single [User object](#the-user-object).
+
+---
+
+## Create a user
+
+```
+POST /users
+```
+
+Administratively create a user. Most users are created via JIT or SCIM; use this for seeding
+service accounts, migrations, or pre-provisioning. The created user has no password — they sign
+in through the federated upstream IdP whose identity matches their email.
+
+> **Domain enforcement:** if your deployment restricts sign-in to verified company domains, the
+> `email_address` must belong to an allowed domain or the request is rejected with `403`.
+
+### Body parameters
+
+| Parameter          | Type   | Description                                                        |
+|--------------------|--------|--------------------------------------------------------------------|
+| `email_address`    | array  | One or more email addresses for the user. Required.                |
+| `first_name`       | string | Given name.                                                        |
+| `last_name`        | string | Family name.                                                       |
+| `role`             | string | RBAC role to assign (default `member`).                            |
+| `public_metadata`  | object | Non-sensitive metadata, visible to the front end and tokens.      |
+| `private_metadata` | object | Server-only metadata.                                             |
+| `unsafe_metadata`  | object | End-user-editable metadata.                                       |
+| `skip_orgs_check`  | boolean| If `true`, create without requiring an organization membership.    |
+
+### Request
+
+```bash
+curl https://api.whitehatengineering.com/v1/users \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 7e3a6c2e-2f4b-4f1a-9c3d-2b8e1f0a4d5c" \
+  -d '{
+    "email_address": ["grace@whitehatengineering.com"],
+    "first_name": "Grace",
+    "last_name": "Hopper",
+    "role": "member",
+    "public_metadata": { "department": "research" }
+  }'
+```
+
+### Response
+
+Returns the created [User object](#the-user-object) with status `200`.
+
+---
+
+## Update a user
+
+```
+PATCH /users/{user_id}
+```
+
+Update metadata, name, or role. Only the fields you send are changed. To merge into existing
+metadata, send the full intended object for that metadata key (metadata is replaced, not deep-merged).
+
+### Body parameters
+
+| Parameter          | Type   | Description                                  |
+|--------------------|--------|----------------------------------------------|
+| `first_name`       | string | Updated given name.                          |
+| `last_name`        | string | Updated family name.                         |
+| `role`             | string | Updated RBAC role.                           |
+| `public_metadata`  | object | Replaces public metadata.                    |
+| `private_metadata` | object | Replaces private metadata.                   |
+| `unsafe_metadata`  | object | Replaces unsafe metadata.                    |
+
+### Request
+
+```bash
+curl -X PATCH "https://api.whitehatengineering.com/v1/users/user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "role": "admin", "public_metadata": { "department": "engineering" } }'
+```
+
+### Response
+
+Returns the updated [User object](#the-user-object).
+
+---
+
+## Delete a user
+
+```
+DELETE /users/{user_id}
+```
+
+Soft-deletes the user and revokes all of their active sessions immediately. Federated identities
+are unlinked. To re-enable access, the user must sign in again through the upstream IdP (subject
+to domain enforcement and provisioning rules).
+
+### Request
+
+```bash
+curl -X DELETE "https://api.whitehatengineering.com/v1/users/user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+```json
+{
+  "id": "user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk",
+  "object": "user",
+  "deleted": true
+}
+```
+
+---
+
+## Ban a user
+
+```
+POST /users/{user_id}/ban
+```
+
+Bans the user: they can no longer sign in, and all active sessions are revoked immediately
+(server-side session records make this effective even for short-lived tokens still in flight).
+Banning is durable until reversed. This is the recommended response to a compromised or
+offboarded account when you also want to block future sign-in attempts.
+
+### Request
+
+```bash
+curl -X POST "https://api.whitehatengineering.com/v1/users/user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk/ban" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+Returns the [User object](#the-user-object) with `"banned": true`. A corresponding
+`user.banned` event is written to the audit log. To reverse, call
+`POST /users/{user_id}/unban`.
+
+---
+
+## Lock a user
+
+```
+POST /users/{user_id}/lock
+```
+
+Temporarily locks the user out of sign-in (e.g. after repeated failed attempts or a suspicious
+event). Unlike a ban, a lock is intended to be transient and may auto-expire via
+`lockout_expires_at`.
+
+### Request
+
+```bash
+curl -X POST "https://api.whitehatengineering.com/v1/users/user_2a1Bc3Df4Eg5Hh6Ii7Jj8Kk/lock" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+Returns the [User object](#the-user-object) with `"locked": true`. To reverse, call
+`POST /users/{user_id}/unlock`.
+
+---
+
+## Count users
+
+```
+GET /users/count
+```
+
+Returns the total number of users matching the same filters as the list endpoint, without
+returning the records. Useful for dashboards and pagination headers.
+
+### Query parameters
+
+Accepts `email_address`, `organization_id`, and `query` (see [List users](#list-users)).
+
+### Request
+
+```bash
+curl "https://api.whitehatengineering.com/v1/users/count" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+### Response
+
+```json
+{
+  "object": "total_count",
+  "total_count": 1342
+}
+```
+
+## Next steps
+
+* [Sessions](./sessions.mdx) — verify and revoke a user's sessions.
+* [Organizations](./organizations.mdx) — add a user to an org and assign roles.
+* [Backend SDK](../../sdk/backend-sdk.mdx) — `authClient.users.*` helpers.

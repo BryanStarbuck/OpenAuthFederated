@@ -1,0 +1,64 @@
+---
+title: Overview
+description: What OpenAuthFederated is, its mental model, and how federated sign-in works end to end.
+---
+
+OpenAuthFederated is an open-source, self-hosted authentication and identity platform — an open-source equivalent of hosted identity providers. You put it in front of your application and it handles federated sign-in, user provisioning, organizations, role-based authorization, sessions, and the security around them. Your app trusts an identity asserted by OpenAuthFederated and never touches the user's upstream password.
+
+The first real consumer of the platform is an internal company web app gated to a Google Workspace domain: only an active employee in the `whitehatengineering.com` Google Workspace can sign in. No app-specific passwords, no social logins, no anonymous access.
+
+## The mental model
+
+OpenAuthFederated is made of a handful of pieces. Once you know which piece does what, every other page in these docs falls into place.
+
+- **Frontend API** (`https://auth.<your-domain>`) — the browser-facing surface. It powers the drop-in UI components and the client SDK: sign-in, sign-up, session bootstrapping, and token retrieval. It is reached with your **publishable key** (`pk_test_…` / `pk_live_…`), which is safe to ship to the browser.
+- **Backend API** (`https://api.<your-domain>/v1`) — the server-to-server surface your backend calls with the **secret key** (`sk_test_…` / `sk_live_…`). Use it to read and manage users, sessions, organizations, and to verify tokens. Never expose the secret key to the browser.
+- **Platform API** — the administrative and integration surface: SAML/OIDC connection management, domain-enforcement policy, SCIM 2.0 directory sync, RBAC definitions, audit logs, and webhooks (`user.created`, `user.updated`, `user.deleted`, group/membership changes).
+- **SDKs** — `@auth/nextjs` (full-stack Next.js), `@auth/react` (client React), and `@auth/backend` (server SDK / `authClient`). These wrap the APIs so you call functions instead of HTTP.
+- **UI components** — drop-in `<SignIn />`, `<SignUp />`, `<SignInButton />`, `<UserButton />`, `<UserProfile />`, and control components (`<Show>`, `<Protect>`, `<AuthLoaded>`, `<AuthLoading>`) so you never rebuild auth screens.
+
+## How federation works
+
+OpenAuthFederated is the Service Provider (SP). Google Workspace (or any SAML 2.0 / OIDC IdP) is the Identity Provider (IdP). The reference deployment uses an SP-initiated flow:
+
+```
+App → OpenAuthFederated → Google Workspace → signed assertion → JIT user → session → short-lived JWT
+```
+
+Step by step:
+
+1. **App → OpenAuthFederated.** An unauthenticated request hits a protected route; the middleware redirects the browser to the OpenAuthFederated sign-in page.
+2. **OpenAuthFederated → Google Workspace.** The platform starts an SP-initiated SAML 2.0 (or OIDC) flow against the configured Google Workspace connection.
+3. **Google Workspace authenticates the human.** The user signs in (MFA is inherited from the upstream IdP) and Google returns a **signed SAML assertion** or **OIDC ID token**.
+4. **Validate + enforce domain.** OpenAuthFederated validates the signature and enforces domain rules — on the OIDC path it checks the hosted-domain (`hd`) claim and `email_verified`, rejecting any identity outside `whitehatengineering.com`.
+5. **JIT provisioning.** On first valid sign-in the user is created Just-In-Time. SCIM 2.0 keeps the directory in sync for the full lifecycle (provision / update / deprovision).
+6. **Map groups → roles.** Upstream Google Workspace groups map to roles, and roles map to `<feature>:<action>` permissions (e.g. `code:read`, `jfk:write`, `*:read`). The IdP's groups are inputs; the authoritative authorization model lives in our own backend/DB.
+7. **Establish a session.** A server-side session record is created and a **hybrid session** is issued: a short-lived JWT access token (Bearer) plus a rotating, HttpOnly refresh cookie. The session record enables immediate revocation despite short token lifetimes.
+8. **App receives a short-lived JWT.** Your app verifies the JWT statelessly and the user is in.
+
+## Architecture overview
+
+```
+┌──────────────┐   protected route    ┌────────────────────────┐
+│   Your App   │ ───────────────────▶ │   OpenAuthFederated     │
+│ (Next.js SP) │ ◀─── short-lived JWT  │   (SP / auth layer)     │
+└──────────────┘   + refresh cookie    └───────────┬────────────┘
+       │                                            │ SAML 2.0 / OIDC
+       │ Backend API (sk_…)                         ▼
+       │ users, sessions, RBAC          ┌────────────────────────┐
+       └──────────────────────────────▶ │   Google Workspace IdP │
+                                         │  whitehatengineering.com│
+                                         └────────────────────────┘
+```
+
+Security properties carried through every layer: HTTPS only, `SameSite` + `HttpOnly` cookies for CSRF defense, CSP headers, no long-lived secrets in `localStorage`, no end-user passwords stored, and full audit logging of sign-in / sign-out / refresh / permission-denied / admin actions.
+
+## Next steps
+
+- [Next.js quickstart](./quickstart-nextjs.mdx) — install the SDK and get a user signed in.
+- [Environment variables](./environment-variables.mdx) — every key and URL you need.
+- [Protect routes](./protect-routes.mdx) — gate pages and APIs by auth, role, and permission.
+- [Read the user](./read-the-user.mdx) — access the current user on the server and client.
+- [Deploy](./deploy.mdx) — go to production with Google Workspace and domain enforcement.
+- [SDK overview](../sdk/overview.mdx)
+- [Frontend API](../apis/frontend/overview.mdx) · [Backend API](../apis/backend/overview.mdx) · [Platform API](../apis/platform/overview.mdx)

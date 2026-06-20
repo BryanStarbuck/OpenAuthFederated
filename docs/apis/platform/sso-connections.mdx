@@ -1,0 +1,279 @@
+---
+title: SSO connections
+description: Create and manage SAML 2.0 and OIDC federation to upstream Identity Providers, with a full Google Workspace walkthrough and attribute/group mapping.
+---
+
+# SSO connections
+
+An **SSO Connection** federates an [organization](./organizations.mdx) to an upstream **Identity
+Provider (IdP)** so that OpenAuthFederated acts as the **Service Provider (SP)** side of the
+trust relationship. Your application never sees the user's upstream password — the IdP
+authenticates the human and asserts their identity to OpenAuthFederated, which validates the
+assertion, resolves (or JIT-creates) the user, maps groups to roles, and establishes a session.
+
+Connections come in two types:
+
+* **`saml`** — SAML 2.0. The go-forward default for Google Workspace via a custom SAML app.
+* **`oidc`** — OpenID Connect. An equivalent path that verifies the hosted-domain (`hd`) claim
+  and `email_verified`.
+
+## The SSO Connection object
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `id` | string | Unique identifier, prefixed `conn_`. |
+| `object` | string | Always `sso_connection`. |
+| `organization_id` | string | Owning [org](./organizations.mdx) (`org_...`). |
+| `type` | string | `saml` or `oidc`. |
+| `name` | string | Display name (e.g. `Google Workspace`). |
+| `status` | string | `draft`, `pending_metadata`, `active`, or `disabled`. |
+| `sp` | object | SP-side endpoints OpenAuthFederated exposes (ACS URL, Entity ID). |
+| `idp` | object | IdP metadata you supply (see below, varies by `type`). |
+| `attribute_mapping` | object | Maps IdP assertion attributes → OpenAuthFederated user fields. |
+| `group_mapping` | array | Maps IdP groups → [roles](./rbac.mdx). |
+| `scim_enabled` | boolean | Whether [SCIM](./scim.mdx) is active on this connection. |
+| `created_at` | string | ISO 8601 timestamp. |
+| `updated_at` | string | ISO 8601 timestamp. |
+
+### `sp` object (provided by OpenAuthFederated)
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `acs_url` | string | Assertion Consumer Service URL the IdP POSTs the SAML response to. |
+| `entity_id` | string | SP Entity ID / Audience. |
+| `metadata_url` | string | SP metadata XML you can hand to the IdP. |
+| `redirect_uri` | string | (OIDC) callback / redirect URI. |
+
+### `idp` object (you provide)
+
+For **SAML**:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `entity_id` | string | IdP Entity ID. |
+| `sso_url` | string | IdP single-sign-on (redirect) URL. |
+| `x509_cert` | string | IdP signing certificate (PEM). |
+| `metadata_xml` | string | Optional — paste full IdP metadata to populate the above. |
+
+For **OIDC**:
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `issuer` | string | OIDC issuer (e.g. `https://accounts.google.com`). |
+| `client_id` | string | OAuth client ID. |
+| `client_secret` | string | OAuth client secret (write-only). |
+| `discovery_url` | string | `.well-known/openid-configuration` URL. |
+| `hosted_domain` | string | Required `hd` claim value (e.g. `whitehatengineering.com`). |
+
+```json
+{
+  "id": "conn_4d2f8a",
+  "object": "sso_connection",
+  "organization_id": "org_2a9f1c0bd3e4",
+  "type": "saml",
+  "name": "Google Workspace",
+  "status": "active",
+  "sp": {
+    "acs_url": "https://api.whitehatengineering.com/v1/sso/conn_4d2f8a/acs",
+    "entity_id": "https://api.whitehatengineering.com/v1/sso/conn_4d2f8a",
+    "metadata_url": "https://api.whitehatengineering.com/v1/sso/conn_4d2f8a/metadata"
+  },
+  "idp": {
+    "entity_id": "https://accounts.google.com/o/saml2?idpid=C01abc234",
+    "sso_url": "https://accounts.google.com/o/saml2/idp?idpid=C01abc234",
+    "x509_cert": "-----BEGIN CERTIFICATE-----\nMIID...\n-----END CERTIFICATE-----"
+  },
+  "attribute_mapping": {
+    "email": "NameID",
+    "first_name": "first_name",
+    "last_name": "last_name",
+    "groups": "groups"
+  },
+  "group_mapping": [
+    { "idp_group": "gws-engineering@whitehatengineering.com", "role_id": "role_eng" }
+  ],
+  "scim_enabled": true,
+  "created_at": "2026-06-02T11:00:00Z",
+  "updated_at": "2026-06-18T09:12:55Z"
+}
+```
+
+## List connections
+
+`GET /v1/sso_connections`
+
+| Param | Type | Description |
+| --- | --- | --- |
+| `organization_id` | string | Filter by org. |
+| `type` | string | `saml` or `oidc`. |
+| `status` | string | Filter by status. |
+| `limit` / `offset` | integer | Pagination. |
+
+```bash
+curl "https://api.whitehatengineering.com/v1/sso_connections?organization_id=org_2a9f1c0bd3e4" \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+## Create a connection
+
+`POST /v1/sso_connections`
+
+| Param | Type | Required | Description |
+| --- | --- | --- | --- |
+| `organization_id` | string | yes | Owning org. |
+| `type` | string | yes | `saml` or `oidc`. |
+| `name` | string | yes | Display name. |
+| `idp` | object | no | IdP metadata (can be supplied later via `PATCH`). |
+| `attribute_mapping` | object | no | Defaults to standard email/first/last/groups. |
+
+```bash
+curl https://api.whitehatengineering.com/v1/sso_connections \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "organization_id": "org_2a9f1c0bd3e4",
+    "type": "saml",
+    "name": "Google Workspace"
+  }'
+```
+
+The connection is created in `draft` with the SP-side endpoints already populated — hand
+`sp.acs_url`, `sp.entity_id`, and `sp.metadata_url` to your IdP.
+
+## Retrieve, update, delete
+
+`GET /v1/sso_connections/{conn_id}`
+
+`PATCH /v1/sso_connections/{conn_id}` — supply IdP metadata, change mappings, or flip status.
+
+```bash
+curl -X PATCH https://api.whitehatengineering.com/v1/sso_connections/conn_4d2f8a \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idp": { "metadata_xml": "<EntityDescriptor ...>...</EntityDescriptor>" },
+    "status": "active"
+  }'
+```
+
+`DELETE /v1/sso_connections/{conn_id}` — disables federation for the org and revokes member
+sessions established through it.
+
+```bash
+curl -X DELETE https://api.whitehatengineering.com/v1/sso_connections/conn_4d2f8a \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+## Google Workspace SAML walkthrough
+
+This is the canonical OpenAuthFederated setup: federate the **White Hat Engineering** org to
+**Google Workspace** so only active Workspace members on `whitehatengineering.com` can sign in.
+
+### 1. Create the connection in OpenAuthFederated
+
+```bash
+curl https://api.whitehatengineering.com/v1/sso_connections \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "organization_id": "org_2a9f1c0bd3e4", "type": "saml", "name": "Google Workspace" }'
+```
+
+Note the returned `sp.acs_url` and `sp.entity_id` — you will paste these into Google.
+
+### 2. Create a custom SAML app in the Google Admin console
+
+In **admin.google.com → Apps → Web and mobile apps → Add app → Add custom SAML app**:
+
+* Download the **IdP metadata** (or copy the **SSO URL**, **Entity ID**, and **Certificate**).
+* In **Service provider details**, set:
+  * **ACS URL** = the connection's `sp.acs_url`
+    (`https://api.whitehatengineering.com/v1/sso/conn_4d2f8a/acs`)
+  * **Entity ID** = the connection's `sp.entity_id`
+  * **Name ID format** = `EMAIL`, **Name ID** = *Basic Information > Primary email*.
+
+### 3. Map Google attributes
+
+In the SAML app's **Attribute mapping**, expose:
+
+| Google directory field | App attribute |
+| --- | --- |
+| Primary email | `NameID` (email) |
+| First name | `first_name` |
+| Last name | `last_name` |
+| Group membership (add Google Groups) | `groups` |
+
+### 4. Exchange metadata back into OpenAuthFederated
+
+```bash
+curl -X PATCH https://api.whitehatengineering.com/v1/sso_connections/conn_4d2f8a \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "idp": { "metadata_xml": "<EntityDescriptor entityID=\"https://accounts.google.com/o/saml2?idpid=C01abc234\"> ... </EntityDescriptor>" },
+    "attribute_mapping": {
+      "email": "NameID",
+      "first_name": "first_name",
+      "last_name": "last_name",
+      "groups": "groups"
+    }
+  }'
+```
+
+### 5. Map Workspace groups to roles
+
+```bash
+curl -X PATCH https://api.whitehatengineering.com/v1/sso_connections/conn_4d2f8a \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "group_mapping": [
+      { "idp_group": "gws-engineering@whitehatengineering.com", "role_id": "role_eng" },
+      { "idp_group": "gws-readonly@whitehatengineering.com",    "role_id": "role_viewer" }
+    ]
+  }'
+```
+
+See [RBAC](./rbac.mdx#map-upstream-idp-groups-to-roles) for how these roles resolve into
+`<feature>:<action>` permissions and session claims.
+
+### 6. Verify the domain and activate
+
+Add and verify `whitehatengineering.com` (see [Domains](./domains.mdx)), then `PATCH` the
+connection `status` to `active`. Only Workspace users on the verified domain can now sign in;
+everyone else is rejected by [domain enforcement](./domains.mdx#domain-enforcement).
+
+## OIDC variant (verifying `hd` + `email_verified`)
+
+If you prefer OIDC, create a `type: oidc` connection and require the hosted-domain claim:
+
+```bash
+curl https://api.whitehatengineering.com/v1/sso_connections \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "organization_id": "org_2a9f1c0bd3e4",
+    "type": "oidc",
+    "name": "Google Workspace (OIDC)",
+    "idp": {
+      "issuer": "https://accounts.google.com",
+      "discovery_url": "https://accounts.google.com/.well-known/openid-configuration",
+      "client_id": "1234567890-abc.apps.googleusercontent.com",
+      "client_secret": "GOCSPX-xxxxxxxxxxxxxxxx",
+      "hosted_domain": "whitehatengineering.com"
+    }
+  }'
+```
+
+On every OIDC sign-in, OpenAuthFederated rejects the ID token unless **both**:
+
+* `hd` equals `whitehatengineering.com`, and
+* `email_verified` is `true`.
+
+This prevents personal Gmail accounts and unverified addresses from authenticating, mirroring
+SAML domain enforcement.
+
+## Next steps
+
+* [Domains](./domains.mdx) — verify `whitehatengineering.com` and turn on enforcement.
+* [SCIM](./scim.mdx) — enable directory sync on this connection.
+* [RBAC](./rbac.mdx) — turn group mappings into permissions.

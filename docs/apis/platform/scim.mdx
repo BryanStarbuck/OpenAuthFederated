@@ -1,0 +1,178 @@
+---
+title: SCIM 2.0 directory sync
+description: Enable SCIM 2.0 per connection so your IdP can provision, update, and deprovision users and groups — with deprovision triggering session revocation and the user.deleted webhook.
+---
+
+# SCIM 2.0 directory sync
+
+**SCIM 2.0** (System for Cross-domain Identity Management) lets your upstream IdP push the full
+user lifecycle into OpenAuthFederated — **provision**, **update**, and **deprovision** — instead
+of relying only on Just-In-Time (JIT) creation at sign-in. With SCIM enabled on a
+[connection](./sso-connections.mdx), Google Workspace becomes the authoritative directory:
+when a person is added, edited, or offboarded in Workspace, OpenAuthFederated reflects the change
+automatically and emits [webhooks](./webhooks.mdx).
+
+SCIM complements, rather than replaces, JIT. JIT handles first sign-in; SCIM keeps the directory
+correct over time and — critically — **deprovisions** users so access is revoked when someone
+leaves.
+
+## How SCIM is authenticated
+
+SCIM uses its **own bearer provisioning token**, scoped to a single connection — **not** your
+`sk_live_...` secret key. You configure this token into the IdP's SCIM/auto-provisioning settings.
+
+```
+Authorization: Bearer scim_tok_b8c1e2f3a4d5...
+```
+
+* The token is created when you enable SCIM and can be rotated (see
+  [API keys](./api-keys.mdx#scim-provisioning-tokens)).
+* It is shown **once** at creation; store it directly in the IdP.
+* It grants access only to the SCIM endpoints of its connection.
+
+## Enable SCIM on a connection
+
+`POST /v1/sso_connections/{conn_id}/scim`
+
+```bash
+curl https://api.whitehatengineering.com/v1/sso_connections/conn_4d2f8a/scim \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+```json
+{
+  "id": "scim_9d0a1b2c",
+  "object": "scim_configuration",
+  "connection_id": "conn_4d2f8a",
+  "organization_id": "org_2a9f1c0bd3e4",
+  "status": "active",
+  "base_url": "https://api.whitehatengineering.com/scim/v2",
+  "token": "scim_tok_b8c1e2f3a4d5e6f7a8b9",
+  "token_preview": "scim_tok_...a8b9",
+  "created_at": "2026-06-20T18:30:00Z"
+}
+```
+
+Configure the IdP with:
+
+* **SCIM base URL**: `https://api.whitehatengineering.com/scim/v2`
+* **Bearer token**: the `token` value above.
+
+In the Google Admin console (SAML app → **Auto-provisioning**), paste these two values and map
+the directory attributes you want synced.
+
+`GET /v1/sso_connections/{conn_id}/scim` retrieves the config (token is never returned again),
+`DELETE` disables SCIM for the connection.
+
+## Supported SCIM resource endpoints
+
+These live under the SCIM **base URL** and use `application/scim+json`. They are authenticated
+with the **SCIM token**, not the platform secret key.
+
+### Users — `/scim/v2/Users`
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/scim/v2/Users` | List / filter users (`filter=userName eq "alice@..."`). |
+| `GET` | `/scim/v2/Users/{id}` | Retrieve a user. |
+| `POST` | `/scim/v2/Users` | Provision a new user. |
+| `PUT` | `/scim/v2/Users/{id}` | Full replace. |
+| `PATCH` | `/scim/v2/Users/{id}` | Partial update (e.g. `active: false`). |
+| `DELETE` | `/scim/v2/Users/{id}` | Deprovision (delete). |
+
+Provision example (what the IdP sends):
+
+```bash
+curl https://api.whitehatengineering.com/scim/v2/Users \
+  -H "Authorization: Bearer scim_tok_b8c1e2f3a4d5e6f7a8b9" \
+  -H "Content-Type: application/scim+json" \
+  -d '{
+    "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+    "userName": "alice@whitehatengineering.com",
+    "name": { "givenName": "Alice", "familyName": "Nguyen" },
+    "emails": [{ "value": "alice@whitehatengineering.com", "primary": true }],
+    "active": true
+  }'
+```
+
+```json
+{
+  "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+  "id": "usr_5f6a7b8c",
+  "userName": "alice@whitehatengineering.com",
+  "name": { "givenName": "Alice", "familyName": "Nguyen" },
+  "active": true,
+  "meta": {
+    "resourceType": "User",
+    "created": "2026-06-20T18:31:00Z",
+    "location": "https://api.whitehatengineering.com/scim/v2/Users/usr_5f6a7b8c"
+  }
+}
+```
+
+### Groups — `/scim/v2/Groups`
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/scim/v2/Groups` | List / filter groups. |
+| `GET` | `/scim/v2/Groups/{id}` | Retrieve a group + members. |
+| `POST` | `/scim/v2/Groups` | Create a group. |
+| `PUT` | `/scim/v2/Groups/{id}` | Full replace. |
+| `PATCH` | `/scim/v2/Groups/{id}` | Add/remove members. |
+| `DELETE` | `/scim/v2/Groups/{id}` | Delete a group. |
+
+Synced groups feed straight into RBAC: a group's `displayName` (e.g.
+`gws-engineering@whitehatengineering.com`) is matched against the connection's
+[group mapping](./sso-connections.mdx#5-map-workspace-groups-to-roles) to assign
+[roles](./rbac.mdx).
+
+## Attribute mapping
+
+| SCIM attribute | OpenAuthFederated field |
+| --- | --- |
+| `userName` | email / primary identifier |
+| `name.givenName` | first_name |
+| `name.familyName` | last_name |
+| `emails[primary].value` | email |
+| `active` | account enabled/disabled |
+| `groups` / Group membership | group → [role](./rbac.mdx) assignment |
+| `externalId` | IdP's stable user ID (used to match across syncs) |
+
+Customize the mapping with the connection's `attribute_mapping`
+(see [SSO connections](./sso-connections.mdx)).
+
+## Deprovisioning and revocation
+
+Deprovisioning is the most important SCIM operation for security. When the IdP **deletes** a
+user (`DELETE /scim/v2/Users/{id}`) **or** marks them inactive
+(`PATCH` with `"active": false`), OpenAuthFederated:
+
+1. **Disables the user** in the authoritative DB.
+2. **Force-revokes all active sessions** for that user — the server-side session records are
+   invalidated, so even unexpired short-lived JWTs stop working at the next refresh (and any
+   immediate revocation check). See the hybrid session model in
+   [Backend API](../backend/overview.mdx).
+3. **Emits a `user.deleted` (or `user.updated`)** [webhook](./webhooks.mdx) so your app can
+   react (clear caches, notify, etc.).
+4. **Writes an audit event** (`user.deprovisioned`) to the [audit log](./audit-logs.mdx).
+
+```bash
+# Offboard Alice — IdP deactivates the account
+curl -X PATCH https://api.whitehatengineering.com/scim/v2/Users/usr_5f6a7b8c \
+  -H "Authorization: Bearer scim_tok_b8c1e2f3a4d5e6f7a8b9" \
+  -H "Content-Type: application/scim+json" \
+  -d '{
+    "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+    "Operations": [{ "op": "replace", "path": "active", "value": false }]
+  }'
+```
+
+Combined with suspending the Google Workspace account and short token lifetimes, this revokes
+access promptly. Admins can also force-revoke from the [Backend API](../backend/overview.mdx)
+without waiting for the IdP.
+
+## Next steps
+
+* [Webhooks](./webhooks.mdx) — receive `user.created` / `user.updated` / `user.deleted`.
+* [RBAC](./rbac.mdx) — turn synced groups into roles and permissions.
+* [Audit logs](./audit-logs.mdx) — confirm provision/deprovision events.

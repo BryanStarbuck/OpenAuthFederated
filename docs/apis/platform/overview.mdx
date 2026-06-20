@@ -1,0 +1,182 @@
+---
+title: Platform API overview
+description: The administrative control plane for OpenAuthFederated — manage tenants, SSO connections, domains, SCIM, webhooks, RBAC, audit logs, and API keys.
+---
+
+# Platform API
+
+The **Platform API** is the administrative **control plane** for OpenAuthFederated, our
+open-source, self-hosted authentication and identity platform (an open-source equivalent of
+hosted identity providers). It is the API you use to *configure* identity and federation:
+create tenants, wire up upstream Identity Providers (IdPs) over SAML 2.0 or OIDC, verify and
+enforce company domains, turn on SCIM 2.0 directory sync, register webhooks, define RBAC roles
+and permissions, read audit logs, and manage API keys.
+
+If the Backend API is where your application *reads and writes user/session data at runtime*,
+and the Frontend API is what *browser clients call to sign users in*, the Platform API is where
+an administrator (or your provisioning automation / IaC) *sets the rules of the system*.
+
+| Plane | API | Audience | Typical caller |
+| --- | --- | --- | --- |
+| **Control plane** | **Platform API** (this reference) | Admins / DevOps / IaC | Backend services holding a secret key |
+| Data plane | [Backend API](../backend/overview.mdx) | Your application backend | Your server, on behalf of a user/session |
+| Edge / browser | [Frontend API](../frontend/overview.mdx) | End-user browser | The drop-in UI components and SDK |
+
+## Base URL and self-hosting
+
+OpenAuthFederated is self-hosted, so the base URL is **your** domain. The Platform API shares
+the same host as the Backend API and lives under the `/v1` prefix on administrative resources:
+
+```
+https://api.<your-domain>/v1
+```
+
+For the reference deployment used throughout these docs (federating an internal app to Google
+Workspace on `whitehatengineering.com`), the base URL is:
+
+```
+https://api.whitehatengineering.com/v1
+```
+
+See [Deploy OpenAuthFederated](../../getting_started/deploy.mdx) for how to stand up the host,
+provision the database, and obtain your first secret key.
+
+## Authentication
+
+Management calls authenticate with a **secret API key** (`AUTH_SECRET_KEY`) as a bearer token:
+
+```bash
+curl https://api.whitehatengineering.com/v1/organizations \
+  -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY"
+```
+
+* Secret keys are prefixed `sk_live_...` (and `sk_test_...` for non-production deployments).
+* Secret keys are **server-side only** — never embed them in a browser, mobile app, or any
+  client-side bundle. See [API keys](./api-keys.mdx).
+* SCIM provisioning uses its **own** bearer token, scoped per SSO connection — it is *not* the
+  secret key. See [SCIM](./scim.mdx).
+
+## Conventions
+
+OpenAuthFederated follows REST conventions modeled on mature developer platforms.
+
+* **JSON everywhere** — request and response bodies are `application/json` (SCIM endpoints use
+  `application/scim+json`).
+* **Versioning** — all administrative resources are under `/v1`.
+* **Prefixed IDs** — every object has a stable, type-prefixed identifier:
+
+  | Prefix | Resource |
+  | --- | --- |
+  | `org_` | Organization / tenant |
+  | `conn_` | SSO connection |
+  | `dmn_` | Verified domain |
+  | `scim_` | SCIM configuration / token |
+  | `whk_` | Webhook endpoint |
+  | `role_` | Role |
+  | `perm_` | Permission |
+  | `evt_` | Event (webhook / audit) |
+  | `key_` | API key |
+
+* **Pagination** — list endpoints accept `limit` (default `20`, max `100`) and `offset`, and
+  return a `total_count`:
+
+  ```json
+  {
+    "object": "list",
+    "data": [],
+    "limit": 20,
+    "offset": 0,
+    "total_count": 0
+  }
+  ```
+
+* **Errors** — a standard error object with a machine-readable `code`, a human `message`, and a
+  `trace_id` you can quote in support requests or correlate with [audit logs](./audit-logs.mdx):
+
+  ```json
+  {
+    "error": {
+      "code": "domain_not_verified",
+      "message": "Domain whitehatengineering.com has not completed DNS verification.",
+      "param": "domain_id",
+      "trace_id": "trace_9af2c1d0e4b8"
+    }
+  }
+  ```
+
+  | HTTP | Meaning |
+  | --- | --- |
+  | `400` | Invalid request (validation) |
+  | `401` | Missing or invalid secret key |
+  | `403` | Key lacks the required scope |
+  | `404` | Resource not found |
+  | `409` | Conflict (e.g. domain already claimed) |
+  | `422` | Semantically invalid (e.g. SAML metadata won't parse) |
+  | `429` | Rate limited |
+
+## Resource map
+
+The Platform API is organized around the resources that make up an identity deployment:
+
+| Resource | What it controls | Reference |
+| --- | --- | --- |
+| **Organizations / tenants** | The unit of multi-tenancy; owns connections, domains, SCIM | [organizations.mdx](./organizations.mdx) |
+| **SSO connections** | Upstream IdP federation (`saml` / `oidc`), attribute & group mapping | [sso-connections.mdx](./sso-connections.mdx) |
+| **Domains** | Verified company domains + domain enforcement | [domains.mdx](./domains.mdx) |
+| **SCIM** | SCIM 2.0 directory sync (provision / update / deprovision) | [scim.mdx](./scim.mdx) |
+| **Webhooks** | Subscribe to lifecycle and session events | [webhooks.mdx](./webhooks.mdx) |
+| **Roles & permissions** | RBAC: `<feature>:<action>` permissions, roles, group mapping | [rbac.mdx](./rbac.mdx) |
+| **Audit logs** | Immutable record of sign-in / admin / security events | [audit-logs.mdx](./audit-logs.mdx) |
+| **API keys** | Publishable & secret keys, SCIM tokens, rotation | [api-keys.mdx](./api-keys.mdx) |
+
+## End-to-end: federate a tenant to Google Workspace
+
+The canonical OpenAuthFederated setup gates an internal app so that **only active members of a
+Google Workspace domain can sign in**. Here is the full control-plane flow; each step links to
+the page that documents it in depth.
+
+1. **Create the organization (tenant).** One org per customer or internal app.
+   → [Create an organization](./organizations.mdx#create-an-organization)
+
+   ```bash
+   curl https://api.whitehatengineering.com/v1/organizations \
+     -H "Authorization: Bearer sk_live_EXAMPLE_NOT_A_REAL_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{ "name": "White Hat Engineering", "slug": "whitehat" }'
+   ```
+
+2. **Create a SAML SSO connection** for the org and exchange metadata with a Google Workspace
+   custom SAML app. (OIDC is an equivalent path that verifies the `hd` hosted-domain claim and
+   `email_verified`.)
+   → [Google Workspace SAML walkthrough](./sso-connections.mdx#google-workspace-saml-walkthrough)
+
+3. **Add and verify the company domain**, then enable enforcement so any identity outside
+   `whitehatengineering.com` (or with an unverified email) is rejected.
+   → [Verify a domain](./domains.mdx#verify-a-domain) ·
+   [Domain enforcement](./domains.mdx#domain-enforcement)
+
+4. **Enable SCIM 2.0** on the connection to keep the directory in sync — JIT-create on first
+   sign-in, then provision / update / **deprovision** as Workspace changes.
+   → [Enable SCIM](./scim.mdx#enable-scim-on-a-connection)
+
+5. **Register a webhook** so your backend learns about `user.created`, `user.updated`,
+   `user.deleted`, membership and session changes in real time.
+   → [Create a webhook](./webhooks.mdx#create-a-webhook-endpoint)
+
+6. **Define roles & permissions** and map Workspace groups to roles, so
+   `gws-engineering@whitehatengineering.com` becomes `code:write`, etc.
+   → [Map IdP groups to roles](./rbac.mdx#map-upstream-idp-groups-to-roles)
+
+7. **Watch the audit log** to confirm sign-ins, refreshes, and admin changes are recorded.
+   → [List audit logs](./audit-logs.mdx#list-audit-logs)
+
+When all seven steps are complete, a Workspace user at `whitehatengineering.com` who clicks
+**Sign in** is redirected to Google, returns with a signed SAML assertion / OIDC ID token,
+is JIT-provisioned (or matched via SCIM), receives the roles mapped from their groups, and is
+issued a short-lived JWT backed by a revocable server-side session.
+
+## Next steps
+
+* [Organizations](./organizations.mdx) — create your first tenant.
+* [SSO connections](./sso-connections.mdx) — federate to Google Workspace.
+* [Deploy OpenAuthFederated](../../getting_started/deploy.mdx) — stand up the host and keys.

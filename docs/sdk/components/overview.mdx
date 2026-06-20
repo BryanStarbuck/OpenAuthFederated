@@ -1,0 +1,99 @@
+---
+title: Components Overview
+description: Catalog of OpenAuthFederated drop-in UI components, grouped by category, with links to each reference page.
+---
+
+# Components Overview
+
+OpenAuthFederated ships drop-in React components so apps don't rebuild auth screens. They
+come from `@auth/react` (and are re-exported by `@auth/nextjs`), and render the federated
+upstream-IdP flow — in the reference deployment, sign-in goes through the
+`whitehatengineering.com` Google Workspace. Mount them inside an
+[`<AuthProvider>`](./control.mdx#authprovider).
+
+The components fall into five groups.
+
+## Authentication
+
+Pre-built flows for getting users in and out. `<SignIn>` / `<SignUp>` render the full
+federated experience; the `*Button` components are lightweight triggers.
+
+| Component | Description |
+| --- | --- |
+| [`<SignIn>`](./authentication.mdx#signin) | Full federated sign-in UI (Google Workspace SSO). |
+| [`<SignUp>`](./authentication.mdx#signup) | Full sign-up UI; pairs with JIT provisioning. |
+| [`<SignInButton>`](./authentication.mdx#signinbutton) | Button that opens the sign-in flow. |
+| [`<SignUpButton>`](./authentication.mdx#signupbutton) | Button that opens the sign-up flow. |
+| [`<SignOutButton>`](./authentication.mdx#signoutbutton) | Button that ends and revokes the session. |
+| [`<GoogleOneTap>`](./authentication.mdx#googleonetap) | Google One Tap prompt for fast Workspace sign-in. |
+| [`<Waitlist>`](./authentication.mdx#waitlist) | Collect sign-ups before access is open. |
+
+## User
+
+Account identity and management widgets.
+
+| Component | Description |
+| --- | --- |
+| [`<UserButton>`](./user.mdx#userbutton) | Avatar menu with account actions and sign-out. |
+| [`<UserProfile>`](./user.mdx#userprofile) | Full self-service account management UI. |
+| [`<UserAvatar>`](./user.mdx#useravatar) | The user's avatar image, standalone. |
+
+## Organization
+
+Multi-tenancy and organization management.
+
+| Component | Description |
+| --- | --- |
+| [`<OrganizationSwitcher>`](./organization.mdx#organizationswitcher) | Switch between / create organizations. |
+| [`<OrganizationProfile>`](./organization.mdx#organizationprofile) | Manage members, roles, and settings. |
+| [`<CreateOrganization>`](./organization.mdx#createorganization) | Standalone create-organization form. |
+| [`<OrganizationList>`](./organization.mdx#organizationlist) | List and select the user's organizations. |
+
+## Control
+
+Headless components that gate rendering on auth/permission state or the SDK's loading
+lifecycle.
+
+| Component | Description |
+| --- | --- |
+| [`<AuthProvider>`](./control.mdx#authprovider) | Root context provider; wraps your app. |
+| [`<AuthLoaded>`](./control.mdx#authloaded) | Renders children once the SDK has loaded. |
+| [`<AuthLoading>`](./control.mdx#authloading) | Renders children while the SDK is loading. |
+| [`<AuthDegraded>`](./control.mdx#authdegraded) | Renders when the SDK is in a degraded state. |
+| [`<AuthFailed>`](./control.mdx#authfailed) | Renders when the SDK fails to load. |
+| [`<Show>`](./control.mdx#show) | Conditionally render by auth state (`signed-in` / `signed-out`). |
+| [`<Protect>`](./control.mdx#protect) | Gate children behind a role/permission. |
+| [`<RedirectToSignIn>`](./control.mdx#redirecttosignin) | Imperatively redirect to sign-in. |
+| [`<RedirectToSignUp>`](./control.mdx#redirecttosignup) | Imperatively redirect to sign-up. |
+| [`<AuthenticateWithRedirectCallback>`](./control.mdx#authenticatewithredirectcallback) | Completes the SSO redirect handshake. |
+
+## Theming and appearance
+
+Every component accepts an `appearance` prop for visual customization, and `@auth/ui`
+provides ready-made themes you can drop in globally on `<AuthProvider>`:
+
+```tsx
+import { AuthProvider } from '@auth/react'
+import { dark } from '@auth/ui/themes'
+
+<AuthProvider
+  frontendApi="https://auth.whitehatengineering.com"
+  appearance={{
+    baseTheme: dark,
+    variables: { colorPrimary: '#0f766e' },
+  }}
+>
+  <App />
+</AuthProvider>
+```
+
+The same `appearance` object can be passed to any individual component to override theming
+locally.
+
+## Next steps
+
+- [Authentication components](./authentication.mdx)
+- [User components](./user.mdx)
+- [Organization components](./organization.mdx)
+- [Control components](./control.mdx)
+- [Client hooks reference](../hooks.mdx)

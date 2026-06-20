@@ -1,0 +1,240 @@
+---
+title: Control Components
+description: Headless components for the auth provider, SDK lifecycle states, and conditional rendering by auth state or permission.
+---
+
+# Control Components
+
+Control components render no UI of their own. They wire up the SDK (`<AuthProvider>`),
+expose its loading lifecycle (`<AuthLoaded>` and friends), and gate what your app shows based
+on auth state (`<Show>`) or RBAC (`<Protect>`). They are the building blocks for
+permission-aware UIs and smooth loading.
+
+## `<AuthProvider>`
+
+The root provider. Wrap your entire app so every hook and component can read auth state. It
+connects the client to the **Frontend API** at `https://auth.<your-domain>` and establishes
+the hybrid session (short-lived JWT + rotating HttpOnly refresh cookie).
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `frontendApi` | `string` | Frontend API base, e.g. `https://auth.whitehatengineering.com`. In Next.js this comes from `NEXT_PUBLIC_AUTH_FRONTEND_API`. |
+| `appearance` | `Appearance` | Global theming for all components. |
+| `afterSignOutUrl` | `string` | Default post-sign-out redirect. |
+| `signInUrl` / `signUpUrl` | `string` | Default routes for the auth pages. |
+
+```tsx
+// app/layout.tsx
+import { AuthProvider } from '@auth/nextjs'
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <AuthProvider afterSignOutUrl="/">{children}</AuthProvider>
+      </body>
+    </html>
+  )
+}
+```
+
+In a non-Next React app, pass `frontendApi` explicitly:
+
+```tsx
+import { AuthProvider } from '@auth/react'
+
+<AuthProvider frontendApi="https://auth.whitehatengineering.com">
+  <App />
+</AuthProvider>
+```
+
+## `<AuthLoaded>`
+
+Renders its children only after the SDK has fully initialized. Pairs with `<AuthLoading>`.
+
+```tsx
+import { AuthLoaded } from '@auth/react'
+
+<AuthLoaded>
+  <Dashboard />
+</AuthLoaded>
+```
+
+## `<AuthLoading>`
+
+Renders its children while the SDK is still initializing — the place for a spinner or
+skeleton.
+
+```tsx
+import { AuthLoading } from '@auth/react'
+
+<AuthLoading>
+  <Spinner />
+</AuthLoading>
+```
+
+## `<AuthDegraded>`
+
+Renders when the SDK is operating in a degraded state (e.g. the Frontend API is reachable
+but some capabilities are temporarily unavailable). Use it to show a soft warning while auth
+still works.
+
+```tsx
+import { AuthDegraded } from '@auth/react'
+
+<AuthDegraded>
+  <Banner tone="warning">Some account features are temporarily limited.</Banner>
+</AuthDegraded>
+```
+
+## `<AuthFailed>`
+
+Renders when the SDK fails to load entirely (e.g. the Frontend API is unreachable). Use it
+for a hard error or retry prompt.
+
+```tsx
+import { AuthFailed } from '@auth/react'
+
+<AuthFailed>
+  <Banner tone="error">Authentication is unavailable. Please retry shortly.</Banner>
+</AuthFailed>
+```
+
+## `<Show>`
+
+Conditionally renders children based on the user's sign-in state.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `when` | `'signed-in' \| 'signed-out'` | Render children only in this state. |
+| `fallback` | `ReactNode` | Render this when the condition is not met. |
+
+```tsx
+import { Show, UserButton, SignInButton } from '@auth/react'
+
+export function AuthArea() {
+  return (
+    <>
+      <Show when="signed-in">
+        <UserButton afterSignOutUrl="/" />
+      </Show>
+      <Show when="signed-out">
+        <SignInButton mode="modal">
+          <button>Sign in</button>
+        </SignInButton>
+      </Show>
+    </>
+  )
+}
+```
+
+## `<Protect>`
+
+Gates its children behind a role or `<feature>:<action>` permission, checked against the
+authoritative RBAC model. When the check fails, nothing renders (or the `fallback` does).
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `permission` | `string` | Required permission, e.g. `code:read` or `jfk:write`. |
+| `role` | `string` | Required role. |
+| `condition` | `(has) => boolean` | Custom predicate using the `has` checker for complex rules. |
+| `fallback` | `ReactNode` | Render this when the user lacks access. |
+
+```tsx
+import { Protect } from '@auth/react'
+
+export function AdminPanel() {
+  return (
+    <Protect
+      permission="code:read"
+      fallback={<p>You don't have access to this section.</p>}
+    >
+      <CodeBrowser />
+    </Protect>
+  )
+}
+```
+
+```tsx
+// Custom condition using the has() checker.
+<Protect condition={(has) => has({ permission: 'jfk:write' }) || has({ role: 'admin' })}>
+  <CaseEditor />
+</Protect>
+```
+
+## `<RedirectToSignIn>`
+
+Immediately redirects to the federated sign-in flow when rendered. Drop it into a branch
+where the user must be authenticated.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `redirectUrl` | `string` | Return URL after sign-in completes. |
+
+```tsx
+import { Show, RedirectToSignIn } from '@auth/react'
+
+export function Guarded({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      <Show when="signed-in">{children}</Show>
+      <Show when="signed-out">
+        <RedirectToSignIn redirectUrl="/dashboard" />
+      </Show>
+    </>
+  )
+}
+```
+
+## `<RedirectToSignUp>`
+
+The sign-up counterpart to `<RedirectToSignIn>`.
+
+```tsx
+import { RedirectToSignUp } from '@auth/react'
+
+<RedirectToSignUp redirectUrl="/welcome" />
+```
+
+## `<AuthenticateWithRedirectCallback>`
+
+Completes the SSO redirect handshake. Mount it on your callback route — after the user
+authenticates with the upstream IdP (Google Workspace), the IdP redirects back here, and this
+component validates the assertion/token, establishes the session, and forwards the user on.
+
+### Key props
+
+| Prop | Type | Description |
+| --- | --- | --- |
+| `signInForceRedirectUrl` | `string` | Where to land after a successful sign-in. |
+| `signUpForceRedirectUrl` | `string` | Where to land after a JIT-provisioned sign-up. |
+| `continueSignUpUrl` | `string` | Route to finish an incomplete sign-up. |
+
+```tsx
+// app/sso-callback/page.tsx
+import { AuthenticateWithRedirectCallback } from '@auth/nextjs'
+
+export default function SsoCallback() {
+  return (
+    <AuthenticateWithRedirectCallback
+      signInForceRedirectUrl="/dashboard"
+      signUpForceRedirectUrl="/welcome"
+    />
+  )
+}
+```
+
+## Next steps
+
+- [Authentication components](./authentication.mdx)
+- [Client hooks — `useAuth`, `useReverification`](../hooks.mdx)
+- [Next.js SDK — `auth()` and `authMiddleware()`](../nextjs.mdx)
+- [Components overview](./overview.mdx)
