@@ -1,0 +1,317 @@
+---
+title: "Use case: admin gated by our own company's Google Workspace group"
+description: A consuming web app gates its admin surface on membership of a named Google Workspace group, without OpenAuthFederated ever hardcoding which employees are admins. The group name lives in the web app's own config; OpenAuthFederated maps that group to a role and asserts it in the session.
+---
+
+# Use case: admin gated by our own company's Google Workspace group
+
+## Summary
+
+A web app that we own and operate sits behind **OpenAuthFederated** for all authentication and
+authorization. The people who use that web app are **our own company's employees**, and our
+company runs **Google Workspace** as its identity provider. The web app has two surfaces:
+
+* a normal surface that any signed-in employee may use, and
+* an **admin surface** (configuration, dangerous actions, internal tooling) that only a smaller
+  set of employees may reach.
+
+We do **not** want to encode "who is an admin" inside OpenAuthFederated, and we do not want to
+maintain a hardcoded list of admin employees anywhere in the platform. Instead, the web app
+declares — **in its own code/config** — the **name of a Google Workspace group** (for example
+`app-admins@whitehatengineering.com`). Anyone who is a member of that Workspace group, and only
+those people, is granted the admin role for that web app. Adding or removing an admin is then a
+pure Google Workspace operation (add/remove the person from the group); no code change, no
+platform reconfiguration, no redeploy.
+
+OpenAuthFederated's job is to (1) federate the employee through Google Workspace, (2) read the
+employee's Workspace **group membership** out of the SAML assertion / OIDC claims, (3) map the
+configured admin group to a **role/permission** using the authoritative model in our own
+database, and (4) assert that role/permission in the short-lived session token the web app
+already trusts. The web app then gates its admin routes on that asserted permission.
+
+> **Naming rule.** This document is internal product spec for OpenAuthFederated, our open-source,
+> self-hosted identity platform. Never reference the commercial hosted provider we model after by
+> name — describe the capability generically.
+
+## Actors
+
+| Actor | Role in this use case |
+| --- | --- |
+| **Employee** | A human in our Google Workspace who signs in to the web app through their browser. |
+| **Consuming web app** | One of our applications. Owns the *admin group name* in its config, calls OpenAuthFederated to authenticate and authorize, and enforces admin-only routes. Front end uses `@auth/nextjs` / `@auth/react`; backend uses `@auth/backend`. |
+| **OpenAuthFederated** | The identity/auth layer. Federates to Google Workspace (SP side), maps the Workspace group to a role, mints the session token carrying roles/permissions, and exposes the APIs the web app calls. |
+| **Google Workspace** | The company IdP and single source of truth for who is an employee and who is in the admin group. |
+| **Platform admin / IaC** | Configures the org, the SSO connection, the role, and the group→role mapping in OpenAuthFederated once per web app. |
+
+## Why we do it this way
+
+* **No hardcoded admins in the platform.** The authoritative list of admins is the membership of
+  one Google Workspace group. OpenAuthFederated stores only a *mapping* ("this group name → this
+  role"), never the people. This is the [RBAC](#the-rbac-model-group--role--permission) lock-in
+  guarantee: upstream groups are *inputs*; the role/permission model is ours.
+* **The web app owns the policy it cares about.** Each consuming web app declares *its* admin
+  group name in *its* config. Two different web apps can point at two different Workspace groups,
+  or even at the same one, without the platform special-casing anything.
+* **Offboarding is automatic.** Remove an employee from the admin Workspace group → on their next
+  token refresh (short TTL) they lose the admin role. Suspend their whole Workspace account →
+  they lose access entirely (see [domain enforcement](#security) and SCIM deprovision).
+* **Enforced on both sides.** The web app's front end hides admin UI for UX, and the web app's
+  backend independently re-checks the permission. Front-end checks are never the security
+  boundary.
+
+## The RBAC model: group → role → permission
+
+OpenAuthFederated already models exactly the three layers this use case needs. Documented in
+`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/rbac.mdx`:
+
+1. **Permission** — an atomic `<feature>:<action>` grant. For an admin surface, define a coarse
+   admin permission such as `app:admin` (or reuse a wildcard like `*:write` / `*:read`). A
+   permission is an object prefixed `perm_`.
+2. **Role** — a named bundle of permissions, prefixed `role_`. Define one role, e.g. **Admin**
+   (`key: admin`), granting the admin permission(s).
+3. **Assignment** — the role is attached to the employee, in this use case **derived from the
+   Workspace group mapping** rather than assigned by hand.
+
+The mapping from the Workspace group to the role lives on the **SSO connection's `group_mapping`**
+(documented in
+`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/sso-connections.mdx`,
+section "Map upstream IdP groups to roles"). At each sign-in, the `groups` attribute from the
+assertion/claim is matched against `group_mapping`, and the resulting role's permissions become
+the session's effective permissions, surfaced as JWT claims:
+
+```json
+{
+  "sub": "usr_5f6a7b8c",
+  "org": "org_2a9f1c0bd3e4",
+  "email": "alice@whitehatengineering.com",
+  "roles": ["admin"],
+  "permissions": ["app:admin", "*:read"],
+  "exp": 1782328911
+}
+```
+
+The web app reads `roles` / `permissions` from the token it already trusts — it never asks "is
+this person in the Workspace admin group?" directly. OpenAuthFederated did that translation.
+
+## Where the admin group name is configured
+
+There are two places the group name appears, and they must agree:
+
+1. **In OpenAuthFederated (once, by the platform admin / IaC):** the SSO connection's
+   `group_mapping` entry that points the group at the **Admin** role:
+
+   ```json
+   "group_mapping": [
+     { "idp_group": "app-admins@whitehatengineering.com", "role_id": "role_admin" }
+   ]
+   ```
+
+2. **In the consuming web app (in its own code/config):** the **permission or role string** the
+   admin routes require — e.g. `app:admin`. The web app does *not* need to know the Workspace
+   group name at runtime; it only needs the permission/role the group resolves to. Keeping the
+   permission string in the web app's config (e.g. an env var `ADMIN_PERMISSION=app:admin`) is the
+   clean contract: change the group→role mapping on the platform, and the web app keeps gating on
+   the same permission.
+
+> If a web app team prefers to express the policy as "this exact Workspace group is the admin
+> group," they hold the group name and the platform team mirrors it into `group_mapping`. The
+> runtime contract the web app enforces is still the resolved permission/role in the token.
+
+## End-to-end flow
+
+### A. One-time control-plane setup (platform admin / IaC)
+
+All calls use the **Platform/Backend API** authorized with the secret key (`sk_live_...`), base
+`https://api.<your-domain>/v1`. See
+`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/overview.mdx`.
+
+1. **Create the org (tenant) for this web app** —
+   `POST /v1/organizations` (`/docs/apis/platform/organizations.mdx`).
+2. **Create the SAML SSO connection to Google Workspace** —
+   `POST /v1/sso_connections`, exchange metadata with a Google custom SAML app, expose `groups`
+   in attribute mapping (`/docs/apis/platform/sso-connections.mdx`, "Google Workspace SAML
+   walkthrough"). OIDC is equivalent and additionally verifies the `hd` + `email_verified` claims.
+3. **Define the Admin role and its permission** —
+   `POST /v1/permissions` then `POST /v1/roles` (`/docs/apis/platform/rbac.mdx`). Example: create
+   `app:admin`, then role **Admin** (`role_admin`) granting `["app:admin", "*:read"]`. Optionally
+   create a baseline **Member** role for everyone else and set it as the org's
+   `default_role_id` so non-admins still get the normal surface.
+4. **Map the Workspace admin group to the Admin role** —
+   `PATCH /v1/sso_connections/{conn_id}` with `group_mapping`
+   (`/docs/apis/platform/rbac.mdx`, "Map upstream IdP groups to roles").
+5. **(Optional) Define a JWT template** so the admin permission rides in tokens sent to
+   downstream services — `POST /v1/jwt_templates`
+   (`/docs/apis/backend/jwt-templates.mdx`), using `{{org_membership.permissions}}`.
+6. **(Optional) Register a webhook** for `organizationMembership.updated` so the web app learns
+   the instant someone's admin status changes — `POST /v1/webhooks`
+   (`/docs/apis/platform/webhooks.mdx`).
+
+### B. Runtime sign-in flow (per employee, through the UI)
+
+1. Employee opens the web app and hits a protected route. The web app's middleware redirects to
+   sign-in (`auth.protect()` / `redirectToSignIn()`,
+   `/docs/getting_started/protect-routes.mdx`).
+2. The **Frontend API** (`https://auth.<your-domain>/v1`,
+   `/docs/apis/frontend/overview.mdx`) creates a `SignIn`, prepares the `saml` (or
+   `oauth_google`) strategy, and redirects the browser to Google Workspace.
+3. Google authenticates the human (and applies MFA), then POSTs a signed SAML assertion back to
+   the connection's ACS URL. The `<AuthenticateWithRedirectCallback>` component
+   (`/docs/sdk/components/control.mdx`) completes the handshake.
+4. OpenAuthFederated validates the assertion, enforces the verified company domain, resolves or
+   JIT-creates the user, reads the `groups` attribute, applies `group_mapping`
+   (`app-admins@…` → **Admin**), and establishes a **session** backed by a server-side record.
+5. A short-lived JWT is issued carrying `roles: ["admin"]` and `permissions: ["app:admin", ...]`.
+   The rotating HttpOnly `__session` cookie keeps the employee signed in
+   (`/docs/apis/backend/sessions.mdx`).
+
+### C. Runtime authorization flow (admin surface)
+
+* **Front end (UX gating):** the web app shows/hides admin UI with `<Protect permission="app:admin">`
+  or `has({ permission: 'app:admin' })` from `useAuth()` (`/docs/getting_started/read-the-user.mdx`,
+  `/docs/sdk/components/control.mdx`).
+* **Route gating (middleware):** admin routes are matched and protected
+  (`/docs/getting_started/protect-routes.mdx`):
+
+  ```ts
+  // middleware.ts
+  import { authMiddleware, createRouteMatcher } from '@auth/nextjs/server'
+
+  const isAdminRoute = createRouteMatcher(['/admin(.*)'])
+
+  export default authMiddleware(async (auth, req) => {
+    if (isAdminRoute(req)) {
+      await auth.protect((has) => has({ permission: 'app:admin' }) || has({ role: 'admin' }))
+    }
+  })
+  ```
+
+* **Backend (authoritative):** the web app's API independently verifies the token and re-checks
+  the permission with the `@auth/backend` SDK (`/docs/sdk/backend-sdk.mdx`):
+
+  ```ts
+  import { authClient } from '@auth/backend'
+
+  const claims = await authClient.verifyToken(bearerToken)
+  const ok = (claims.permissions ?? []).some(p => p === 'app:admin' || p === '*:write')
+  if (!ok) throw new ForbiddenException()
+  ```
+
+  For sensitive/irreversible admin actions, additionally call
+  `POST /v1/sessions/{session_id}/verify` (`/docs/apis/backend/sessions.mdx`) so an
+  admin who was just removed from the group cannot act on a not-yet-expired token.
+
+## Engineering flow (who calls whom)
+
+```
+Employee browser ──▶ Web app (middleware)  ──redirect──▶ OpenAuthFederated Frontend API
+                                                              │
+                                                              ▼
+                                                      Google Workspace (IdP, MFA)
+                                                              │ signed SAML assertion (+ groups)
+                                                              ▼
+                              OpenAuthFederated  ── validate, domain-enforce, JIT,
+                                                    group_mapping(app-admins → Admin),
+                                                    issue short-lived JWT (roles/permissions)
+                                                              │
+                       ┌──────────────────────────────────────┘
+                       ▼
+Employee browser ◀── Web app  ──(every request: Bearer JWT)──▶ Web app backend
+                                                                    │ verifyToken() + has(app:admin)
+                                                                    │ (sensitive: POST /sessions/{id}/verify)
+                                                                    ▼
+                                                              Allow / 403
+```
+
+The web app talks to **three** OpenAuthFederated surfaces, each with its own credential:
+**Frontend API** (publishable key, browser), **Backend API** (secret key, server), and the
+**Platform API** (secret key, one-time admin config). See
+`/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/api-keys.mdx`.
+
+## Security
+
+* **Domain enforcement first.** Only active members of the verified company domain can sign in at
+  all; the admin group is a subset of that. An out-of-domain or unverified-email identity is
+  rejected before any role is considered
+  (`/docs/apis/platform/domains.mdx`, "Domain enforcement").
+* **No long-lived admin grant.** Admin permission lives only in short-lived JWTs (≈60s). Remove
+  the person from the Workspace group and they lose admin on the next refresh; for immediate
+  effect on sensitive actions use the stateful `POST /v1/sessions/{session_id}/verify` check.
+* **Authoritative re-check on the backend.** Front-end `has()` is UX only. The web app backend
+  must re-verify the permission (`authClient.verifyToken` + permission check) for every admin
+  operation.
+* **MFA inherited from Google Workspace**, with optional step-up reverification for the most
+  dangerous admin actions (org setting `require_mfa: "always"`,
+  `/docs/apis/platform/organizations.mdx`).
+* **Everything audited.** `user.sign_in`, `permission_denied`, `session.revoked`, and admin
+  config changes (including `sso_connection.updated` when the group mapping changes) are written
+  to the immutable audit log (`/docs/apis/platform/audit-logs.mdx`).
+* **Secrets never reach the browser.** The admin gate is asserted via the public-safe token; the
+  secret key stays server-side (`/docs/apis/frontend/overview.mdx`, "Authorization").
+
+## How to build it
+
+1. **Stand up / reuse the org** for this web app — `POST /v1/organizations`.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/organizations.mdx`.
+2. **Federate to Google Workspace** — `POST /v1/sso_connections` + metadata exchange, ensure the
+   `groups` attribute is mapped.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/sso-connections.mdx`.
+3. **Create the admin permission + Admin role** — `POST /v1/permissions`, `POST /v1/roles`; set a
+   `default_role_id` for everyone else.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/rbac.mdx`.
+4. **Map the Workspace admin group → Admin role** — `PATCH /v1/sso_connections/{conn_id}`
+   `group_mapping`.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/sso-connections.mdx`.
+5. **Wire the web app front end** — `<AuthProvider>`, `<AuthenticateWithRedirectCallback>`,
+   `<Protect permission="app:admin">`, `useAuth().has(...)`.
+   Refs: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/components/control.mdx`,
+   `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/getting_started/read-the-user.mdx`.
+6. **Gate admin routes in middleware** — `authMiddleware` + `createRouteMatcher` +
+   `auth.protect((has) => has({ permission: 'app:admin' }))`.
+   Ref: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/getting_started/protect-routes.mdx`.
+7. **Enforce on the backend** — `authClient.verifyToken()` + permission check; stateful
+   `POST /v1/sessions/{id}/verify` for sensitive actions.
+   Refs: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/backend-sdk.mdx`,
+   `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/sessions.mdx`.
+8. **(Optional) JWT template + webhook** for downstream services and instant admin-change
+   reaction.
+   Refs: `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/jwt-templates.mdx`,
+   `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/webhooks.mdx`.
+
+## API and SDK reference index (full paths)
+
+| Capability | API / symbol | Documented at (full path) |
+| --- | --- | --- |
+| Control-plane overview, keys, base URLs | Platform API | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/overview.mdx` |
+| Org/tenant for the web app | `POST/GET/PATCH/DELETE /v1/organizations` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/organizations.mdx` |
+| Federate to Google Workspace + `group_mapping` | `POST/PATCH /v1/sso_connections` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/sso-connections.mdx` |
+| Define admin permission/role; group→role | `POST /v1/permissions`, `POST /v1/roles` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/rbac.mdx` |
+| Domain enforcement (subset gate) | `POST /v1/domains`, `/verify` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/domains.mdx` |
+| React to admin-status changes | `POST /v1/webhooks` (`organizationMembership.updated`) | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/webhooks.mdx` |
+| Audit sign-in / denials / config changes | `GET /v1/audit_logs` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/audit-logs.mdx` |
+| Key types (sk/pk/scim) | API keys | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/api-keys.mdx` |
+| Backend overview / token verify model | Backend API | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/overview.mdx` |
+| Mint/verify/revoke sessions | `/v1/sessions/*`, `/v1/tokens` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/sessions.mdx` |
+| Org memberships + resolved permissions | `/v1/organizations/{org}/memberships` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/organizations.mdx` |
+| Carry admin permission to downstream | `POST /v1/jwt_templates` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/backend/jwt-templates.mdx` |
+| Browser-facing sign-in surface | Frontend API | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/frontend/overview.mdx` |
+| `authClient.verifyToken()`, sessions, orgs | `@auth/backend` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/backend-sdk.mdx` |
+| `auth()`, `currentUser()`, `has()`, hooks | server/client reads | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/getting_started/read-the-user.mdx` |
+| Route gating | `authMiddleware`, `createRouteMatcher`, `auth.protect` | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/getting_started/protect-routes.mdx` |
+| `<Protect>`, `<AuthProvider>`, callback | control components | `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/sdk/components/control.mdx` |
+
+## Acceptance criteria
+
+1. An employee in `app-admins@whitehatengineering.com` signing in through Google Workspace
+   receives a token with `roles` including `admin` and `permissions` including `app:admin`, and
+   can load `/admin`.
+2. A signed-in employee **not** in that group can use the normal surface but is denied `/admin`
+   both in middleware (redirect/403) and at the backend (`permission_denied`, audited).
+3. Adding a person to the Workspace admin group grants them `/admin` on their next token refresh
+   with **no** code change or platform reconfiguration; removing them revokes it within the token
+   TTL (immediately for sensitive actions that call `/v1/sessions/{id}/verify`).
+4. OpenAuthFederated stores **no** hardcoded list of admin employees — only the
+   `group_mapping` entry and the role/permission definitions.
+5. The admin group name / resolved permission is owned by the consuming web app's config; two web
+   apps can target different groups without platform special-casing.
+6. `user.sign_in`, `permission_denied`, and `sso_connection.updated` (group-mapping change) events
+   appear in the audit log.
