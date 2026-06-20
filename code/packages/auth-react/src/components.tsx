@@ -47,6 +47,7 @@ function primaryColor(appearance?: Appearance, fallback?: Appearance): string {
 interface SignInProps {
   routing?: "hash" | "path" | "virtual"
   path?: string
+  signInUrl?: string
   signUpUrl?: string
   forceRedirectUrl?: string
   fallbackRedirectUrl?: string

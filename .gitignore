@@ -1,0 +1,16 @@
+# Dependencies (never commit — pnpm installs from the lockfile)
+node_modules/
+
+# Local env / secrets
+.env
+.env.local
+*.log
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Note: packages/*/dist is intentionally tracked — apps consume the SDKs via pnpm
+# `file:` links and rely on the prebuilt dist being present.

@@ -3,6 +3,7 @@ import type { Appearance, PermissionCheck } from "./types.js";
 interface SignInProps {
     routing?: "hash" | "path" | "virtual";
     path?: string;
+    signInUrl?: string;
     signUpUrl?: string;
     forceRedirectUrl?: string;
     fallbackRedirectUrl?: string;
