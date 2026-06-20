@@ -1,0 +1,74 @@
+---
+title: OpenAuthFederated — Goal
+description: The goal of OpenAuthFederated, our open-source, self-hosted authentication and identity platform — a free alternative to hosted commercial identity providers, owned and operated entirely by us.
+---
+
+# OpenAuthFederated — Goal
+
+**OpenAuthFederated is our open-source authentication and identity platform.** It is a
+self-hosted, open-source equivalent of the hosted commercial identity providers (Auth0, AWS
+Cognito, and similar SaaS identity services). The goal is to give ourselves — and anyone who
+adopts the project — a complete identity layer that gates access to applications, without
+depending on, paying for, or being locked into a proprietary vendor.
+
+## Why we are building it
+
+We want the full value of a hosted identity provider — federated sign-in, provisioning,
+role-based authorization, sessions, and the security around them — but delivered as software
+**we own and control**:
+
+* **Open source.** The entire platform is open and inspectable. There are no closed components,
+  no per-seat billing, and no usage metering. Anyone can run it, audit it, and extend it.
+* **Self-hosted.** It runs on our own infrastructure, under our own keys and policies. Identity
+  data and authorization decisions stay in our hands.
+* **No vendor lock-in.** Upstream identity providers supply groups and roles as *inputs*, but the
+  authoritative authorization model lives in our own backend and database. We can change upstream
+  IdPs without rebuilding our application's permission model.
+* **A drop-in identity layer.** An application can sit behind OpenAuthFederated for *all* of its
+  authentication and authorization, instead of rebuilding auth screens, session handling, and
+  RBAC from scratch.
+
+## What the platform delivers
+
+OpenAuthFederated provides a complete, self-hostable identity layer:
+
+* **Authentication methods** — federated SSO via **SAML 2.0** and **OIDC**, social logins, and
+  enterprise IdP connections.
+* **Identity federation** — acts as the Service-Provider-side identity/auth layer between an app
+  and an upstream Identity Provider; the app trusts the platform's asserted identity and never
+  handles the user's upstream password.
+* **Domain enforcement** — restrict sign-in to one or more verified company domains; reject any
+  identity outside the allowed domain(s), including unverified emails and out-of-org accounts.
+* **Provisioning** — **Just-In-Time (JIT)** user creation on first valid sign-in, plus **SCIM
+  2.0** directory sync for full lifecycle management (provision / update / deprovision) with
+  webhooks.
+* **Organizations / multi-tenancy** — model orgs and tenants so the platform can gate more than
+  one app or customer.
+* **RBAC** — map upstream groups to roles, and roles to `<feature>:<action>` permissions, with the
+  authoritative model kept in our own backend.
+* **Hybrid session model** — short-lived **JWT access tokens** refreshed by a longer-lived,
+  rotating, **HttpOnly** cookie, backed by server-side session records that allow **immediate
+  revocation**. Stateless verification plus stateful revocation.
+* **Security** — MFA inherited from the upstream IdP (with optional step-up reverification), HTTPS
+  only, `SameSite` + `HttpOnly` cookies, CSP headers, no long-lived secrets in `localStorage`, and
+  full auditing of sign-in / sign-out / refresh / permission-denied / admin actions.
+* **No password surface** — when federating to an upstream IdP, the platform stores **no end-user
+  passwords**, eliminating that entire class of attack.
+* **UI components** — drop-in sign-in / sign-up / account-management UI so apps don't rebuild auth
+  screens.
+
+## First real use
+
+The first consumer of OpenAuthFederated is an internal company web app gated to our company
+**Google Workspace (G Suite)** on the `whitehatengineering.com` domain. Google Workspace is the
+single source of truth for who is an employee: a person must have an active Google Workspace
+account on the allowed domain to log in — no app-specific passwords, no other social logins, no
+anonymous access. This reference deployment is the canonical example of how the platform is used,
+and it proves out the federation, domain enforcement, provisioning, RBAC, and session model the
+project is built to deliver.
+
+## The bottom line
+
+The goal of OpenAuthFederated is to **own our identity layer outright** — an open-source,
+self-hosted platform that does everything a hosted commercial identity provider does, while
+keeping the code, the data, and the authorization model entirely under our control.
