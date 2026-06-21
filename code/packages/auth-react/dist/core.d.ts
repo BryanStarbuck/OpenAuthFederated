@@ -1,24 +1,39 @@
-import { type AuthCore, type AuthenticateWithRedirectParams, type Connection, type PermissionCheck, type SessionSnapshot } from "./types.js";
+import { type AuthCore, type AuthenticateWithRedirectParams, type Connection, type LoadState, type PermissionCheck, type RedirectCallbackResult, type SessionSnapshot } from "./types.js";
 /** Shared subscribe/emit plumbing for the external store. */
 declare abstract class BaseCore implements AuthCore {
     protected snapshot: SessionSnapshot;
+    protected state: LoadState;
     private readonly listeners;
     getSnapshot(): SessionSnapshot;
+    loadState(): LoadState;
+    protected setState(next: LoadState): void;
     subscribe(listener: () => void): () => void;
     protected setSnapshot(next: SessionSnapshot): void;
+    /** The permissions/roles that apply *right now*, given the active organization. */
+    protected activeGrants(): {
+        roles: string[];
+        permissions: string[];
+    };
     has(check?: PermissionCheck): boolean;
+    isRecentlyVerified(maxAgeSeconds: number): boolean;
+    protected readActiveOrg(): string | null;
+    protected writeActiveOrg(orgId: string | null): void;
+    /** Safe localStorage access — returns null when storage is unavailable (SSR / privacy mode). */
+    protected readLocal(key: string): string | null;
+    protected writeLocal(key: string, value: string): void;
+    protected removeLocal(key: string): void;
+    setActiveOrg(orgId: string | null): Promise<void>;
     abstract load(): Promise<void>;
     abstract connections(): Connection[];
     abstract getToken(opts?: {
         template?: string;
     }): Promise<string | null>;
     abstract authenticateWithRedirect(params: AuthenticateWithRedirectParams): Promise<void>;
-    abstract completeRedirectCallback(): Promise<{
-        redirectTo: string;
-    }>;
+    abstract completeRedirectCallback(): Promise<RedirectCallbackResult>;
     abstract signOut(opts?: {
         redirectUrl?: string;
     }): Promise<void>;
+    abstract reverify(): Promise<void>;
 }
 /**
  * Local dev mock: no Google round-trip, no running server. Sign-in establishes a session
@@ -35,11 +50,13 @@ export declare class DevAuthCore extends BaseCore {
     connections(): Connection[];
     load(): Promise<void>;
     authenticateWithRedirect(params: AuthenticateWithRedirectParams): Promise<void>;
-    completeRedirectCallback(): Promise<{
-        redirectTo: string;
-    }>;
+    completeRedirectCallback(): Promise<RedirectCallbackResult>;
     private buildSession;
-    getToken(): Promise<string | null>;
+    getToken(opts?: {
+        template?: string;
+    }): Promise<string | null>;
+    setActiveOrg(orgId: string | null): Promise<void>;
+    reverify(): Promise<void>;
     signOut(opts?: {
         redirectUrl?: string;
     }): Promise<void>;
@@ -59,12 +76,15 @@ export declare class RealAuthCore extends BaseCore {
     private headers;
     connections(): Connection[];
     load(): Promise<void>;
+    private parseMemberships;
     private applyClient;
     authenticateWithRedirect(params: AuthenticateWithRedirectParams): Promise<void>;
-    completeRedirectCallback(): Promise<{
-        redirectTo: string;
-    }>;
-    getToken(): Promise<string | null>;
+    completeRedirectCallback(): Promise<RedirectCallbackResult>;
+    getToken(opts?: {
+        template?: string;
+    }): Promise<string | null>;
+    setActiveOrg(orgId: string | null): Promise<void>;
+    reverify(): Promise<void>;
     signOut(opts?: {
         redirectUrl?: string;
     }): Promise<void>;

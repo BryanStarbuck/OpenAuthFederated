@@ -1,4 +1,4 @@
-import type { TokenClaims } from "./types.js";
+import type { MachineClaims, TokenClaims } from "./types.js";
 /**
  * Verify a short-lived JWT access token and return its claims.
  *
@@ -12,3 +12,14 @@ import type { TokenClaims } from "./types.js";
 export declare function verifyToken(token: string, opts?: {
     issuer?: string;
 }): Promise<TokenClaims>;
+/**
+ * Verify a **machine** token — an M2M access token or an API key minted for server-to-server
+ * calls (spec §15) — and return its claims. Verification follows the same path as a user
+ * token (HS256 dev secret in dev mode, JWKS in production) but asserts `token_type` is
+ * `machine` so a human session JWT can never be mistaken for a service credential.
+ */
+export declare function verifyMachineToken(token: string, opts?: {
+    issuer?: string;
+}): Promise<MachineClaims>;
+/** True if `granted` covers the requested machine `scope` (exact or `*` super-scope). */
+export declare function hasScope(granted: string[], scope: string): boolean;

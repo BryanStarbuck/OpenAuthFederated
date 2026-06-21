@@ -1,4 +1,4 @@
-import type { TokenClaims } from "./types.js"
+import type { MachineClaims, TokenClaims } from "./types.js"
 
 // `jose` is ESM-only. Loading it through a real dynamic import() keeps this package
 // consumable from a CommonJS host (NestJS) — NodeNext preserves import() verbatim.
@@ -51,4 +51,27 @@ export async function verifyToken(
   }
   const { payload } = await jwtVerify(token, jwks, { issuer })
   return payload as TokenClaims
+}
+
+/**
+ * Verify a **machine** token — an M2M access token or an API key minted for server-to-server
+ * calls (spec §15) — and return its claims. Verification follows the same path as a user
+ * token (HS256 dev secret in dev mode, JWKS in production) but asserts `token_type` is
+ * `machine` so a human session JWT can never be mistaken for a service credential.
+ */
+export async function verifyMachineToken(
+  token: string,
+  opts: { issuer?: string } = {},
+): Promise<MachineClaims> {
+  const claims = (await verifyToken(token, opts)) as unknown as MachineClaims
+  if (claims.token_type !== "machine") {
+    throw new Error("verifyMachineToken: not a machine token")
+  }
+  return claims
+}
+
+/** True if `granted` covers the requested machine `scope` (exact or `*` super-scope). */
+export function hasScope(granted: string[], scope: string): boolean {
+  if (!scope) return true
+  return granted.includes(scope) || granted.includes("*")
 }

@@ -32,10 +32,12 @@ export function AuthProvider(props) {
         };
     }, [core]);
     const snapshot = useSyncExternalStore((cb) => core.subscribe(cb), () => core.getSnapshot(), () => core.getSnapshot());
+    const loadState = useSyncExternalStore((cb) => core.subscribe(cb), () => core.loadState(), () => core.loadState());
     const value = useMemo(() => ({
         core,
         snapshot,
         isLoaded,
+        loadState,
         connections: core.connections(),
         config: {
             signInUrl: props.signInUrl ?? "/sign-in",
@@ -43,7 +45,16 @@ export function AuthProvider(props) {
             afterSignOutUrl: props.afterSignOutUrl ?? "/sign-in",
             appearance: props.appearance,
         },
-    }), [core, snapshot, isLoaded, props.signInUrl, props.signUpUrl, props.afterSignOutUrl, props.appearance]);
+    }), [
+        core,
+        snapshot,
+        isLoaded,
+        loadState,
+        props.signInUrl,
+        props.signUpUrl,
+        props.afterSignOutUrl,
+        props.appearance,
+    ]);
     return _jsx(AuthContext.Provider, { value: value, children: props.children });
 }
 //# sourceMappingURL=context.js.map

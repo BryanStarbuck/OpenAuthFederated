@@ -1,5 +1,6 @@
 export { AuthProvider, useAuthContext } from "./context.js";
 export type { AuthProviderProps } from "./context.js";
-export { useAuth, useUser, useSession, useSignIn, useSignUp, useOpenAuth, } from "./hooks.js";
-export { SignIn, SignUp, SignInButton, SignUpButton, SignOutButton, UserButton, GoogleOneTap, AuthenticateWithRedirectCallback, Protect, Show, SignedIn, SignedOut, RedirectToSignIn, } from "./components.js";
-export type { Appearance, Connection, SdkUser, SessionSnapshot, PermissionCheck, } from "./types.js";
+export { useAuth, useUser, useSession, useSessionList, useSignIn, useSignUp, useOrganization, useOrganizationList, useReverification, useOpenAuth, } from "./hooks.js";
+export { SignIn, SignUp, SignInButton, SignUpButton, SignOutButton, UserButton, GoogleOneTap, AuthenticateWithRedirectCallback, readAuthError, Protect, Show, SignedIn, SignedOut, RedirectToSignIn, RedirectToSignUp, AuthLoaded, AuthLoading, AuthDegraded, AuthFailed, OrganizationSwitcher, OrganizationList, OrganizationProfile, CreateOrganization, } from "./components.js";
+export { hasPermission, hasRole } from "./types.js";
+export type { Appearance, AuthRejection, Connection, LoadState, RedirectCallbackResult, SdkUser, SdkOrganization, SdkMembership, SessionSnapshot, PermissionCheck, } from "./types.js";

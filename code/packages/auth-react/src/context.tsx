@@ -9,7 +9,13 @@ import {
   useSyncExternalStore,
 } from "react"
 import { DevAuthCore, RealAuthCore } from "./core.js"
-import type { Appearance, AuthCore, Connection, SessionSnapshot } from "./types.js"
+import type {
+  Appearance,
+  AuthCore,
+  Connection,
+  LoadState,
+  SessionSnapshot,
+} from "./types.js"
 
 interface AuthConfig {
   signInUrl: string
@@ -22,6 +28,7 @@ interface AuthContextValue {
   core: AuthCore
   snapshot: SessionSnapshot
   isLoaded: boolean
+  loadState: LoadState
   config: AuthConfig
   connections: Connection[]
 }
@@ -88,11 +95,18 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
     () => core.getSnapshot(),
   )
 
+  const loadState = useSyncExternalStore(
+    (cb) => core.subscribe(cb),
+    () => core.loadState(),
+    () => core.loadState(),
+  )
+
   const value = useMemo<AuthContextValue>(
     () => ({
       core,
       snapshot,
       isLoaded,
+      loadState,
       connections: core.connections(),
       config: {
         signInUrl: props.signInUrl ?? "/sign-in",
@@ -101,7 +115,16 @@ export function AuthProvider(props: AuthProviderProps): ReactNode {
         appearance: props.appearance,
       },
     }),
-    [core, snapshot, isLoaded, props.signInUrl, props.signUpUrl, props.afterSignOutUrl, props.appearance],
+    [
+      core,
+      snapshot,
+      isLoaded,
+      loadState,
+      props.signInUrl,
+      props.signUpUrl,
+      props.afterSignOutUrl,
+      props.appearance,
+    ],
   )
 
   return <AuthContext.Provider value={value}>{props.children}</AuthContext.Provider>

@@ -1,5 +1,5 @@
 import { type ReactNode } from "react";
-import type { Appearance, AuthCore, Connection, SessionSnapshot } from "./types.js";
+import type { Appearance, AuthCore, Connection, LoadState, SessionSnapshot } from "./types.js";
 interface AuthConfig {
     signInUrl: string;
     signUpUrl: string;
@@ -10,6 +10,7 @@ interface AuthContextValue {
     core: AuthCore;
     snapshot: SessionSnapshot;
     isLoaded: boolean;
+    loadState: LoadState;
     config: AuthConfig;
     connections: Connection[];
 }

@@ -1,6 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.verifyToken = verifyToken;
+exports.verifyMachineToken = verifyMachineToken;
+exports.hasScope = hasScope;
 let josePromise = null;
 function jose() {
     if (!josePromise)
@@ -43,5 +45,24 @@ async function verifyToken(token, opts = {}) {
     }
     const { payload } = await jwtVerify(token, jwks, { issuer });
     return payload;
+}
+/**
+ * Verify a **machine** token — an M2M access token or an API key minted for server-to-server
+ * calls (spec §15) — and return its claims. Verification follows the same path as a user
+ * token (HS256 dev secret in dev mode, JWKS in production) but asserts `token_type` is
+ * `machine` so a human session JWT can never be mistaken for a service credential.
+ */
+async function verifyMachineToken(token, opts = {}) {
+    const claims = (await verifyToken(token, opts));
+    if (claims.token_type !== "machine") {
+        throw new Error("verifyMachineToken: not a machine token");
+    }
+    return claims;
+}
+/** True if `granted` covers the requested machine `scope` (exact or `*` super-scope). */
+function hasScope(granted, scope) {
+    if (!scope)
+        return true;
+    return granted.includes(scope) || granted.includes("*");
 }
 //# sourceMappingURL=verify.js.map
