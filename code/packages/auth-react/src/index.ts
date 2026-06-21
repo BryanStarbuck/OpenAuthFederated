@@ -22,6 +22,7 @@ export {
   GoogleOneTap,
   AuthenticateWithRedirectCallback,
   readAuthError,
+  useAuthError,
   Protect,
   Show,
   SignedIn,
@@ -41,6 +42,7 @@ export { hasPermission, hasRole } from "./types.js"
 export type {
   Appearance,
   AuthRejection,
+  AuthRejectionMeta,
   Connection,
   LoadState,
   RedirectCallbackResult,

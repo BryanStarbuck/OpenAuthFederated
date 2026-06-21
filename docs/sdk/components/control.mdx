@@ -210,6 +210,10 @@ Completes the SSO redirect handshake. Mount it on your callback route — after 
 authenticates with the upstream IdP (Google Workspace), the IdP redirects back here, and this
 component validates the assertion/token, establishes the session, and forwards the user on.
 
+If the identity is **refused** (e.g. a personal account on a domain-restricted app), no session is
+created: the component stashes a typed `AuthRejection`, calls your optional `onError`, and bounces
+back to the sign-in screen, where the drop-in [`<SignIn>`](./authentication.mdx) shows the reason.
+
 ### Key props
 
 | Prop | Type | Description |
@@ -217,6 +221,8 @@ component validates the assertion/token, establishes the session, and forwards t
 | `signInForceRedirectUrl` | `string` | Where to land after a successful sign-in. |
 | `signUpForceRedirectUrl` | `string` | Where to land after a JIT-provisioned sign-up. |
 | `continueSignUpUrl` | `string` | Route to finish an incomplete sign-up. |
+| `signInUrl` | `string` | Where to return on a **rejection** (defaults to the configured sign-in URL). |
+| `onError` | `(error: AuthRejection) => void` | Observe a rejection (e.g. fire an audit/telemetry event) before the bounce. Receives the typed `AuthRejection` (`code`, `message`, `longMessage`, `meta`, `traceId`). |
 
 ```tsx
 // app/sso-callback/page.tsx
@@ -227,10 +233,16 @@ export default function SsoCallback() {
     <AuthenticateWithRedirectCallback
       signInForceRedirectUrl="/dashboard"
       signUpForceRedirectUrl="/welcome"
+      onError={(err) => analytics.track('sign_in_rejected', { code: err.code, traceId: err.traceId })}
     />
   )
 }
 ```
+
+> The rejection shape, the redirect-callback parameters it is parsed from, and the rejection code
+> catalog are documented in
+> [Errors and sign-in rejections](../../apis/frontend/errors.mdx). To render the rejection on a
+> **custom** sign-in screen, read it with the `useAuthError()` hook.
 
 ## Next steps
 

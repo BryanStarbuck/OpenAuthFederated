@@ -1,0 +1,194 @@
+---
+title: Errors and sign-in rejections
+description: The Frontend API error envelope, the redirect-callback error parameters, the sign-in rejection codes, and how the @auth/react SDK surfaces a refused sign-in (AuthRejection) so your app can show a clear, specific message.
+---
+
+# Errors and sign-in rejections
+
+When a sign-in attempt is **refused** — the upstream IdP authenticated the person, but the
+platform turned them away (e.g. a personal `gmail.com` account on a domain-restricted app) — no
+user is created and no session is established. The platform always returns **why**, in enough
+detail for your app to show the user a clear, specific message rather than a generic "something
+went wrong."
+
+This page documents that error contract end to end: the envelope shape, how rejection detail is
+delivered to a browser SPA across the redirect, the rejection code catalog, and how the
+`@auth/react` SDK surfaces it.
+
+> This is the companion to the [sign-in](./sign-in.mdx) and
+> [sign-up](./sign-up.mdx#domain-enforcement) flows. The rejection example there is one instance
+> of the envelope described here.
+
+## The error envelope
+
+Every Frontend API error — whether returned directly from a JSON endpoint or carried back across
+a redirect — uses the same envelope as the [Backend API](../backend/overview.mdx#error-object), so apps
+handle errors one way everywhere:
+
+```json
+{
+  "errors": [
+    {
+      "code": "identity_domain_not_allowed",
+      "message": "This app is restricted to company accounts. The identity 'gmail.com' is not part of an allowed company domain.",
+      "long_message": "The upstream identity authenticated successfully but failed domain enforcement (the hosted-domain `hd` claim / verified email did not match an allowed domain). No account was created and no session was started.",
+      "meta": {
+        "allowed_domains": ["act3ai.com", "whitehatengineering.com"],
+        "presented_domain": "gmail.com",
+        "email_verified": true
+      }
+    }
+  ],
+  "trace_id": "trace_9f2c1ab7d4e0"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `errors[].code` | string | Stable, machine-readable code. **Branch on this, never on `message`.** See the [catalog](#rejection-code-catalog). |
+| `errors[].message` | string | Short, human-readable summary — safe to show the user as-is. |
+| `errors[].long_message` | string | Detailed, user-presentable explanation. Render it under the summary when present. |
+| `errors[].meta` | object | Structured context for building a specific message. For sign-in rejections it carries `allowed_domains`, `presented_domain`, and `email_verified`. Forward-compatible: new keys may be added. |
+| `trace_id` | string | Correlates with the platform [audit log](../platform/audit-logs.mdx) entry (`user.sign_in.rejected`). Surface it in support tooling, not to end users. |
+
+## Redirect-callback parameters
+
+A browser SPA never sees the JSON envelope above for a sign-in rejection directly — the failure
+happens **during the IdP redirect handshake**, server-side, before any session exists. So the
+platform redirects back to your callback route (`redirect_url`, e.g. `/sso-callback`) with the
+**same envelope flattened into query parameters**:
+
+```
+https://app.whitehatengineering.com/sso-callback
+  ?error=identity_domain_not_allowed
+  &error_message=This%20app%20is%20restricted%20to%20company%20accounts...
+  &error_long_message=The%20upstream%20identity%20authenticated...
+  &presented_domain=gmail.com
+  &allowed_domains=act3ai.com%2Cwhitehatengineering.com
+  &email_verified=true
+  &trace_id=trace_9f2c1ab7d4e0
+```
+
+| Parameter | Maps to | Notes |
+|---|---|---|
+| `error` (or `error_code`) | `errors[0].code` | Either name is accepted; `error` is canonical. Its presence is what marks the callback a rejection. |
+| `error_message` | `errors[0].message` | Optional. If omitted, the SDK fills a sensible default from the code. |
+| `error_long_message` | `errors[0].long_message` | Optional detailed explanation. |
+| `presented_domain` | `meta.presented_domain` | The verified domain the identity actually presented. |
+| `allowed_domains` | `meta.allowed_domains` | Comma-separated list of allowed company domains. |
+| `email_verified` | `meta.email_verified` | `"true"` / `"false"`. |
+| `trace_id` | `trace_id` | For support correlation. |
+
+On **success** the callback instead carries `redirect_url_complete` (where to forward the user)
+and no `error`.
+
+## Rejection code catalog
+
+These are the codes the federated, domain-gated sign-in/sign-up flow can return. The SDK ships a
+friendly default `message` for each (used only when the platform did not send its own).
+
+| `code` | When it happens | HTTP (direct call) |
+|---|---|---|
+| `identity_domain_not_allowed` | The verified email domain is not in the org's allowlist. The canonical "wrong / unauthorized account" rejection (a personal `gmail.com`, a partner domain, a contractor elsewhere). | `403` |
+| `domain_not_allowed` | Alias of the above used by the allowlist/blocklist evaluation order (see [invitations](../backend/invitations.mdx)). Treat identically. | `403` |
+| `identity_email_unverified` | OIDC `email_verified` was `false`, so the identity can't be trusted even if its domain would match. | `403` |
+| `identity_blocked` | The identity matches a blocklist entry — explicitly denied (e.g. a suspended ex-employee). | `403` |
+| `attempt_expired` | The sign-in/sign-up attempt expired before the handshake completed. | `422` |
+| `sign_in_not_completed` | The handshake returned but no active session was established and no specific error was provided. A catch-all the SDK synthesizes; retry. | — |
+
+New codes are additive; always keep a default branch.
+
+## How `@auth/react` surfaces a rejection
+
+The SDK turns the callback parameters into a typed **`AuthRejection`** — the in-app mirror of one
+`errors[]` entry plus its `trace_id`:
+
+```ts
+interface AuthRejection {
+  code: string            // errors[].code — branch on this
+  message: string         // errors[].message (or an SDK default for the code)
+  longMessage?: string    // errors[].long_message
+  presentedDomain?: string
+  meta?: {
+    allowedDomains?: string[]
+    presentedDomain?: string
+    emailVerified?: boolean
+    [key: string]: unknown
+  }
+  traceId?: string        // trace_id, for support correlation
+}
+```
+
+The flow is:
+
+1. **`<AuthenticateWithRedirectCallback>`** (mounted on your `/sso-callback` route) calls
+   `completeRedirectCallback()`, which parses the parameters into an `AuthRejection`.
+2. On a rejection it **stashes** the `AuthRejection`, invokes your optional `onError` callback
+   (for audit/telemetry), and **bounces back to the sign-in screen** — no session is created.
+3. The drop-in **`<SignIn>`** reads the stashed rejection once and renders it: the `message` as the
+   headline, the `longMessage` beneath, and the allowed company domains from `meta` so the user
+   knows exactly which account to use.
+
+### Observe the rejection (audit / telemetry)
+
+```tsx
+import { AuthenticateWithRedirectCallback } from '@auth/react'
+
+export default function SsoCallback() {
+  return (
+    <AuthenticateWithRedirectCallback
+      signInForceRedirectUrl="/"
+      onError={(err) => {
+        // err: AuthRejection — log code + trace_id for support correlation.
+        analytics.track('sign_in_rejected', { code: err.code, traceId: err.traceId })
+      }}
+    />
+  )
+}
+```
+
+### Render it on your own sign-in screen
+
+If you render your own sign-in UI instead of the drop-in `<SignIn>`, read the rejection with the
+`useAuthError()` hook (one-shot — cleared as it is read):
+
+```tsx
+import { useAuthError } from '@auth/react'
+
+export function SignInBanner() {
+  const rejection = useAuthError()
+  if (!rejection) return null
+  return (
+    <div role="alert" className="auth-error">
+      <strong>{rejection.message}</strong>
+      {rejection.longMessage && <p>{rejection.longMessage}</p>}
+      {rejection.meta?.allowedDomains?.length ? (
+        <p>Use your account on: {rejection.meta.allowedDomains.join(', ')}.</p>
+      ) : null}
+    </div>
+  )
+}
+```
+
+The non-hook `readAuthError()` is also exported for non-React call sites; it has the same
+one-shot semantics.
+
+## Exercising rejections in development
+
+The dev mock (`pk_test_` / no running server) reproduces the **full** rejection shape so you can
+build and test your error UI without a real Google round-trip. On the callback URL:
+
+* `?auth_reject=<domain>` — simulate an outsider returning from the IdP with that domain
+  (rejected as `identity_domain_not_allowed`, with `meta.allowedDomains` populated).
+* `&auth_reject_code=<code>` — simulate a specific rejection code (e.g.
+  `identity_email_unverified`) to exercise that branch of your UI.
+
+## Next steps
+
+* [Sign-in flow](./sign-in.mdx)
+* [Sign-up flow — domain enforcement](./sign-up.mdx#domain-enforcement)
+* [Control components — `<AuthenticateWithRedirectCallback>`](../../sdk/components/control.mdx)
+* [Backend API — error model](../backend/overview.mdx#error-object)
+* [Audit logs — `user.sign_in.rejected`](../platform/audit-logs.mdx)
+</content>
+</invoke>

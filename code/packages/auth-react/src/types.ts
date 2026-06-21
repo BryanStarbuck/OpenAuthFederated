@@ -63,17 +63,44 @@ export interface AuthenticateWithRedirectParams {
 }
 
 /**
+ * Structured context attached to a rejection, so the app can build a specific message
+ * ("restricted to act3ai.com / whitehatengineering.com — you used gmail.com") instead of a
+ * generic one. Mirrors the platform error envelope's `meta` block
+ * (`docs/apis/frontend/errors.mdx`). Open-ended: the platform may add fields over time.
+ */
+export interface AuthRejectionMeta {
+  /** The verified company domains that ARE allowed — name them back to the user. */
+  allowedDomains?: string[]
+  /** The verified domain the upstream identity actually presented, when known. */
+  presentedDomain?: string
+  /** Whether the upstream email was verified (OIDC `email_verified`). */
+  emailVerified?: boolean
+  /** Any further platform-supplied context (forward-compatible). */
+  [key: string]: unknown
+}
+
+/**
  * An attempt that the platform refused — e.g. a valid upstream identity whose verified domain
  * is not on the allowlist (`identity_domain_not_allowed`). No user is created and no session is
- * established; the SDK surfaces this so the app can show a clear "restricted to company
- * accounts" message. Mirrors the documented callback rejection
- * (`docs/apis/frontend/sign-up.mdx#domain-enforcement`).
+ * established; the SDK surfaces this so the app can show a clear, specific message and the user
+ * understands *why* they were turned away. It mirrors the platform error envelope (one entry of
+ * the documented `errors[]` array: `code` + `message` + `long_message` + `meta`, plus the
+ * correlating `trace_id`) so the frontend rejection is exactly as rich as the API error it came
+ * from. See `docs/apis/frontend/errors.mdx` and `docs/apis/frontend/sign-up.mdx#domain-enforcement`.
  */
 export interface AuthRejection {
+  /** Stable, machine-readable code — branch on this, never on `message`. */
   code: string
+  /** Short, human-readable summary, safe to show the user. */
   message: string
-  /** The verified domain the upstream identity presented, when known. */
+  /** Detailed, user-presentable explanation (the API `long_message`), when provided. */
+  longMessage?: string
+  /** The verified domain the upstream identity presented, when known (also in `meta`). */
   presentedDomain?: string
+  /** Structured context for building a specific message. */
+  meta?: AuthRejectionMeta
+  /** Correlates with the platform audit log entry (`user.sign_in.rejected`) for support. */
+  traceId?: string
 }
 
 /**

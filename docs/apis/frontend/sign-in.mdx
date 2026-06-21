@@ -138,6 +138,19 @@ A Session now exists on the Client; mint a JWT via
 > domain error instead of a session. See the
 > [sign-up domain enforcement example](./sign-up.mdx#domain-enforcement).
 
+## Rejections and errors
+
+A refused sign-in is **not** a thrown exception or a silent bounce — the platform returns a
+structured rejection so your app can tell the user exactly why (and which account to use instead).
+The rejection rides back on the callback as the error envelope flattened into query parameters
+(`error`, `error_message`, `error_long_message`, `presented_domain`, `allowed_domains`,
+`email_verified`, `trace_id`), and the SDK surfaces it as a typed `AuthRejection`.
+
+The full contract — envelope shape, callback parameters, the rejection **code catalog**
+(`identity_domain_not_allowed`, `identity_email_unverified`, `identity_blocked`, …), and how
+`@auth/react` renders it on the sign-in screen — is documented in
+[Errors and sign-in rejections](./errors.mdx).
+
 ## Non-federated first factor
 
 For identities that authenticate without the upstream IdP, create the attempt with an
@@ -280,6 +293,7 @@ exist follow the [sign-up flow](./sign-up.mdx) (JIT provisioning).
 ## Next steps
 
 * [Sign-up flow](./sign-up.mdx)
+* [Errors and sign-in rejections](./errors.mdx)
 * [Client and sessions](./client-and-sessions.mdx)
 * [The current user (me)](./user.mdx)
 * [Frontend API overview](./overview.mdx)

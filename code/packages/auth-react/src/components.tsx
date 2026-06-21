@@ -35,6 +35,20 @@ export function readAuthError(): AuthRejection | null {
   }
 }
 
+/**
+ * Read the most recent sign-in rejection once, on mount. For apps that render their **own**
+ * sign-in screen (instead of the drop-in `<SignIn>`) and still want to show why the last
+ * attempt was refused — e.g. a wrong/unauthorized Google account. One-shot: the rejection is
+ * cleared as it is read, so a refresh won't re-show a stale message.
+ */
+export function useAuthError(): AuthRejection | null {
+  const [rejection, setRejection] = useState<AuthRejection | null>(null)
+  useEffect(() => {
+    setRejection(readAuthError())
+  }, [])
+  return rejection
+}
+
 const DEFAULT_PRIMARY = "#0f766e"
 
 const card: CSSProperties = {
@@ -109,12 +123,9 @@ function FederatedAuth(props: {
   const complete = props.forceRedirectUrl ?? props.fallbackRedirectUrl ?? "/"
   const color = primaryColor(props.appearance, config.appearance)
 
-  // Surface a rejection from a prior callback bounce (e.g. domain enforcement, §7.3). Read once
-  // on mount and clear it, so a refresh doesn't re-show a stale message.
-  const [rejection, setRejection] = useState<AuthRejection | null>(null)
-  useEffect(() => {
-    setRejection(readAuthError())
-  }, [])
+  // Surface a rejection from a prior callback bounce (e.g. domain enforcement, §7.3). One-shot,
+  // cleared on read, so a refresh doesn't re-show a stale message.
+  const rejection = useAuthError()
 
   const start = (connectionId: string) => {
     const authenticate =
@@ -137,7 +148,16 @@ function FederatedAuth(props: {
       </p>
       {rejection && (
         <div role="alert" style={rejectionBanner}>
-          {rejection.message}
+          <strong style={{ display: "block" }}>{rejection.message}</strong>
+          {rejection.longMessage && (
+            <span style={{ display: "block", marginTop: 4 }}>{rejection.longMessage}</span>
+          )}
+          {rejection.meta?.allowedDomains?.length ? (
+            <span style={{ display: "block", marginTop: 4 }}>
+              Allowed company {rejection.meta.allowedDomains.length > 1 ? "domains" : "domain"}:{" "}
+              {rejection.meta.allowedDomains.join(", ")}.
+            </span>
+          ) : null}
         </div>
       )}
       {connections.map((conn) => (
