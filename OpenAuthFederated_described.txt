@@ -1,0 +1,1418 @@
+================================================================================
+OpenAuthFederated — What We Are, What We Build, and How It All Fits Together
+A complete description of the project, its goals, its code, and its directories
+================================================================================
+
+ROOT_DIR dir is ~/BGit/Bryan_git/OpenAuthFederated
+   (absolute: /Users/bryan/BGit/Bryan_git/OpenAuthFederated)
+REPO is https://github.com/BryanStarbuck/OpenAuthFederated.git
+LICENSE is MIT (Copyright (c) 2026 Bryan Starbuck)
+
+Everything described in this document lives at or beneath {ROOT_DIR}. Every path
+named below is written relative to {ROOT_DIR} so that anyone can reproduce the
+work on their own machine by changing only that one variable.
+
+
+================================================================================
+1. INTRODUCTION — THE ONE-PARAGRAPH SUMMARY
+================================================================================
+
+OpenAuthFederated is our open-source, self-hosted authentication and identity
+platform. It is a free, owned-and-controlled equivalent of the hosted commercial
+identity providers (think Auth0, AWS Cognito, and similar SaaS identity
+services), but it is not a service we rent — it is software we own, run on our
+own infrastructure, under our own keys, and can read, audit, and extend line by
+line. Its job is to be the complete identity layer that any application can sit
+behind for all of its authentication and authorization: federated sign-in,
+just-in-time provisioning, directory sync, organizations and multi-tenancy,
+role-based access control, sessions, and the security around all of it.
+
+Crucially, OpenAuthFederated is a LIBRARY, not a web app. It is the dependency
+that an application — the Service Provider (SP) — embeds so that, on the app's
+behalf, it speaks SAML 2.0 or OIDC to an upstream Identity Provider (IdP),
+validates the returned assertion or ID token, enforces which company domains are
+allowed in, maps the upstream groups to our own roles and permissions, and hands
+the host application a trusted, established identity and session. The application
+is the consumer; OpenAuthFederated is the thing it consumes. The first real
+consumer is an internal company web app that federates to our company Google
+Workspace on the whitehatengineering.com domain, but the platform is built to
+gate any number of apps and any number of customer companies.
+
+The rest of this document explains, in detail: why we are building this; the
+mental model of IdP / SP / federation; the three API surfaces and their keys;
+each capability (SAML, OIDC, domain enforcement, JIT, SCIM, organizations, RBAC,
+sessions, security, UI); the two reference use cases; the engineering stack; the
+exact contents of every subdirectory under {ROOT_DIR}; the two shipping SDK
+packages and every module inside them; the embedded in-process Frontend API; the
+full REST endpoint surface; webhooks, JWT templates and audit logs; the consumer
+applications; and the project's current status. The introduction above is the
+clear summary; everything that follows is the detail.
+
+
+================================================================================
+2. THE NAMING RULE (MANDATORY, NON-NEGOTIABLE)
+================================================================================
+
+There is one rule that governs every word written about this project, in code,
+comments, documentation, READMEs, marketing, or product copy:
+
+* NEVER name the commercial hosted identity provider we are modeling after.
+  Describe the value generically instead — "an open-source identity platform,"
+  "an open-source equivalent of hosted identity providers" — or, when a concrete
+  comparison is genuinely useful, compare against Auth0 or AWS Cognito, which are
+  acceptable reference points.
+* Our product name in all material is exactly OpenAuthFederated.
+* The repository's CLAUDE.md instructs that any occurrence of the forbidden
+  vendor name anywhere in this directory or below should produce a warning.
+
+This rule is not cosmetic. It keeps our positioning clean: we are not "a clone of
+X"; we are OpenAuthFederated, an identity platform that happens to deliver the
+same category of value that hosted providers sell, while keeping the code, the
+data, and the authorization model entirely in our hands.
+
+
+================================================================================
+3. WHY WE ARE BUILDING IT
+================================================================================
+
+Hosted identity providers solve a real and hard problem. Federated sign-in,
+provisioning, directory sync, multi-tenancy, RBAC, secure sessions, and the
+constant security work around them are genuinely difficult to build and operate
+well. But the hosted vendors deliver that value as a closed, metered SaaS you
+rent: closed components you cannot inspect, per-seat billing, usage metering, and
+— most importantly — vendor lock-in around the one thing you least want to be
+locked into, namely who your users are and what they are allowed to do.
+
+OpenAuthFederated exists to capture the full value of a hosted identity provider
+while delivering it as software we own and control. The four pillars of the
+"why":
+
+* Open source. The entire platform is open and inspectable. No closed
+  components, no per-seat billing, no usage metering. Anyone can run it, audit
+  it, and extend it. It ships under the MIT license.
+
+* Self-hosted. It runs on our own infrastructure, under our own keys and
+  policies. Identity data and authorization decisions stay in our hands and never
+  transit a third party's control plane.
+
+* No vendor lock-in. This is the architectural commitment that everything else
+  bends around: upstream identity providers supply groups and roles as INPUTS,
+  but the authoritative authorization model — the roles, the permissions, the
+  mapping — lives in OUR own backend and database. We can swap upstream IdPs, or
+  add a second one, without rebuilding an application's permission model.
+
+* A drop-in identity layer. An application sits behind OpenAuthFederated for ALL
+  of its authentication and authorization instead of re-implementing auth
+  screens, session handling, token refresh, and RBAC from scratch in every app.
+  We write the hard parts once and reuse them everywhere.
+
+The bottom-line goal, stated in pm/goal.mdx, is to own our identity layer
+outright: an open-source, self-hosted platform that does everything a hosted
+commercial identity provider does, while keeping the code, the data, and the
+authorization model entirely under our control.
+
+
+================================================================================
+4. THE MENTAL MODEL — IdP, SP, AND FEDERATION
+================================================================================
+
+To understand OpenAuthFederated you have to be precise about three roles. The
+project's charter is emphatic about which one we are.
+
+* Identity Provider (IdP). The system that actually authenticates the human:
+  checks the password, applies MFA, and asserts "yes, this is alice@acme.com."
+  In our reference deployment the IdP is Google Workspace. For a B2B customer who
+  runs their own IdP, it is their Okta / Google Workspace / Azure-style system.
+  The IdP is the single source of truth for who a person is.
+
+* Service Provider (SP). The application or service the user actually wants to
+  reach — the web app. The SP does NOT authenticate the user itself. Instead it
+  trusts and consumes the SAML assertion (or OIDC ID token) from the IdP to
+  establish a session and make authorization decisions.
+
+* OpenAuthFederated. We are NOT the Service Provider, and we are NOT a web app.
+  We are the LIBRARY that the SP web apps embed. We run on the SP side as a
+  dependency of the SP application. On the app's behalf we speak SAML 2.0 / OIDC
+  to the IdP, validate the returned assertion, enforce domain rules, resolve or
+  create the user, map groups to roles, and hand the host app a trusted identity
+  and an established session. The SP app is the consumer; we are the consumed.
+
+Federation, then, is the act of OpenAuthFederated standing between an app and an
+upstream IdP so the app trusts our asserted identity and never handles the user's
+upstream password. The user authenticates once, at the IdP they already use; the
+app never sees their corporate credentials; and OpenAuthFederated is the trusted
+translator in the middle.
+
+The canonical SP-initiated flow, end to end:
+
+  App  ->  OpenAuthFederated  ->  Upstream IdP  ->  signed SAML assertion / OIDC ID token
+                                                          |
+                       validate - resolve/JIT-create user - map groups to roles
+                                                          |
+                       establish session  ->  App receives a short-lived JWT
+
+Step by step:
+  1. A user hits a protected route in the app and is redirected to OpenAuthFederated.
+  2. OpenAuthFederated redirects to the upstream IdP, which authenticates the
+     human (including MFA).
+  3. The IdP returns a signed SAML assertion or an OIDC ID token.
+  4. OpenAuthFederated validates the signature, enforces the allowed-domain
+     restriction, and either resolves an existing user or JIT-creates one.
+  5. Upstream groups are mapped to roles, and roles to permissions — the
+     authoritative model lives in our database, not the IdP.
+  6. A session is established: the app receives a short-lived JWT, refreshed by a
+     rotating HttpOnly cookie, and the session can be revoked immediately
+     server-side.
+
+
+================================================================================
+5. THE THREE API SURFACES AND THEIR KEYS
+================================================================================
+
+A consuming web app talks to OpenAuthFederated through three distinct surfaces,
+each with its own credential and its own trust boundary. Keeping them separate is
+what lets the browser hold only public-safe material while secrets stay on the
+server.
+
+* Frontend API — base https://auth.<your-domain> (and /v1 beneath it).
+  Browser-facing. Authorized with a PUBLISHABLE key (pk_test_… / pk_live_…),
+  which is safe to ship to the browser. This is the surface the React SDK calls
+  to start sign-in, run the SSO redirect handshake, rehydrate the current
+  session, mint short-lived access tokens, set the active organization, run
+  step-up reverification, and sign out.
+
+* Backend API — base https://api.<your-domain>/v1.
+  Server-to-server. Authorized with a SECRET key (sk_test_… / sk_live_…), which
+  must never reach the browser. This is the surface trusted server code calls to
+  read and manage users, inspect/verify/revoke sessions, manage organizations and
+  memberships, create invitations, and mint templated tokens.
+
+* Platform API — the administrative control plane, also secret-key authorized.
+  This is where one-time setup happens: creating organizations/tenants, creating
+  and activating SSO connections, claiming and verifying domains, defining
+  permissions and roles, mapping upstream groups to roles, configuring SCIM,
+  registering webhooks, and reading audit logs.
+
+ID prefixes used across the platform (so an object's type is legible at a glance):
+  usr_  user            org_  organization/tenant     sess_ session
+  role_ role            perm_ permission              conn_ SSO connection
+  dmn_  domain          mch_  machine identity        whk_  webhook
+  evt_  audit event     orgmem_ organization membership
+
+Key types: sk_live_/sk_test_ (secret), pk_live_/pk_test_ (publishable), plus a
+dedicated SCIM bearer token per connection (rotatable). A separate machine-token
+/ API-key path exists for server-to-server (M2M) callers.
+
+
+================================================================================
+6. CAPABILITY: AUTHENTICATION METHODS
+================================================================================
+
+OpenAuthFederated supports federated SSO through two primary protocols, plus the
+hooks for social logins and enterprise IdP connections.
+
+* SAML 2.0 — MANDATORY and exclusive on the SAML path. We MUST be compatible
+  with SAML 2.0 and NOT any earlier version. Any SAML integration, assertion
+  handling, metadata, or binding we implement targets SAML 2.0 only; SAML 1.x is
+  rejected/unsupported. Whenever we do SAML, it is SAML 2.0.
+
+* OIDC / Google Workspace — the OpenID Connect path, used as our reference
+  default for Google Workspace federation. On this path we verify the
+  hosted-domain (hd) claim and email_verified, which is how domain enforcement is
+  applied for Google accounts.
+
+* Social logins and enterprise IdP connections — modeled as additional
+  connection types over time, all funneling into the same session model.
+
+The design guarantee that makes this clean: SAML and OIDC produce an IDENTICAL
+session. Whichever path a user takes, they end up with the same session cookie
+and the same token shape, so everything downstream — /client rehydration, token
+minting, <Protect> gating, backend verification — behaves identically regardless
+of how the user signed in.
+
+
+================================================================================
+7. CAPABILITY: IDENTITY FEDERATION AND DOMAIN ENFORCEMENT
+================================================================================
+
+Identity federation (covered in section 4) is the core: OpenAuthFederated acts as
+the SP-side identity/auth layer between an app and an upstream IdP, so the app
+trusts our asserted identity and never handles the user's upstream password.
+
+Domain enforcement is the gate layered on top of federation. It restricts
+sign-in to one or more VERIFIED company domains and rejects any identity outside
+the allowed domain(s) — including unverified emails and out-of-organization
+accounts.
+
+* On the OIDC path, enforcement checks the hosted-domain (hd) claim and that
+  email_verified is true.
+* On the SAML path, a valid signed assertion from a Workspace IdP yields an
+  authoritative email; domain enforcement then applies to that email's domain.
+* A domain is not merely asserted — it is PROVEN. A customer claims a domain and
+  then verifies ownership by publishing a DNS TXT record. An unverified domain is
+  never used for sign-in. A domain can be claimed by exactly one organization; a
+  second claim returns 409, which is what guarantees tenant isolation by domain.
+
+The sign-in evaluation order (specified in the invitations doc) is:
+  blocklist  ->  domain enforcement  ->  allowlist  ->  pending invitation  ->  otherwise reject.
+
+This ordering is precisely what lets "everyone on this domain" coexist with
+"these specific extra people" and "this specific blocked address."
+
+Relevant control-plane endpoints:
+  POST /v1/domains                  claim a domain for an organization
+  POST /v1/domains/{dmn_id}/verify  verify ownership after the DNS TXT is published
+  GET  /v1/domains                  list domains and their verification state
+  DELETE /v1/domains/{dmn_id}       remove a domain claim
+
+A rejected sign-in surfaces as identity_domain_not_allowed (front-end) /
+domain_not_allowed, recorded in the audit log as user.sign_in.rejected.
+
+
+================================================================================
+8. CAPABILITY: PROVISIONING — JIT AND SCIM 2.0
+================================================================================
+
+OpenAuthFederated supports two complementary provisioning models.
+
+* Just-In-Time (JIT) provisioning. On a user's first valid sign-in, the platform
+  creates the user record automatically and assigns the organization's default
+  role — no per-user invitation required. JIT is what makes "anybody with a
+  verified @acme.com identity is admitted into the acme tenant" work without
+  manual seat management.
+
+* SCIM 2.0 directory sync. For full lifecycle management — provision, update, and
+  deprovision — the platform exposes a SCIM 2.0 server so an upstream directory
+  can keep users and groups in sync. SCIM endpoints include:
+    GET/POST            /scim/v2/Users
+    GET/PUT/PATCH/DELETE /scim/v2/Users/{id}
+    GET/POST            /scim/v2/Groups
+    GET/PUT/PATCH/DELETE /scim/v2/Groups/{id}
+  SCIM is enabled per SSO connection (POST /v1/sso_connections/{conn_id}/scim),
+  with a dedicated, rotatable bearer token
+  (POST /v1/sso_connections/{conn_id}/scim/rotate_token).
+
+Deprovisioning is the security payoff: when a customer removes an employee in
+their own IdP, SCIM deactivates the user in the tenant, force-revokes their
+sessions, and — combined with short token TTLs — access is cut promptly.
+
+Provisioning lifecycle is observable via webhooks (user.created, user.updated,
+user.deleted, user.provisioned, user.deprovisioned, plus group/membership
+changes).
+
+
+================================================================================
+9. CAPABILITY: ORGANIZATIONS AND MULTI-TENANCY
+================================================================================
+
+The Organization (also called a tenant) is the unit of multi-tenancy. It lets one
+deployment of OpenAuthFederated gate more than one app or more than one customer
+company, each isolated from the others.
+
+An Organization owns its SSO connection(s), its verified domains, its SCIM
+config, its roles, its members, and its settings. Notable fields and settings:
+
+  name, slug
+  allowed_domains          verified domains whose users auto-join this org
+  enforce_domain           turn domain enforcement on for the org
+  allow_jit_provisioning   create users automatically on first valid sign-in
+  default_role_id          the role a JIT/auto-joined user receives
+  max_allowed_memberships  a seat cap for abuse/limit control
+
+Control-plane and runtime endpoints:
+  POST   /v1/organizations                              create a tenant
+  GET    /v1/organizations                              list tenants
+  GET    /v1/organizations/{org_id}                     read one
+  PATCH  /v1/organizations/{org_id}                     update settings
+  DELETE /v1/organizations/{org_id}                     remove (soft-delete)
+  GET    /v1/organizations/{org_id}/memberships         list members + resolved perms
+  POST   /v1/organizations/{org_id}/memberships         add a member with a role
+  PATCH  /v1/organizations/{org_id}/memberships/{user_id}  change a member's role
+  DELETE /v1/organizations/{org_id}/memberships/{user_id}  remove a member
+
+On the client side, the active organization is tab-aware: two browser tabs can
+hold two different active orgs simultaneously. Switching the active org re-scopes
+the permissions that apply right now and invalidates any cached access token so
+the next token reflects the new org's grants.
+
+
+================================================================================
+10. CAPABILITY: RBAC — GROUP -> ROLE -> PERMISSION
+================================================================================
+
+Role-Based Access Control is the heart of the no-lock-in promise. There are three
+layers, and only the mapping between them lives in our system — never the people.
+
+* Permission. An atomic <feature>:<action> grant, prefixed perm_. Examples:
+  code:read, jfk:write, app:admin, org:invoices:create. There is also a
+  structured organization/system form, e.g. org:sys_memberships:manage.
+
+* Role. A named bundle of permissions, prefixed role_. Examples: an Admin role
+  (key admin) granting ["app:admin", "*:read"]; a baseline Member role.
+
+* Assignment / mapping. A role is attached to a user — and critically, in the
+  federated case the assignment is DERIVED from the upstream group via the SSO
+  connection's group_mapping, rather than hand-assigned. At each sign-in, the
+  groups attribute from the assertion/claim is matched against group_mapping, and
+  the matched role's permissions become the session's effective permissions.
+
+A group_mapping entry is simply:
+  { "idp_group": "app-admins@whitehatengineering.com", "role_id": "role_admin" }
+
+This is the lock-in guarantee in action: upstream groups are inputs; the
+role/permission model is ours. Adding or removing an admin becomes a pure
+Workspace operation (add/remove from the group) with no code change, no platform
+reconfiguration, and no redeploy.
+
+Wildcard semantics (implemented identically in the front-end and backend SDKs):
+  exact grant            "code:read" satisfies a check for "code:read"
+  feature wildcard       "film:*"   satisfies any "film:<action>"
+  action wildcard        "*:read"   satisfies any "<feature>:read"
+  super wildcard         "*:*"      satisfies everything
+  three-part permissions everything before the final ":" is treated as the
+                         feature, so "org:invoices:*" or "*:create" still match
+                         "org:invoices:create"
+
+Roles follow an org:<role> convention (e.g. org:admin), and the helpers accept a
+bare role (admin) or its org:-prefixed form interchangeably.
+
+RBAC control-plane endpoints:
+  POST/GET/PATCH/DELETE  /v1/permissions[/{perm_id}]
+  POST/GET/PATCH/DELETE  /v1/roles[/{role_id}]
+  POST/DELETE            /v1/organizations/{org_id}/memberships/{user_id}/roles[/{role_id}]
+
+Authorization is enforced on BOTH sides: the front end shows/hides UI for UX, and
+the backend independently re-checks the permission. Front-end checks are never the
+security boundary.
+
+
+================================================================================
+11. CAPABILITY: THE HYBRID SESSION MODEL
+================================================================================
+
+OpenAuthFederated uses a deliberately hybrid session design that gets the best of
+stateless and stateful approaches:
+
+* Short-lived JWT access tokens (Bearer). These are verified networklessly — no
+  per-request database hit, no per-request call back to OpenAuthFederated. In
+  production they are RS256 and verified against the issuer's JWKS
+  (<issuer>/.well-known/jwks.json), which is cached after first fetch.
+
+* A longer-lived, rotating, HttpOnly refresh cookie keeps the user signed in and
+  rotates on use.
+
+* Server-side session records back the tokens so a session can be revoked
+  IMMEDIATELY despite the tokens being valid until they expire.
+
+The combination is "stateless verification plus stateful revocation." Most
+requests cost nothing but a signature check; sensitive or just-offboarded cases
+get a stateful guarantee.
+
+Session / token endpoints:
+  POST /v1/sessions/{session_id}/verify   stateful re-check (a just-offboarded
+                                          user fails here even on a not-yet-expired token)
+  POST /v1/sessions/{session_id}/revoke   immediate revocation
+  GET  /v1/sessions[/{session_id}]        inspect
+  POST /v1/tokens                         mint a (templated) token server-side
+
+Default lifetimes in the embedded implementation: session ~8 hours, access token
+~60 seconds. The short access-token TTL is what makes "remove from the group and
+they lose access on the next refresh" true in practice; the stateful verify call
+is what makes "immediately" true for the most sensitive actions.
+
+The token claim shape carries: sub (user id), email, sid (session id), org_id,
+roles[], permissions[], hd (hosted domain), plus standard iss/aud/exp/iat. A
+machine token instead carries token_type: "machine", a mch_ subject, and coarse
+scopes[] rather than org-scoped RBAC, so a human session can never be mistaken
+for a service credential.
+
+
+================================================================================
+12. CAPABILITY: SECURITY POSTURE
+================================================================================
+
+Security is treated as a first-class capability, not an afterthought:
+
+* MFA inherited from the upstream IdP, with optional step-up reverification for
+  sensitive actions (org setting require_mfa: "always"; client-side
+  useReverification wraps an action so a freshly-verified session is required
+  before it runs).
+* HTTPS only.
+* SameSite + HttpOnly cookies as CSRF defense; the OAuth state and SAML
+  RelayState are both carried in signed, short-lived HttpOnly cookies, and the
+  callback compares them in constant time.
+* CSP headers; strict CORS on the browser surface.
+* No long-lived secrets in localStorage; secret keys never reach the browser.
+* No password surface. When federating to an upstream IdP, the platform stores NO
+  end-user passwords, which eliminates that entire class of attack.
+* Full auditing. Sign-in, sign-out, refresh, permission-denied, and admin actions
+  are written to an immutable audit log. Event names include: user.sign_in,
+  user.sign_in.rejected, user.sign_out, user.created, user.updated, user.deleted,
+  user.provisioned, user.deprovisioned, session.created, session.refresh,
+  session.revoked, organization.created, organizationMembership.created/updated/
+  deleted, domain.added, domain.verified, sso_connection.created/activated/
+  disabled, role.created, permission.created. Audit logs are readable via
+  GET /v1/audit_logs (filterable, e.g. by organization_id) and
+  GET /v1/audit_logs/{evt_id}.
+
+
+================================================================================
+13. CAPABILITY: DROP-IN UI COMPONENTS
+================================================================================
+
+So apps do not rebuild auth screens, OpenAuthFederated ships drop-in React UI:
+sign-in, sign-up, account management, and organization management. These are
+delivered by the @auth/react package (detailed in section 18). The components are
+deliberately federated and password-free — the sign-in surface renders one button
+per allowed company domain ("Continue with whitehatengineering.com") and a short
+"Employees only / No passwords / Access is restricted to company accounts"
+explanation, rather than an email+password form. Theming is done through an
+appearance prop (the conceptual @auth/ui is folded into @auth/react rather than
+shipped as a separate package).
+
+
+================================================================================
+14. THE REFERENCE DEPLOYMENT — GATING AN INTERNAL APP TO GOOGLE WORKSPACE
+================================================================================
+
+The first real consumer of OpenAuthFederated is an internal company web app, and
+its rule is the canonical example of how the platform is used:
+
+  Access requirement: a person must have an active account in our company Google
+  Workspace (G Suite) on the whitehatengineering.com domain to log in. Google
+  Workspace is the single source of truth for who is an employee — no
+  app-specific passwords, no other social logins, no anonymous access.
+
+* IdP: Google Workspace (whitehatengineering.com) authenticates the human.
+* SP: the app, with OpenAuthFederated as the identity/auth layer between the app
+  and Google.
+* Flow (SP-initiated): App -> OpenAuthFederated -> Google Workspace -> signed
+  SAML assertion / OIDC ID token -> validate -> resolve/JIT-create user -> map
+  groups -> establish session -> app receives a short-lived JWT and the user is
+  in. SAML 2.0 via a Google Workspace custom app is the go-forward default
+  (domain-scoped enforcement + attribute/group mapping); OIDC is an acceptable
+  equivalent with the same domain restriction.
+* Authorization: Google Workspace groups map to app roles; read-only vs
+  read/write is enforced on both the front end (UX) and the backend
+  (authoritative).
+* Offboarding: suspend/delete the Google account -> SCIM deprovision + short
+  token lifetimes -> access is revoked promptly; admins can force-revoke sessions.
+
+This single deployment exercises the entire platform: federation, domain
+enforcement, provisioning, RBAC, and the session model.
+
+
+================================================================================
+15. THE TWO REFERENCE USE CASES (pm/user_cases/)
+================================================================================
+
+The product-management directory contains two fully-worked use cases that, taken
+together, define the two shapes of customer the platform serves.
+
+15.1 — Admin gated by our own company's Google Workspace group
+      (pm/user_cases/admin_by_our_own_company.mdx)
+
+A web app WE own and operate sits behind OpenAuthFederated. Its users are our own
+employees, federated through our Google Workspace. The app has a normal surface
+(any signed-in employee) and an admin surface (a smaller set of employees).
+
+The key design decision: we do NOT encode "who is an admin" inside
+OpenAuthFederated, and we keep no hardcoded list of admin employees anywhere. The
+web app declares, in its own config, the NAME of a Google Workspace group (e.g.
+app-admins@whitehatengineering.com). Anyone in that group — and only those people
+— gets the admin role for that app. Adding/removing an admin is a pure Workspace
+operation; no code change, no redeploy.
+
+OpenAuthFederated's job is to (1) federate the employee through Google Workspace,
+(2) read the employee's Workspace group membership out of the assertion/claims,
+(3) map the configured admin group to a role/permission via the authoritative
+model in our database, and (4) assert that role/permission in the short-lived
+session token the app already trusts. The app gates its admin routes on that
+asserted permission.
+
+The mapping lives on the SSO connection's group_mapping (app-admins@… ->
+role_admin). The app gates UX with <Protect permission="app:admin">, gates routes
+with authMiddleware + createRouteMatcher(['/admin(.*)']) +
+auth.protect((has) => has({ permission: 'app:admin' })), and re-checks
+authoritatively on the backend with authClient.verifyToken() plus a permission
+check — escalating to POST /v1/sessions/{id}/verify for sensitive/irreversible
+admin actions. Acceptance criteria require, among other things, that the platform
+stores NO hardcoded list of admins (only the group_mapping entry and the role/
+permission definitions), and that adding someone to the Workspace group grants
+/admin on their next token refresh with no code change.
+
+15.2 — A B2B SaaS customer is a whole company (domain-gated tenant)
+      (pm/user_cases/customer_is_a_saml_company.mdx)
+
+Here the web app WE own is a multi-tenant B2B SaaS product, and its users are the
+employees of our CUSTOMERS, not our own employees. A customer often pays for their
+entire company and wants effortless onboarding. Two admission shapes are
+supported:
+
+* Domain-based admission (the headline case): the customer says "our company is
+  acme.com — anybody with a verified @acme.com identity should be admitted into
+  OUR tenant." No per-user invites; the verified domain is the membership rule.
+* Explicit values (allowlist): the customer supplies specific emails or patterns
+  (e.g. *@acme.com, or alice@acme.com) — useful for pilots, small teams, or
+  contractors at a different domain (partner.com).
+
+A customer that runs its own IdP is a "SAML company": they bring their own SAML
+2.0 / OIDC IdP, and we federate that customer's tenant to it so their employees
+sign in with existing corporate credentials. Each customer maps to one
+Organization (tenant). The verified domain both routes a login to the right
+tenant and enforces who is allowed in; a domain is claimed by exactly one org, so
+a user from acme.com can never land in globex.com's tenant.
+
+The critical runtime question the SaaS app asks on every tenant-scoped request is:
+"is this signed-in user authenticated, AND do they qualify for THIS tenant?" The
+answer comes from the token's claims, backed by a stateful check when certainty is
+required: verify the token (networkless), confirm claims.org_id matches the
+requested tenant, confirm a live membership via getOrganizationMembershipList(),
+check the required permission, and for sensitive actions call
+POST /v1/sessions/{id}/verify. The explicit-admission endpoints are
+POST /v1/allowlist_identifiers, POST /v1/invitations, and
+POST /v1/blocklist_identifiers.
+
+Together these two use cases prove the platform across the two axes that matter:
+internal vs. external users, and our-IdP vs. customer-owned-IdP.
+
+
+================================================================================
+16. THE ENGINEERING STACK
+================================================================================
+
+OpenAuthFederated follows our standard Node + TypeScript stack, derived from the
+ACT3 and JFKSocial codebases.
+
+* Language/runtime: TypeScript (strict: true) on Node >= 20; pnpm as the package
+  manager; Biome 2 for lint/format; husky + lint-staged for pre-commit hygiene.
+
+* Backend: NestJS (REST + Swagger), TypeORM + PostgreSQL (soft-delete, real
+  migrations — never synchronize), class-validator DTOs, Passport + JWT auth +
+  RBAC guards (@UseGuards(JwtAuthGuard), @CurrentUser()), Redis + BullMQ for
+  background jobs as needed, Sentry for error tracking, Jest + supertest for
+  tests.
+
+* Front end (the UI components / admin): React 19 + Vite 7, Zustand for client
+  state, TanStack Query + axios + an OpenAPI-generated client for server state,
+  Tailwind + shadcn/ui + Radix + CVA for UI, react-hook-form + Zod for forms,
+  TanStack Router, Vitest + Playwright for tests, Sentry.
+
+* Contract: the backend's Swagger spec generates the front-end's typed
+  TanStack-Query client via OpenAPI codegen, so the API contract is enforced by
+  types end to end.
+
+* axios interceptors are the single place for auth + error policy: the request
+  interceptor injects the Bearer token from the auth store; the response
+  interceptor handles 401 (single-flight refresh + queued retry, then logout) and
+  403 (insufficient permission -> toast).
+
+Note the distinction: the charter describes the FULL platform stack (the NestJS
+server, the admin UI). The SDK packages that exist in the repository today are the
+typed library surface that apps program against; they intentionally have a tiny
+dependency footprint (see section 18).
+
+
+================================================================================
+17. REPOSITORY STRUCTURE — EVERY SUBDIRECTORY UNDER {ROOT_DIR}
+================================================================================
+
+This is the section that explains all of our subdirectories. The top level is
+deliberately small:
+
+  {ROOT_DIR}/
+  |-- code/        Application + SDK code (Node + TypeScript)
+  |-- pm/          Product management — MDX specs and charter docs
+  |-- docs/        Developer documentation (MDX) — the API + SDK reference
+  |-- README.md    Public-facing project README
+  |-- CLAUDE.md    Repository working notes + the mandatory naming rule
+  |-- LICENSE      MIT license
+  +-- .gitignore
+
+17.1 — {ROOT_DIR}/pm/  (product management)
+
+  pm/goal.mdx
+      The single source of truth for WHY the project exists: the open-source,
+      self-hosted, no-lock-in, drop-in framing; what the platform delivers; the
+      first real use (internal app gated to Google Workspace); and the
+      bottom-line goal of owning our identity layer outright.
+
+  pm/user_cases/admin_by_our_own_company.mdx
+      Use case 15.1 above — internal admin gated by a Workspace group, with
+      actors, RBAC model, configuration, end-to-end flow, security, a build
+      checklist, an API/SDK reference index, and acceptance criteria.
+
+  pm/user_cases/customer_is_a_saml_company.mdx
+      Use case 15.2 above — multi-tenant B2B SaaS with domain-gated tenants and
+      customer-owned SAML/OIDC, with the same thorough structure.
+
+17.2 — {ROOT_DIR}/docs/  (developer documentation, MDX)
+
+  docs/README.md
+      Top-level doc index: the platform overview, the three API surfaces and key
+      types, the ID prefixes, and the core concepts.
+
+  docs/getting_started/
+      overview.mdx              The mental model: three API surfaces, the SDKs,
+                                the federation flow, the reference deployment.
+      quickstart-nextjs.mdx     A from-zero integration walkthrough.
+      environment-variables.mdx The env var reference (see section 19).
+      protect-routes.mdx        Route gating with authMiddleware /
+                                createRouteMatcher / auth.protect.
+      read-the-user.mdx         Reading the user/session/org on server and client
+                                (auth(), currentUser(), has(), the hooks).
+      deploy.mdx                Deployment guidance.
+
+  docs/sdk/
+      overview.mdx              The SDK family and how the packages relate.
+      nextjs.mdx                The Next.js SDK surface.
+      backend-sdk.mdx          The @auth/backend surface — authClient.verifyToken,
+                                users/sessions/organizations/invitations/jwt
+                                templates, the permission helpers.
+      hooks.mdx                 The React hooks reference.
+      components/overview.mdx   The component family overview.
+      components/authentication.mdx  <SignIn>, <SignUp>, buttons, UserButton.
+      components/user.mdx       User/account components.
+      components/organization.mdx  <OrganizationSwitcher>, <OrganizationList>,
+                                <CreateOrganization>, <OrganizationProfile>.
+      components/control.mdx    Control components: <Protect>, <AuthProvider>,
+                                <AuthenticateWithRedirectCallback>, <SignedIn>/
+                                <SignedOut>, the load-state components.
+
+  docs/apis/platform/   (the control plane)
+      overview.mdx, organizations.mdx, sso-connections.mdx, domains.mdx,
+      rbac.mdx, scim.mdx, webhooks.mdx, audit-logs.mdx, api-keys.mdx.
+      These document tenant lifecycle, federation setup + group_mapping, domain
+      claim/verify/enforce, the permission/role model, SCIM directory sync,
+      webhook subscriptions and event names, the immutable audit trail, and the
+      key types (sk/pk/scim).
+
+  docs/apis/backend/    (server-to-server)
+      overview.mdx, users.mdx, sessions.mdx, organizations.mdx, invitations.mdx,
+      jwt-templates.mdx.
+      These document the token-verify model, user read/deprovision, session
+      mint/verify/revoke, runtime org membership + resolved permissions, explicit
+      admission (allowlist/blocklist/invitations), and named JWT templates.
+
+  docs/apis/frontend/   (browser-facing)
+      overview.mdx, sign-in.mdx, sign-up.mdx, client-and-sessions.mdx, user.mdx.
+      These document the publishable-key surface, the sign-in/sign-up client
+      flows, session rehydration and token minting, and the user object — plus
+      the domain-enforcement rejection contract.
+
+17.3 — {ROOT_DIR}/code/  (application + SDK code)
+
+  code/package.json            The private workspace root, @openauthfederated/sdks,
+                               pnpm 11, Node >= 20, with build/clean scripts.
+  code/pnpm-workspace.yaml     Declares packages/* as the workspace.
+  code/pnpm-lock.yaml          The lockfile.
+  code/tsconfig.base.json      Shared strict TypeScript config.
+  code/README.md               How to build the SDKs, the package table, and the
+                               local dev-mock instructions.
+  code/packages/auth-react/    The @auth/react client SDK (section 18.1).
+  code/packages/auth-backend/  The @auth/backend server SDK (section 18.2).
+
+Each package contains src/ (the TypeScript source — the authoritative code),
+dist/ (the compiled .js + .d.ts + .js.map output, checked in so downstream apps
+can consume the packages via pnpm file: dependencies without a build step), a
+tsconfig.json, and a package.json. The auth-backend package additionally contains
+a test/ directory (section 20).
+
+
+================================================================================
+18. THE SDK PACKAGES IN DETAIL
+================================================================================
+
+Two packages ship today. They are the typed surface an application programs
+against, mapping one-to-one onto the docs under docs/sdk/.
+
+  Package                | Name           | Layer            | Consumer
+  -----------------------|----------------|------------------|------------------
+  packages/auth-react    | @auth/react    | Client (browser) | React SPA (ESM)
+  packages/auth-backend  | @auth/backend  | Server (secret)  | NestJS/Node (CJS)
+
+Both build to dist/ (types + JS). Downstream apps consume them via pnpm file:
+dependencies — build here first, then install the app. A guiding principle of both
+packages is a tiny dependency footprint: @auth/react depends only on jose (with
+react/react-dom as peers); @auth/backend depends only on jose and
+@node-saml/node-saml. jose is ESM-only and is therefore loaded through a real
+dynamic import() so the package stays consumable from a CommonJS host like NestJS.
+
+18.1 — @auth/react (code/packages/auth-react), version 0.1.0
+
+The React SDK: an AuthProvider, focused hooks, and drop-in federated components.
+Its source modules:
+
+  src/types.ts
+      The shared type surface and the framework-agnostic engine contract
+      (AuthCore). Defines SdkUser, SdkOrganization, SdkMembership,
+      SessionSnapshot, Connection, AuthRejection, RedirectCallbackResult,
+      LoadState ("loading" | "loaded" | "degraded" | "failed"), and the
+      EMPTY_SNAPSHOT. Also the wildcard-aware hasPermission/hasRole helpers and a
+      domainSlug() utility — mirrored exactly on the backend so a permission check
+      means the same thing on both sides.
+
+  src/core.ts
+      Two implementations of AuthCore, sharing a BaseCore that holds the external
+      store (subscribe/emit via useSyncExternalStore), the active-grants
+      computation (which scopes permissions to the active org), has(),
+      isRecentlyVerified(), and tab-aware active-org storage (sessionStorage).
+        * DevAuthCore — the local dev mock: no Google round-trip and no running
+          server. Sign-in establishes a session in localStorage; getToken() mints
+          a short-lived (60s) HS256 JWT with a shared dev secret; it models domain
+          enforcement (including an ?auth_reject=<domain> simulation) and ships
+          two demo orgs (admin in one, viewer in the other) so the org switcher
+          and active-org RBAC scoping are exercisable.
+        * RealAuthCore — the real client against the Frontend API: rehydrates the
+          Client (GET /client), mints short-lived JWTs (POST
+          /client/sessions/{id}/tokens, with a templated variant), runs the SSO
+          redirect handshake, sets the active org (touch), reverifies, and signs
+          out — authorized with the publishable key + the rotating session cookie
+          (credentials: 'include'). It distinguishes load states: unreachable ->
+          "failed", 5xx -> "degraded", otherwise "loaded".
+
+  src/context.tsx
+      The <AuthProvider>. Chooses DevAuthCore vs RealAuthCore based on the devMode
+      prop, wires the core to React via useSyncExternalStore, and exposes config
+      (signInUrl, signUpUrl, afterSignOutUrl, appearance), the snapshot, the load
+      state, and the connections (one per allowed domain). Props include
+      publishableKey, frontendApi, allowedDomains, devMode, devSharedSecret, and
+      the URL/appearance config.
+
+  src/hooks.ts
+      The focused hooks: useAuth (state + getToken/has/signOut), useUser,
+      useSession, useSessionList, useSignIn, useSignUp, useOrganization,
+      useOrganizationList (list memberships + setActive), useReverification
+      (wrap a sensitive action so a freshly-verified session is required first;
+      default max age 600s), and useOpenAuth (an imperative escape hatch).
+
+  src/components.tsx
+      The drop-in components: <SignIn>, <SignUp>, <SignInButton>, <SignUpButton>,
+      <SignOutButton>, <UserButton>, <GoogleOneTap>,
+      <AuthenticateWithRedirectCallback> (completes the redirect handshake; on a
+      domain-enforcement rejection it stashes the error and bounces to sign-in so
+      the user sees a clear message — no session is created), <Protect>, <Show>,
+      <SignedIn>, <SignedOut>, <RedirectToSignIn>, <RedirectToSignUp>,
+      <AuthLoaded>/<AuthLoading>/<AuthDegraded>/<AuthFailed>,
+      <OrganizationSwitcher>, <OrganizationList>, <OrganizationProfile>,
+      <CreateOrganization>, plus readAuthError(). The sign-in surface is
+      explicitly password-free: one "Continue with <domain>" button per allowed
+      company domain.
+
+  src/index.ts
+      The public barrel — re-exports the provider, hooks, components, the
+      permission helpers, and the public types.
+
+18.2 — @auth/backend (code/packages/auth-backend), version 0.2.0
+
+The server SDK: a typed authClient authorized with the secret key, the networkless
+token-verification helpers, route-protection helpers, AND the embedded in-process
+Frontend API + SAML SP support. Its source modules:
+
+  src/types.ts
+      TokenClaims (sub, email, sid, org_id, roles[], permissions[], hd, plus
+      iss/aud/exp/iat), MachineClaims (token_type: "machine", mch_ subject,
+      scopes[]), PermissionCheck, and CreateAuthClientOptions.
+
+  src/verify.ts
+      verifyToken() with three modes: production (RS256 against the issuer JWKS at
+      <issuer>/.well-known/jwks.json, cached), embedded (AUTH_EMBEDDED=true — HS256
+      with AUTH_SESSION_SECRET, the secret the in-process Frontend API mints with),
+      and dev (AUTH_DEV_MODE=true — HS256 with AUTH_DEV_SHARED_SECRET, the secret
+      the @auth/react dev client mints with). Plus verifyMachineToken() (asserts
+      token_type === "machine") and hasScope() for coarse M2M scopes.
+
+  src/permissions.ts
+      The wildcard-aware hasPermission/hasRole (mirroring the front end),
+      checkClaims (the server-side mirror of has()), and requirePermission /
+      requireRole (verify a token and assert a grant, throwing "Forbidden"
+      otherwise).
+
+  src/middleware.ts
+      Framework-agnostic route protection: createRouteMatcher (with the (.*)
+      wildcard), bearerToken extraction, getRequestAuth (verify a request's token
+      into a RequestAuth with claims/userId/orgId/has()/protect()), authMiddleware
+      (compose the spec's Next.js-style protection), and the AuthError class
+      (status 401 unauthenticated / 403 unauthorized).
+
+  src/client.ts
+      The AuthClient — a typed wrapper over the Backend REST API authorized with
+      the secret key, for trusted server code only. Resource groups:
+        * users        — getUser, getUserList, updateUserMetadata, deleteUser
+        * sessions     — getSessionList, revokeSession, verifySession
+        * organizations— getOrganization, getOrganizationMembershipList,
+                         createOrganization, updateOrganization,
+                         deleteOrganization, and the membership create/update/
+                         delete used by JIT/SCIM provisioning
+        * invitations  — getInvitationList, createInvitation, revokeInvitation
+        * jwtTemplates — list/create/update/delete + mintToken
+      Plus verifyToken, requirePermission, requireRole, and verifyMachineToken on
+      the client itself. In dev mode the live request() path is disabled (only
+      verifyToken is supported), since there is no running server.
+
+  src/frontend.ts
+      The embedded Frontend API — createAuthFrontend(cfg) returns an
+      Express/Node-compatible middleware the host app mounts (e.g.
+      app.use('/api/v1', createAuthFrontend(cfg))). It implements EXACTLY the
+      endpoints RealAuthCore calls, so a SPA gets a real Google Workspace sign-in
+      with NO separate auth-server process. The endpoints it serves:
+        GET  /sign_in/sso                  302 to Google's OIDC authorize URL
+                                           (or the SAML path when strategy=saml)
+        GET  /oauth_callback               code->token exchange, id_token + hd
+                                           verification, establish the session
+        GET  /saml/metadata                SP metadata XML for the IdP operator
+        GET  /saml/login                   SP-initiated SAML redirect to the IdP
+        POST /saml/acs                     validate the signed SAML Response
+        GET  /client                       rehydrate the current session
+        POST /client/sessions/:id/tokens   mint a short-lived access JWT
+        POST /client/sessions/:id/tokens/:tmpl  templated token mint
+        POST /client/sessions/:id/touch    set the active organization
+        GET  /client/sessions/:id/reverify step-up reverification
+        POST /client/sessions/:id/remove   sign out (clear the cookie)
+      The human is authenticated by Google (real OIDC round-trip, real id_token
+      signature check against Google's JWKS, real hd/email_verified enforcement,
+      PKCE + nonce + signed-state-cookie CSRF). The app session and access tokens
+      are signed with one in-process HS256 secret (sessionSecret) — the same
+      secret verifyToken() checks in embedded mode — so there is no JWKS endpoint
+      and no second service. finishSignIn() is the shared tail of BOTH the OIDC
+      callback and the SAML ACS: it enforces the allowed-domain list, resolves
+      grants (resolveGrants, defaulting to an internal-employee grant), mints the
+      session cookie, and bounces back to the SPA — guaranteeing SAML and OIDC
+      yield an identical session.
+
+  src/saml.ts
+      The ONLY place SAML XML is handled. It wraps @node-saml/node-saml (the
+      standalone core of passport-saml) so the host SP app never implements SAML
+      itself — it only supplies config (SamlSpConfig: idpEntityId, idpSsoUrl,
+      idpCert, spEntityId, acsUrl, signing posture, clock skew, optional SP
+      signing key). It exposes buildSamlClient, samlLoginRedirectUrl (HTTP-Redirect
+      binding with our own RelayState CSRF token), validateSamlAcs (verify the
+      signed assertion against idpCert, audience, and NotBefore/NotOnOrAfter, then
+      map the SAML profile onto the same OidcIdentity shape the OIDC path
+      produces), and samlSpMetadata. Security defaults: always demand a signed
+      assertion (wantAssertionsSigned defaults true), accept multiple IdP certs for
+      rotation, and rely on our own signed RelayState cookie rather than node-saml's
+      InResponseTo cache (which would need cross-process shared storage). The
+      reference IdP is a Google Workspace custom SAML app.
+
+  src/index.ts
+      The public barrel — re-exports AuthClient, createAuthClient, the singleton
+      authClient (a lazily-constructed Proxy so the host's env is loaded first),
+      the verify helpers, the permission helpers, the middleware helpers,
+      createAuthFrontend, and the SAML functions/types.
+
+
+================================================================================
+19. CONFIGURATION — ENVIRONMENT VARIABLES AND RUN MODES
+================================================================================
+
+The platform and SDKs are configured through environment variables. The ones
+referenced across the code and docs:
+
+Backend / server:
+  AUTH_SECRET_KEY              the sk_… secret key the AuthClient authorizes with
+  AUTH_BACKEND_API             the Backend API base (default https://api.localhost/v1)
+  AUTH_JWT_ISSUER              expected token issuer for JWKS verification
+  AUTH_SESSION_SECRET          HS256 secret for the embedded Frontend API + verify
+  AUTH_DEV_SHARED_SECRET       HS256 secret shared with the @auth/react dev client
+  AUTH_DEV_MODE=true           dev mode (HS256 verify, no running server)
+  AUTH_EMBEDDED=true           embedded mode (in-process Frontend API, HS256 verify)
+  AUTH_ALLOWED_DOMAINS         the company domain allowlist
+  AUTH_WEBHOOK_SIGNING_SECRET  verify inbound webhook signatures
+  GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET  the Google OAuth client (OIDC path)
+
+Front end (Next.js naming shown; Vite uses VITE_ equivalents):
+  NEXT_PUBLIC_AUTH_FRONTEND_API     the Frontend API base
+  NEXT_PUBLIC_AUTH_PUBLISHABLE_KEY  the pk_… publishable key
+  NEXT_PUBLIC_AUTH_SIGN_IN_URL / NEXT_PUBLIC_AUTH_SIGN_UP_URL
+
+There are three operating modes, and the same verifyToken() understands all three:
+
+* Production. Real deployed server; access tokens are RS256, verified against the
+  issuer's JWKS; the rotating cookie + server-side records drive renewal and
+  revocation.
+* Embedded. AUTH_EMBEDDED=true. OpenAuthFederated runs IN-PROCESS as a library via
+  createAuthFrontend() — a real Google sign-in with no separate server and no JWKS
+  endpoint; tokens are HS256 signed/verified with AUTH_SESSION_SECRET.
+* Dev. AUTH_DEV_MODE=true. The @auth/react dev mock mints HS256 tokens with
+  AUTH_DEV_SHARED_SECRET and @auth/backend verifies them, so the whole flow runs
+  locally with no Google round-trip and no deployed server. This is what lets an
+  app "sign in" and exercise <Protect>, org switching, and reverification offline.
+
+
+================================================================================
+20. TESTING
+================================================================================
+
+The auth-backend package ships a SAML 2.0 SP round-trip integration test:
+code/packages/auth-backend/test/saml-roundtrip.cjs, with disposable test-only key
+fixtures under test/fixtures/ (test-idp-key.pem, test-idp-cert.pem — never used in
+production). Because jest's CommonJS VM cannot load jose via dynamic import(), the
+signed-assertion gold path is covered as a standalone Node script instead: it
+mints a SAML Response whose assertion is signed by a throwaway test IdP key, runs
+it through the library's validateSamlAcs, and asserts the mapped identity — and
+also asserts that a tampered assertion and a wrong audience are rejected. It is
+run with `node packages/auth-backend/test/saml-roundtrip.cjs` (or the package
+script `test:saml`) after a build, and exits non-zero on any failure. The broader
+stack (section 16) specifies Jest + supertest on the backend and Vitest +
+Playwright on the front end.
+
+
+================================================================================
+21. WEBHOOKS, JWT TEMPLATES, AND AUDIT LOGS
+================================================================================
+
+Webhooks. Consuming apps subscribe to lifecycle events so they learn the instant
+something changes upstream. Registered via POST /v1/webhooks (list GET, delete
+DELETE /v1/webhooks/{whk_id}), verified with AUTH_WEBHOOK_SIGNING_SECRET. Event
+names include: user.created, user.updated, user.deleted, user.provisioned,
+user.deprovisioned, session.created, session.refresh, session.revoked,
+organization.created, organizationMembership.created/updated/deleted, domain.added,
+domain.verified, sso_connection.created/activated/disabled, role.created,
+permission.created. The admin use case, for example, subscribes to
+organizationMembership.updated to react the moment someone's admin status changes;
+the B2B use case subscribes to domain.verified to flip a tenant live.
+
+JWT templates. Named custom-claim templates let the platform mint tokens shaped
+for downstream services. Managed via POST/GET/PATCH/DELETE /v1/jwt_templates and
+minted via POST /v1/tokens (or the templated client path). Template variables
+that can be interpolated into claims include: {{user.id}},
+{{user.primary_email_address}}, {{user.first_name}}, {{user.public_metadata}},
+{{user.public_metadata.department}}, {{org.id}}, {{org.slug}},
+{{org_membership.role}}, {{org_membership.permissions}}, and {{session.id}}. The
+admin use case uses {{org_membership.permissions}} to ride the admin permission
+into downstream tokens; the B2B use case uses {{org.id}} +
+{{org_membership.permissions}} for tenant-scoped downstream services.
+
+Audit logs. Every security-relevant action is written to an immutable audit log,
+readable via GET /v1/audit_logs (filterable, e.g. ?organization_id=) and
+GET /v1/audit_logs/{evt_id}. This is the record that proves, per tenant, who
+signed in, who was rejected (and why), who was provisioned or deprovisioned, which
+sessions were revoked, and every configuration change including group-mapping
+edits.
+
+
+================================================================================
+22. THE FULL REST ENDPOINT SURFACE (REFERENCE)
+================================================================================
+
+For quick reference, the documented endpoints, grouped by surface. (All Backend/
+Platform paths sit under the /v1 base; the Frontend client paths are also under
+/v1 of the Frontend API.)
+
+Frontend API (publishable key, browser):
+  POST /client/sign_ins ; /{id}/prepare_first_factor ; /{id}/attempt_first_factor
+       /{id}/prepare_second_factor ; /{id}/attempt_second_factor
+  POST /client/sign_ups ; /{id}/prepare_verification ; /{id}/attempt_verification
+  GET  /client
+  GET  /client/sessions ; DELETE /client/sessions
+  POST /client/sessions/{id}/tokens ; /touch ; /remove   (GET /reverify)
+  GET  /sign_in/sso ; GET /oauth_callback
+  GET  /saml/metadata ; GET /saml/login ; POST /saml/acs
+  GET  /.well-known/jwks.json
+
+Backend API (secret key, server):
+  GET    /me ; PATCH /me ; GET /me/organization_memberships ; GET /me/sessions
+  GET/POST/PATCH/DELETE  /users[/{user_id}] ; GET /users/count
+  POST   /users/{user_id}/ban|unban|lock|unlock
+  PATCH  /users/{user_id}/metadata
+  GET    /sessions[/{session_id}] ; POST /sessions ;
+         /sessions/{session_id}/revoke ; /sessions/{session_id}/verify
+  POST   /tokens
+  GET    /organizations[/{org_id}] ; POST/PATCH/DELETE
+  GET/POST /organizations/{org_id}/memberships ;
+         PATCH/DELETE /organizations/{org_id}/memberships/{user_id}
+  GET/POST /invitations ; POST /invitations/{invitation_id}/revoke
+  GET/POST/PATCH/DELETE  /jwt_templates[/{template_id}]
+  POST   /allowlist_identifiers ; GET ; DELETE /allowlist_identifiers/{identifier_id}
+  POST/DELETE  /blocklist_identifiers
+
+Platform API (secret key, control plane):
+  POST/GET/PATCH/DELETE  /organizations[/{org_id}]   (+ memberships + roles)
+  POST/GET/PATCH/DELETE  /sso_connections[/{conn_id}]
+  POST   /sso_connections/{conn_id}/scim ; /scim/rotate_token ;
+         GET /sso_connections/{conn_id}/scim
+  POST/GET/DELETE  /domains[/{dmn_id}] ; POST /domains/{dmn_id}/verify
+  POST/GET/PATCH/DELETE  /permissions[/{perm_id}]
+  POST/GET/PATCH/DELETE  /roles[/{role_id}]
+  POST/DELETE  /organizations/{org_id}/memberships/{user_id}/roles[/{role_id}]
+  POST/GET/DELETE  /webhooks[/{whk_id}]
+  GET    /audit_logs[/{evt_id}]
+  POST/GET/DELETE  /api_keys[/{key_id}] ; POST /api_keys/{key_id}/rotate
+
+SCIM 2.0 server (per-connection bearer token):
+  GET/POST  /scim/v2/Users ; GET/PUT/PATCH/DELETE /scim/v2/Users/{id}
+  GET/POST  /scim/v2/Groups ; GET/PUT/PATCH/DELETE /scim/v2/Groups/{id}
+
+
+================================================================================
+23. CONSUMER APPLICATIONS (THE SERVICE PROVIDERS THAT EMBED US)
+================================================================================
+
+OpenAuthFederated is a library; these are the SP web apps that consume it. They
+are the Service Providers; we are the library they embed. The charter names them:
+
+* Primary internal web app — the main app we use internally:
+    ~/BGit/all/app/
+* Other internal applications to be brought onto the library over time:
+    ~/BGit/all/tools/voice_improve/
+    ~/BGit/all/marketing/ai/
+    ~/BGit/all/jfk/code/simulator/
+    ~/BGit/all/film/platform/
+
+The product specs this charter is distilled from live in ~/BGit/all/app/pm/:
+  overview.mdx       the internal-app charter, divisions, table of contents
+  authentication.mdx the federated-auth spec (Google Workspace IdP, SAML/OIDC,
+                     domain enforcement, JIT/SCIM, group-based RBAC, sessions,
+                     security, acceptance criteria)
+  engineering.mdx    the full Node/TypeScript engineering standards
+(Note: ~/BGit/all/app/pm/identity_platform.mdx is currently an empty stub — the
+capabilities are captured in this project's CLAUDE.md charter, to be expanded as
+the platform grows, always keeping the naming rule.)
+
+
+================================================================================
+24. CURRENT STATUS AND ROADMAP
+================================================================================
+
+Status: early development. The charter and the specs are stable; the developer
+documentation (docs/) is extensive and describes the full intended API and SDK
+surface; the SDK packages under code/ are real, building, and usable — including
+a working embedded Frontend API, a real Google OIDC sign-in path, a working SAML
+2.0 SP path with an integration test, networkless token verification, RBAC
+helpers, route protection, and a complete React component/hook surface with a
+dev mock for offline development. The larger NestJS control-plane server and the
+admin UI described in the engineering stack are the forward work: standing up the
+deployed Backend/Platform APIs and SCIM server behind the same contracts the SDKs
+and docs already define.
+
+The path from here:
+  * Implement the deployed Platform + Backend REST services (NestJS + TypeORM +
+    PostgreSQL) behind the documented endpoints, with migrations and soft-delete.
+  * Stand up the SCIM 2.0 server and the webhook dispatcher.
+  * Build the admin UI (React 19 + Vite) on top of the @auth/react components.
+  * Wire the OpenAPI -> typed TanStack-Query client contract.
+  * Onboard the primary internal app, then the other consumer apps, one at a time.
+  * Expand pm/ specs (including identity_platform.mdx) as capabilities land.
+
+
+================================================================================
+24B. A CONCRETE INTEGRATION WALKTHROUGH (HOW AN APP ADOPTS US)
+================================================================================
+
+To make the abstractions tangible, here is the end-to-end shape of bringing a
+React + NestJS application onto OpenAuthFederated, tying together the pieces
+described above.
+
+Step 1 — Build and install the SDKs. From code/, run `pnpm install` then
+`pnpm build`, which emits dist/ in each package. The consuming app then depends on
+@auth/react and @auth/backend via pnpm file: dependencies (build here first, then
+install the app).
+
+Step 2 — One-time control-plane setup (platform admin / IaC, secret key). Create
+the organization (POST /v1/organizations) with allowed_domains, default_role_id,
+and optionally max_allowed_memberships. Create the SAML connection to Google
+Workspace (POST /v1/sso_connections), exchange metadata with a Google custom SAML
+app, and ensure the groups attribute is mapped. Define the permissions and roles
+(POST /v1/permissions, POST /v1/roles), then map the upstream groups to roles via
+the connection's group_mapping. Optionally claim and verify the company domain
+(POST /v1/domains, POST /v1/domains/{id}/verify), register webhooks
+(POST /v1/webhooks), and define JWT templates (POST /v1/jwt_templates).
+
+Step 3 — Wrap the front end. Mount <AuthProvider> at the app root with the
+publishableKey, frontendApi, allowedDomains, and the sign-in/sign-up URLs (or
+devMode + devSharedSecret for offline development). Add a sign-in route rendering
+<SignIn> (which shows one "Continue with <domain>" button per allowed domain), and
+a callback route rendering <AuthenticateWithRedirectCallback> at /sso-callback.
+Gate UI with <SignedIn>/<SignedOut> and <Protect permission="...">, and read state
+with useUser / useAuth / useOrganization. For multi-tenant apps, add
+<OrganizationSwitcher> and let users pick the active org.
+
+Step 4 — Mint and send tokens. Wherever the app calls its own backend, call
+useAuth().getToken() (or getToken({ template })) and send the result as a Bearer
+token. axios interceptors are the single place to inject it and to handle 401
+(single-flight refresh + queued retry, then logout) and 403 (toast).
+
+Step 5 — Protect the backend (authoritative). In NestJS, verify the Bearer token
+with authClient.verifyToken() and re-check the required permission — or use the
+framework-agnostic middleware helpers (createRouteMatcher + authMiddleware +
+auth().protect({ permission })). For tenant-scoped requests, confirm
+claims.org_id matches the requested tenant and that a live membership exists via
+authClient.organizations.getOrganizationMembershipList(). For sensitive or
+irreversible actions, escalate to POST /v1/sessions/{id}/verify so a just-
+offboarded user fails even on a not-yet-expired token.
+
+Step 6 — Run it. In production, point AUTH_JWT_ISSUER at the deployed issuer
+(RS256 JWKS verification). To run with a real Google sign-in but no separate auth
+server, set AUTH_EMBEDDED=true and mount createAuthFrontend(cfg) in the host app
+(e.g. app.use('/api/v1', createAuthFrontend(cfg))) with a shared
+AUTH_SESSION_SECRET. To develop entirely offline, set AUTH_DEV_MODE=true with a
+shared AUTH_DEV_SHARED_SECRET and pass devMode to <AuthProvider>; the dev mock
+mints tokens the backend verifies, so the whole flow — sign-in, org switching,
+<Protect>, reverification — works with no Google round-trip and no deployed
+server.
+
+The result: the app never implements SAML, never stores a password, never
+hardcodes who is an admin, and gates every decision on permission strings that
+OpenAuthFederated resolves from the IdP's groups — exactly the drop-in identity
+layer the project set out to deliver.
+
+
+================================================================================
+25. DESIGN PRINCIPLES AND ARCHITECTURAL DECISIONS
+================================================================================
+
+A handful of decisions recur throughout the codebase and the specs. Understanding
+them explains WHY the system is shaped the way it is, not just what it does.
+
+25.1 — The authoritative model is ours; the IdP is only an input.
+
+This is the single most important architectural commitment, and it is what
+distinguishes OpenAuthFederated from simply "turning on SSO." When a hosted
+provider owns your roles and permissions, you cannot leave it without rebuilding
+your application's entire permission model. We refuse that trade. The upstream
+IdP's groups arrive in every assertion/claim, but they are treated as raw inputs
+that we translate through the SSO connection's group_mapping into OUR roles, which
+resolve to OUR permissions, stored in OUR database. The consequence is freedom:
+we can change IdPs, federate a second IdP for a new customer, or run two IdPs at
+once, and the app keeps gating on the exact same permission strings it always did.
+The web app never asks "is this person in the Workspace admin group?" — it asks
+"does this token carry app:admin?" — and OpenAuthFederated did the translation.
+
+25.2 — Enforce on both sides; the backend is the only real boundary.
+
+Every authorization decision is made twice: once on the front end for UX (so the
+admin button does not appear for non-admins) and once, authoritatively, on the
+backend (so a crafted request to /admin still fails). The front-end check is a
+convenience that prevents confusing UI; it is never the security boundary. This is
+why the SDKs ship the SAME wildcard-aware hasPermission/hasRole on both client
+and server — so a check means precisely the same thing in both places — and why
+the use cases insist on authClient.verifyToken() + a permission re-check for every
+sensitive operation, escalating to the stateful POST /v1/sessions/{id}/verify when
+"valid until expiry" is not good enough.
+
+25.3 — Stateless verification, stateful revocation.
+
+The hybrid session model is a direct answer to the classic JWT dilemma: pure JWTs
+are fast but cannot be revoked before expiry; pure server-side sessions can be
+revoked instantly but cost a lookup on every request. We take both — short-lived
+JWTs verified networklessly for the common path, plus server-side session records
+and a rotating refresh cookie for renewal and immediate revocation. The token TTL
+is deliberately tiny (≈60s) so that even WITHOUT a stateful check, a removed
+permission disappears within seconds; the stateful verify call closes the
+remaining gap for the highest-stakes actions.
+
+25.4 — One session shape, many sign-in paths.
+
+SAML and OIDC are very different protocols, but the moment a user is verified they
+converge. Both the OIDC callback and the SAML ACS funnel through the SAME
+finishSignIn() routine, which enforces the domain allowlist, resolves grants, and
+mints the identical session cookie. Downstream code — /client, token minting,
+<Protect>, backend verification — is therefore blind to which protocol the user
+used. This is a deliberate simplification: protocol complexity is quarantined at
+the edge (saml.ts is the ONLY place SAML XML is touched) and never leaks into the
+session or RBAC layers.
+
+25.5 — A tiny dependency footprint, and an embeddable library.
+
+The SDKs depend on almost nothing — jose for JWTs and @node-saml/node-saml for
+SAML XML, with React only as a peer. This is a security posture as much as an
+engineering preference: every transitive dependency is attack surface for an auth
+library, so we keep the tree shallow. Relatedly, the backend SDK can run the
+Frontend API IN-PROCESS (createAuthFrontend), giving a SPA a real Google sign-in
+with no separate auth server and no JWKS endpoint. That makes the library trivial
+to adopt — a single mount point — while leaving the door open to the full deployed
+control plane later, behind the same contracts.
+
+25.6 — Dev/embedded/prod parity through one verifier.
+
+The same verifyToken() understands dev (HS256 dev secret), embedded (HS256 session
+secret), and production (RS256 JWKS) tokens, and the dev mock mints tokens with
+the same claim shape the real path produces. This means an engineer can build and
+exercise the entire auth surface offline — sign-in, org switching, <Protect>,
+reverification, permission checks — and trust that the code path they wrote will
+behave the same when the real server is wired in. Parity between local and
+production is engineered in, not hoped for.
+
+25.7 — Prove ownership; never trust assertions of identity scope.
+
+Domains are verified by DNS TXT, not merely claimed; a domain belongs to exactly
+one organization; an unverified domain is never used for sign-in. This is what
+makes "anyone on acme.com joins the acme tenant" safe to offer as self-serve: the
+customer cannot claim a domain they do not control, and they cannot bleed into
+another tenant's namespace.
+
+
+================================================================================
+26. THREAT MODEL — WHAT EACH CONTROL DEFENDS AGAINST
+================================================================================
+
+It is worth stating, control by control, the attack each mechanism is meant to
+stop. An auth library earns trust by being explicit about this.
+
+* Stolen/forged access token. Tokens are signed (RS256 in prod, HS256 in
+  dev/embedded) and verified on every request; a forged token fails the signature
+  check. Tokens are short-lived, so a leaked token is useful only briefly.
+
+* Replayed or tampered SAML assertion. node-saml verifies the assertion signature
+  against the IdP certificate(s), checks the audience, and enforces the
+  NotBefore/NotOnOrAfter conditions before validateSamlAcs resolves; a tampered
+  assertion or wrong audience is rejected (and the integration test asserts
+  exactly this). Multiple IdP certs are accepted only to support key rotation.
+
+* CSRF on the sign-in handshake. Both the OAuth state and the SAML RelayState are
+  random tokens carried in signed, short-lived, HttpOnly cookies and compared in
+  constant time at the callback/ACS. An attacker cannot forge the returning state
+  without the signing secret.
+
+* Authorization-code interception. The OIDC path uses PKCE (code_challenge/
+  code_verifier) and a nonce bound into the signed state, so an intercepted code
+  cannot be redeemed by anyone but the original client.
+
+* Outsider with a valid-but-wrong identity. Domain enforcement runs AFTER IdP
+  validation and BEFORE a session is issued: a perfectly valid Google account on
+  the wrong domain (or with email_verified false) is rejected with
+  identity_domain_not_allowed, no user is created, and the rejection is audited as
+  user.sign_in.rejected.
+
+* Cross-tenant access. A domain maps to exactly one org; the runtime check
+  confirms claims.org_id matches the requested tenant AND a live membership
+  exists, so a valid token for tenant A cannot act on tenant B (wrong-tenant 403).
+
+* Offboarded user acting on a live token. Short TTLs cut access on the next
+  refresh; SCIM deprovision force-revokes sessions; and the stateful
+  POST /v1/sessions/{id}/verify makes a just-removed user fail immediately on
+  sensitive actions.
+
+* Privilege drift / stale admin. Because admin is derived from a Workspace group
+  rather than a stored flag, removing someone from the group revokes admin on the
+  next refresh with no manual cleanup — there is no separate list to forget to
+  update.
+
+* Secret leakage to the browser. Only the publishable key and the public-safe
+  token ever reach the browser; secret keys stay server-side; no long-lived
+  secrets sit in localStorage; cookies are HttpOnly + SameSite + (in prod) Secure.
+
+* Token-type confusion. A machine token carries token_type: "machine" and coarse
+  scopes; verifyMachineToken asserts that type, so a human session JWT can never
+  be used as a service credential and vice versa.
+
+* Insufficient assurance for dangerous actions. Step-up reverification
+  (useReverification / reverify, and org require_mfa: "always") forces a freshly
+  verified session before the most sensitive operations run.
+
+Every one of these events — sign-in, rejection, refresh, revocation,
+permission-denied, and all config changes — lands in the immutable audit log, so
+detection and forensics are first-class, not bolted on.
+
+
+================================================================================
+27. HOW OPENAUTHFEDERATED COMPARES TO A HOSTED IDENTITY PROVIDER
+================================================================================
+
+It helps to frame the project against the category it belongs to (Auth0, AWS
+Cognito, and similar hosted identity services) WITHOUT naming the specific vendor
+we model after.
+
+* Same value, different ownership. Hosted providers give you federation,
+  provisioning, multi-tenancy, RBAC, sessions, and UI — and so do we. The
+  difference is that they deliver it as a rented, metered, closed SaaS, while we
+  deliver it as MIT-licensed software you run yourself.
+
+* Where the authorization model lives. Hosted providers typically become the
+  system of record for your roles and permissions, which is precisely the lock-in
+  we reject. Our roles/permissions live in your database; the IdP's groups are
+  inputs. That is the difference between "renting your org chart back from a
+  vendor" and "owning it."
+
+* Where the data lives. With a hosted provider your identity data and
+  authorization decisions transit a third-party control plane. With
+  OpenAuthFederated they never leave your infrastructure.
+
+* Cost shape. No per-seat billing and no usage metering; the cost is the
+  infrastructure you already run plus the engineering to operate it.
+
+* Trade-offs, stated honestly. A hosted provider hands you operational maturity,
+  a global edge, compliance attestations, and a large pre-built connector
+  catalog. Self-hosting means we own uptime, key management, patching, and
+  scaling ourselves. We accept that trade deliberately: for an identity layer that
+  gates our own apps and our own customers, control and inspectability outweigh
+  the convenience of renting — and the SDKs are designed so adoption is a single
+  embedded library, not a platform migration.
+
+The honest one-liner: OpenAuthFederated is what you build when you want everything
+a hosted identity provider does, but you are unwilling to rent the one part of
+your stack that decides who your users are and what they may do.
+
+
+================================================================================
+28. GLOSSARY
+================================================================================
+
+* IdP (Identity Provider) — the system that authenticates the human (Google
+  Workspace in the reference deployment; a customer's own IdP for a SAML company).
+* SP (Service Provider) — the web app the user wants to reach; it trusts the
+  IdP's assertion. OpenAuthFederated runs on the SP side as a library.
+* Federation — OpenAuthFederated standing between an app and an IdP so the app
+  trusts our asserted identity and never handles the upstream password.
+* SAML 2.0 — the XML-based federation protocol we support exclusively on the SAML
+  path (never SAML 1.x).
+* OIDC — the OpenID Connect / OAuth 2.0 federation path; our Google Workspace
+  reference path, which verifies the hd and email_verified claims.
+* Assertion / ID token — the signed proof of identity returned by the IdP (SAML
+  assertion or OIDC ID token).
+* ACS (Assertion Consumer Service) — the SP URL the IdP POSTs the SAML Response
+  to; served at /saml/acs by the embedded Frontend API.
+* hd (hosted domain) — Google Workspace's claim naming the user's company domain;
+  central to domain enforcement.
+* Domain enforcement — restricting sign-in to verified company domain(s),
+  rejecting everything else.
+* JIT (Just-In-Time) provisioning — creating a user automatically on first valid
+  sign-in, with the org's default role.
+* SCIM 2.0 — the directory-sync standard used for full lifecycle (provision /
+  update / deprovision) and for force-revoking offboarded users.
+* Organization / tenant — the unit of multi-tenancy; owns its SSO connections,
+  domains, SCIM config, roles, members, and settings.
+* RBAC — role-based access control: group -> role -> permission, authoritative in
+  our database.
+* Permission — an atomic <feature>:<action> grant (e.g. code:read, app:admin),
+  with wildcard semantics (film:*, *:read, *:*).
+* Role — a named bundle of permissions, mapped from upstream groups.
+* group_mapping — the SSO-connection field that maps an IdP group to one of our
+  roles; the lock-in-free translation point.
+* Hybrid session — short-lived JWT access tokens + a rotating HttpOnly refresh
+  cookie + server-side session records (stateless verification, stateful
+  revocation).
+* Step-up reverification — requiring a freshly verified session (MFA inherited
+  from the IdP) before a sensitive action.
+* Publishable key (pk_…) — browser-safe credential for the Frontend API.
+* Secret key (sk_…) — server-only credential for the Backend/Platform APIs.
+* Machine token / API key (mch_…) — server-to-server credential carrying coarse
+  scopes, distinct from a human session.
+* Embedded mode — running the Frontend API in-process via createAuthFrontend(),
+  no separate auth server, HS256 with AUTH_SESSION_SECRET.
+* Dev mode — the offline mock: HS256 with AUTH_DEV_SHARED_SECRET, no Google
+  round-trip, no deployed server.
+* Audit log — the immutable record of sign-ins, rejections, refreshes,
+  revocations, permission-denials, and config changes.
+
+
+================================================================================
+29. THE BOTTOM LINE
+================================================================================
+
+OpenAuthFederated is how we own our identity layer outright. It is a library that
+SP web apps embed to get federated SAML 2.0 / OIDC sign-in, domain-enforced
+access, JIT + SCIM provisioning, organizations and multi-tenancy, an
+authoritative-in-our-database RBAC model, and a hybrid session model with
+immediate revocation — delivered as open-source, self-hosted, no-lock-in software
+under the MIT license. Web apps that want to connect with Google Workspace (or any
+SAML 2.0 / OIDC IdP) plug in our packages, point at their IdP, declare their
+allowed domains and their group-to-role mappings, and let OpenAuthFederated handle
+sign-in, sessions, and authorization. The code, the data, and the authorization
+model stay entirely under our control. That is the whole point — and that is what
+this repository builds.
+
+================================================================================
+END OF DOCUMENT
+================================================================================

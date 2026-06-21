@@ -9,6 +9,10 @@ export { authMiddleware, createRouteMatcher, getRequestAuth, bearerToken, AuthEr
 export type { AuthRequestLike, RouteMatcher, RequestAuth } from "./middleware.js";
 export { createAuthFrontend } from "./frontend.js";
 export type { AuthFrontendConfig, OidcIdentity, OrgMembership, ResolvedGrants, } from "./frontend.js";
+export { buildSamlClient, samlLoginRedirectUrl, samlSpMetadata, validateSamlAcs, } from "./saml.js";
+export type { SamlSpConfig, SamlAcsResult } from "./saml.js";
+export { loadGoogleCredentials, googleCredentialsFromFile, assertGoogleCredentials, resolveCredentialsPath, credentialsRemediation, OAuthCredentialsError, DEFAULT_CREDENTIALS_PATH, CREDENTIALS_PATH_ENV, CREDENTIALS_APP_KEY, } from "./credentials.js";
+export type { GoogleCredentials, CredentialResolution, CredentialSource, LoadGoogleCredentialsOptions, } from "./credentials.js";
 /** Construct a configured client. Reads AUTH_SECRET_KEY / AUTH_BACKEND_API when omitted. */
 export declare function createAuthClient(options?: CreateAuthClientOptions): AuthClient;
 export declare const authClient: AuthClient;

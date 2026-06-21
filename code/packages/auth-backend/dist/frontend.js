@@ -2,6 +2,8 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createAuthFrontend = createAuthFrontend;
 const node_crypto_1 = require("node:crypto");
+const credentials_js_1 = require("./credentials.js");
+const saml_js_1 = require("./saml.js");
 /**
  * In-process Frontend API — the embedded counterpart to a deployed OpenAuthFederated server.
  *
@@ -44,6 +46,7 @@ async function googleKeySet() {
     return googleJwks;
 }
 const STATE_COOKIE = "oaf_oauth_state";
+const SAML_RELAY_COOKIE = "oaf_saml_relay";
 const STATE_TTL_SECONDS = 600;
 // --- small Node http helpers (no express dependency) ---------------------------------------
 function base64url(buf) {
@@ -151,6 +154,48 @@ async function readJsonBody(req) {
         req.on("error", () => finish({}));
     });
 }
+/**
+ * Read an `application/x-www-form-urlencoded` body (the SAML ACS POST: `SAMLResponse`,
+ * `RelayState`). Prefers a body the host (NestJS' express.urlencoded) already parsed, else reads
+ * and parses the raw stream. Mirrors {@link readJsonBody}.
+ */
+async function readFormBody(req) {
+    const pre = req.body;
+    if (pre && typeof pre === "object" && Object.keys(pre).length > 0) {
+        const out = {};
+        for (const [k, v] of Object.entries(pre)) {
+            out[k] = Array.isArray(v) ? String(v[0] ?? "") : String(v ?? "");
+        }
+        return out;
+    }
+    return await new Promise((resolve) => {
+        let data = "";
+        let done = false;
+        const finish = (v) => {
+            if (!done) {
+                done = true;
+                resolve(v);
+            }
+        };
+        req.on("data", (c) => {
+            data += c;
+            if (data.length > 5_000_000)
+                finish({}); // SAML responses are larger than JSON; cap generously
+        });
+        req.on("end", () => {
+            const out = {};
+            try {
+                for (const [k, v] of new URLSearchParams(data))
+                    out[k] = v;
+            }
+            catch {
+                // malformed body → empty; the ACS handler will reject the (missing) SAMLResponse
+            }
+            finish(out);
+        });
+        req.on("error", () => finish({}));
+    });
+}
 function emailDomain(email) {
     const at = email.lastIndexOf("@");
     return at < 0 ? "" : email.slice(at + 1).trim().toLowerCase();
@@ -185,8 +230,42 @@ function defaultResolveGrants(identity) {
     };
 }
 function normalizeConfig(config) {
+    // Resolve the Google OAuth credentials inside the library: explicit config → GOOGLE_CLIENT_ID/
+    // SECRET env → out-of-repo credentials file. We capture a secret-free remediation message rather
+    // than throwing here, so a missing credential surfaces as a clear 503 at request time (and the
+    // SAML path, which needs no Google credential, still works). A *malformed* credentials file is a
+    // real misconfiguration: we keep its (secret-free) message too.
+    let clientId = "";
+    let clientSecret = "";
+    let googleRemediation = "";
+    try {
+        const resolved = (0, credentials_js_1.loadGoogleCredentials)({
+            clientId: config.google.clientId,
+            clientSecret: config.google.clientSecret,
+            path: config.google.credentialsFile,
+        });
+        clientId = resolved.clientId;
+        clientSecret = resolved.clientSecret;
+        if (!resolved.ok)
+            googleRemediation = (0, credentials_js_1.credentialsRemediation)(resolved.path);
+    }
+    catch (err) {
+        if (err instanceof credentials_js_1.OAuthCredentialsError)
+            googleRemediation = err.message;
+        else
+            throw err;
+    }
+    const googleConfigured = Boolean(clientId && clientSecret);
     return {
-        google: config.google,
+        google: {
+            clientId,
+            clientSecret,
+            redirectUri: config.google.redirectUri,
+            hostedDomain: config.google.hostedDomain,
+        },
+        googleConfigured,
+        googleRemediation,
+        saml: config.saml?.enabled ? config.saml : undefined,
         allowedDomains: config.allowedDomains.map((d) => d.trim().toLowerCase()).filter(Boolean),
         sessionSecret: config.sessionSecret,
         issuer: config.issuer,
@@ -210,9 +289,12 @@ function normalizeConfig(config) {
 function createAuthFrontend(config) {
     const cfg = normalizeConfig(config);
     const secretKey = new TextEncoder().encode(cfg.sessionSecret);
-    if (!cfg.google.clientId || !cfg.google.clientSecret) {
-        cfg.log("warn", "Google OAuth client is not configured (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET). " +
-            "Sign-in will fail until real credentials are set.");
+    if (!cfg.googleConfigured) {
+        // Loud at construction, but non-fatal: SAML still works, and the OIDC routes fail closed with
+        // a clear 503 (see guardGoogleConfigured) instead of redirecting to Google with an empty
+        // client_id. The remediation text names the file path + JSON shape and contains no secrets.
+        cfg.log("warn", "Google OAuth client is not configured; Google sign-in routes will return 503 until it is.\n" +
+            cfg.googleRemediation);
     }
     if (!cfg.sessionSecret || cfg.sessionSecret === "dev-shared-secret") {
         cfg.log("warn", "AUTH_SESSION_SECRET is unset or default — set a strong secret before production.");
@@ -345,6 +427,29 @@ function createAuthFrontend(config) {
         }
     }
     // --- endpoint handlers ---------------------------------------------------------------------
+    /**
+     * Fail-closed guard for the Google OIDC routes. When the OAuth client id/secret are missing, do
+     * NOT redirect the browser to Google with an empty `client_id` (which yields a confusing Google
+     * "Error 400: invalid_request — Missing required parameter: client_id" page). Instead return a
+     * clear app-side 503 whose body carries the machine code `oauth_not_configured` and the
+     * secret-free remediation (file path + required JSON shape). Returns true when it handled the
+     * request (caller should stop). The SAML path does not call this — it needs no Google credential.
+     */
+    function guardGoogleConfigured(res) {
+        if (cfg.googleConfigured)
+            return false;
+        cfg.log("error", "Refusing to start Google sign-in: OAuth client credentials are not configured.\n" +
+            cfg.googleRemediation);
+        sendJson(res, 503, {
+            error: "oauth_not_configured",
+            error_message: "Google sign-in is not configured on the server. An administrator must supply the Google " +
+                "OAuth client id and secret (via GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET or the out-of-repo " +
+                "credentials file). See `remediation` for the exact path and JSON shape.",
+            // `remediation` is deliberately secret-free — safe to surface to the operator.
+            remediation: cfg.googleRemediation,
+        });
+        return true;
+    }
     async function handleSsoStart(req, res) {
         const q = queryOf(req);
         const redirectUrl = q.get("redirect_url") || "/sso-callback";
@@ -496,6 +601,14 @@ function createAuthFrontend(config) {
                 redirect_url_complete: redirectUrlComplete,
             });
         }
+        return finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete);
+    }
+    /**
+     * Shared tail of every sign-in path (OIDC callback and SAML ACS): enforce the company-domain
+     * allowlist on the verified identity, resolve grants, mint the session cookie, and bounce back
+     * to the SPA. Keeping this in one place guarantees SAML and OIDC produce an identical session.
+     */
+    async function finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete) {
         // Domain enforcement (authentication.mdx §3): require a verified email on an allowed domain.
         const presentedDomain = (identity.hd || emailDomain(identity.email)).toLowerCase();
         if (!identity.email || !identity.emailVerified) {
@@ -598,17 +711,135 @@ function createAuthFrontend(config) {
         clearCookie(res, cfg.sessionCookieName, cfg.cookieSecure);
         sendJson(res, 200, { object: "session", deleted: true });
     }
+    // --- SAML 2.0 SP path ----------------------------------------------------------------------
+    // All SAML XML/crypto lives in saml.ts; here we only carry the redirect targets + CSRF token
+    // (in a signed cookie, mirroring the OIDC `state` cookie) and funnel the verified identity into
+    // the shared finishSignIn() so a SAML sign-in yields the exact same session as the OIDC path.
+    // The node-saml SAML client is built once (it parses the IdP cert). Null when SAML is disabled.
+    let samlClient = null;
+    function getSamlClient() {
+        if (!cfg.saml)
+            return null;
+        if (!samlClient)
+            samlClient = (0, saml_js_1.buildSamlClient)(cfg.saml);
+        return samlClient;
+    }
+    async function signSamlRelay(state) {
+        const { SignJWT } = await jose();
+        return await new SignJWT(state)
+            .setProtectedHeader({ alg: "HS256" })
+            .setIssuedAt()
+            .setExpirationTime(`${STATE_TTL_SECONDS}s`)
+            .sign(secretKey);
+    }
+    async function readSamlRelay(req) {
+        const raw = parseCookies(req)[SAML_RELAY_COOKIE];
+        if (!raw)
+            return null;
+        try {
+            const { jwtVerify } = await jose();
+            const { payload } = await jwtVerify(raw, secretKey);
+            return payload;
+        }
+        catch {
+            return null;
+        }
+    }
+    /** SP metadata XML — hand this to the IdP operator to register the ACS URL + Entity ID. */
+    function handleSamlMetadata(_req, res) {
+        if (!cfg.saml)
+            return sendJson(res, 404, { error: "saml_not_configured" });
+        const xml = (0, saml_js_1.samlSpMetadata)(cfg.saml);
+        res.statusCode = 200;
+        res.setHeader("Content-Type", "application/xml; charset=utf-8");
+        res.setHeader("Cache-Control", "no-store");
+        res.end(xml);
+    }
+    /** SP-initiated SAML login: stash CSRF token + redirect targets, then 302 to the IdP. */
+    async function handleSamlLogin(req, res) {
+        const saml = getSamlClient();
+        if (!saml)
+            return sendJson(res, 404, { error: "saml_not_configured" });
+        const q = queryOf(req);
+        const redirectUrl = q.get("redirect_url") || "/sso-callback";
+        const redirectUrlComplete = q.get("redirect_url_complete") || "/";
+        const relayState = base64url((0, node_crypto_1.randomBytes)(24));
+        const relayJwt = await signSamlRelay({ relayState, redirectUrl, redirectUrlComplete });
+        setCookie(res, SAML_RELAY_COOKIE, relayJwt, {
+            maxAgeSeconds: STATE_TTL_SECONDS,
+            secure: cfg.cookieSecure,
+        });
+        const url = await (0, saml_js_1.samlLoginRedirectUrl)(saml, relayState);
+        redirect(res, url);
+    }
+    /** ACS: validate the signed SAML Response, enforce domain, establish the shared session. */
+    async function handleSamlAcs(req, res) {
+        const saml = getSamlClient();
+        if (!saml)
+            return sendJson(res, 404, { error: "saml_not_configured" });
+        const saved = await readSamlRelay(req);
+        clearCookie(res, SAML_RELAY_COOKIE, cfg.cookieSecure);
+        const fallbackRedirect = saved?.redirectUrl ?? "/sso-callback";
+        const redirectUrlComplete = saved?.redirectUrlComplete ?? "/";
+        const body = await readFormBody(req);
+        // CSRF: the IdP echoes RelayState unchanged; it must match the value we signed into the cookie.
+        if (!saved || !body.RelayState || !constantTimeEqual(body.RelayState, saved.relayState)) {
+            cfg.log("warn", "SAML ACS failed RelayState validation");
+            return backToApp(res, fallbackRedirect, {
+                error: "sign_in_not_completed",
+                error_message: "Sign-in could not be verified. Please try again.",
+                redirect_url_complete: redirectUrlComplete,
+            });
+        }
+        let identity;
+        try {
+            const result = await (0, saml_js_1.validateSamlAcs)(saml, {
+                SAMLResponse: body.SAMLResponse,
+                RelayState: body.RelayState,
+            });
+            identity = result.identity;
+        }
+        catch (err) {
+            cfg.log("error", "SAML assertion validation failed", err instanceof Error ? err.message : err);
+            return backToApp(res, fallbackRedirect, {
+                error: "sign_in_not_completed",
+                error_message: "Could not verify your SAML sign-in.",
+                redirect_url_complete: redirectUrlComplete,
+            });
+        }
+        return finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete);
+    }
     // --- router --------------------------------------------------------------------------------
     return (req, res, next) => {
         const path = pathOf(req);
         const method = (req.method ?? "GET").toUpperCase();
         const route = async () => {
             if (method === "GET" && path === "/sign_in/sso") {
-                await handleSsoStart(req, res);
+                // Unified sign-in entry point: strategy=saml routes to the SAML SP path (when
+                // configured); everything else is the Google OIDC path.
+                const strategy = queryOf(req).get("strategy") ?? "";
+                if (strategy === "saml" && cfg.saml)
+                    await handleSamlLogin(req, res);
+                else if (!guardGoogleConfigured(res))
+                    await handleSsoStart(req, res);
                 return true;
             }
             if (method === "GET" && path === "/oauth_callback") {
-                await handleCallback(req, res);
+                if (!guardGoogleConfigured(res))
+                    await handleCallback(req, res);
+                return true;
+            }
+            // SAML 2.0 SP routes (served only when a `saml` config block is present + enabled).
+            if (method === "GET" && path === "/saml/metadata") {
+                handleSamlMetadata(req, res);
+                return true;
+            }
+            if (method === "GET" && path === "/saml/login") {
+                await handleSamlLogin(req, res);
+                return true;
+            }
+            if (method === "POST" && path === "/saml/acs") {
+                await handleSamlAcs(req, res);
                 return true;
             }
             if (method === "GET" && path === "/client") {

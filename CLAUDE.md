@@ -58,6 +58,28 @@ building an open-source equivalent of — is:
 * **UI components** — drop-in sign-in / sign-up / account-management UI so apps don't rebuild
   auth screens.
 
+## SAML version requirement (MANDATORY): SAML 2.0
+
+* We **must** be compatible with **SAML 2.0** — and **not** any earlier version of SAML.
+* Any SAML integration, assertion handling, metadata, or binding we implement targets **SAML
+  2.0 exclusively**. Reject or do not support SAML 1.x.
+* We will at times **also** support **Google authentication** (OIDC / Google Workspace sign-in)
+  as an alternative path. But whenever we do **SAML**, it **must be SAML version 2.0**.
+
+## Service Provider (SP) role
+
+* **Service Provider (SP):** the application or service that the user wants to access. It does
+  **not** authenticate the user itself. Instead, it **trusts and consumes the SAML assertion
+  from the Identity Provider (IdP)** to establish a session and make authorization decisions.
+* **OpenAuthFederated is NOT the Service Provider, and is NOT a web app.** The Service Providers
+  are the separate web apps (our internal app, and any other consumer app) that the user wants
+  to access. We are the **library that those SP web apps embed.**
+* We want **OpenAuthFederated** to be the **library that plugs into SAML Service Provider web
+  apps** so that, on their behalf, it communicates with the SAML **Identity Provider**.
+  OpenAuthFederated runs on the SP side as a dependency of the SP app: it speaks SAML 2.0 to the
+  IdP, validates the returned assertion, and hands the host SP app a trusted, established
+  identity/session. The SP app is the consumer; OpenAuthFederated is the library it consumes.
+
 ## Reference deployment: gating an internal app to Google Workspace
 
 The first real consumer of OpenAuthFederated is an internal company web app. Its rule is the
@@ -125,3 +147,17 @@ Note: `~/BGit/all/app/pm/identity_platform.mdx` is currently an empty stub (a TO
 identity-platform capability reference). The capabilities above are captured here as the
 OpenAuthFederated charter; expand the spec doc as the platform grows — and keep the naming rule:
 never use the modeled provider's name in public material.
+
+## Consumer apps (Service Providers that embed this library)
+
+These are the internal web apps that consume OpenAuthFederated as their SAML Service Provider
+library. They are the SP web apps; OpenAuthFederated is the library they embed.
+
+* **Primary internal web app** — the main app we use internally that will use this library:
+  * `~/BGit/all/app/`
+* **Other internal applications** — additional apps to our product that we'll bring onto this
+  library over time:
+  * `~/BGit/all/tools/voice_improve/`
+  * `~/BGit/all/marketing/ai/`
+  * `~/BGit/all/jfk/code/simulator/`
+  * `~/BGit/all/film/platform/`
