@@ -33,6 +33,13 @@ export {
   AuthError,
 } from "./middleware.js"
 export type { AuthRequestLike, RouteMatcher, RequestAuth } from "./middleware.js"
+export { createAuthFrontend } from "./frontend.js"
+export type {
+  AuthFrontendConfig,
+  OidcIdentity,
+  OrgMembership,
+  ResolvedGrants,
+} from "./frontend.js"
 
 /** Construct a configured client. Reads AUTH_SECRET_KEY / AUTH_BACKEND_API when omitted. */
 export function createAuthClient(options: CreateAuthClientOptions = {}): AuthClient {

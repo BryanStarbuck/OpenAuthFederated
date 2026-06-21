@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.authClient = exports.AuthError = exports.bearerToken = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.AuthClient = void 0;
+exports.authClient = exports.createAuthFrontend = exports.AuthError = exports.bearerToken = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.AuthClient = void 0;
 exports.createAuthClient = createAuthClient;
 const client_js_1 = require("./client.js");
 var client_js_2 = require("./client.js");
@@ -21,6 +21,8 @@ Object.defineProperty(exports, "createRouteMatcher", { enumerable: true, get: fu
 Object.defineProperty(exports, "getRequestAuth", { enumerable: true, get: function () { return middleware_js_1.getRequestAuth; } });
 Object.defineProperty(exports, "bearerToken", { enumerable: true, get: function () { return middleware_js_1.bearerToken; } });
 Object.defineProperty(exports, "AuthError", { enumerable: true, get: function () { return middleware_js_1.AuthError; } });
+var frontend_js_1 = require("./frontend.js");
+Object.defineProperty(exports, "createAuthFrontend", { enumerable: true, get: function () { return frontend_js_1.createAuthFrontend; } });
 /** Construct a configured client. Reads AUTH_SECRET_KEY / AUTH_BACKEND_API when omitted. */
 function createAuthClient(options = {}) {
     return new client_js_1.AuthClient(options);

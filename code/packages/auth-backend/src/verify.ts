@@ -17,11 +17,31 @@ function isDevMode(): boolean {
 }
 
 /**
+ * Embedded mode: OpenAuthFederated runs in-process as a library (no deployed server, no JWKS
+ * endpoint). Access tokens are minted and verified with one shared HS256 secret
+ * (`AUTH_SESSION_SECRET`) by `createAuthFrontend()` in the same process.
+ */
+function isEmbedded(): boolean {
+  return process.env.AUTH_EMBEDDED === "true"
+}
+
+/** The shared HS256 secret for symmetric (dev / embedded) verification. */
+function symmetricSecret(): Uint8Array {
+  const secret = isEmbedded()
+    ? process.env.AUTH_SESSION_SECRET ?? process.env.AUTH_DEV_SHARED_SECRET ?? "dev-shared-secret"
+    : process.env.AUTH_DEV_SHARED_SECRET ?? "dev-shared-secret"
+  return new TextEncoder().encode(secret)
+}
+
+/**
  * Verify a short-lived JWT access token and return its claims.
  *
  * - **Production:** validates the RS256 signature against the issuer's JWKS
  *   (`<issuer>/.well-known/jwks.json`) and checks `iss`/`exp`. No per-request round
  *   trip — the JWKS is cached.
+ * - **Embedded mode** (`AUTH_EMBEDDED=true`): validates an HS256 token signed with
+ *   `AUTH_SESSION_SECRET` — the secret the in-process `createAuthFrontend()` mints with — so a
+ *   real Google sign-in works with no separate server and no JWKS endpoint.
  * - **Dev mode** (`AUTH_DEV_MODE=true`): validates an HS256 token signed with
  *   `AUTH_DEV_SHARED_SECRET` — the same secret the `@auth/react` dev client mints with —
  *   so the whole flow works locally with no deployed server.
@@ -33,10 +53,8 @@ export async function verifyToken(
   if (!token) throw new Error("verifyToken: empty token")
   const { jwtVerify, createRemoteJWKSet } = await jose()
 
-  if (isDevMode()) {
-    const secret = process.env.AUTH_DEV_SHARED_SECRET ?? "dev-shared-secret"
-    const key = new TextEncoder().encode(secret)
-    const { payload } = await jwtVerify(token, key)
+  if (isDevMode() || isEmbedded()) {
+    const { payload } = await jwtVerify(token, symmetricSecret())
     return payload as TokenClaims
   }
 
