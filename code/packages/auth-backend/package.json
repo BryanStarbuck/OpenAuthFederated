@@ -1,6 +1,6 @@
 {
   "name": "@auth/backend",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "OpenAuthFederated Backend SDK — a typed authClient (verifyToken, users, sessions, organizations) authorized with a secret key.",
   "license": "MIT",
   "main": "dist/index.js",

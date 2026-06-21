@@ -1,46 +1,32 @@
 /**
  * Credential-loading + fail-loud-guard test (standalone Node, no jest needed — mirrors
- * saml-roundtrip.cjs). Covers the blocker fixed in this library: the embedded Frontend API must
- * read the Google OAuth client id/secret from the out-of-repo credentials file (and env), fail
- * CLOSED with a clear, secret-free error when they are absent, and never leak the secret values.
+ * saml-roundtrip.cjs). Covers the library contract: OpenAuthFederated is credential-SOURCE-agnostic.
+ * It resolves the Google OAuth client id/secret from an explicit config argument, then from its own
+ * generic GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET env vars — and from NO host-app file. When neither
+ * supplies a value it fails CLOSED with a clear, secret-free error and never leaks the values.
  *
  *   1. build:  pnpm --filter @auth/backend build
  *   2. run:    node packages/auth-backend/test/credentials.cjs
  *
- * Exits non-zero on any failure. Uses a throwaway temp credentials file (never a real secret).
+ * Exits non-zero on any failure.
  */
-const fs = require("node:fs")
-const os = require("node:os")
-const path = require("node:path")
 const http = require("node:http")
 const assert = require("node:assert")
 
 const {
   loadGoogleCredentials,
-  googleCredentialsFromFile,
   assertGoogleCredentials,
   credentialsRemediation,
   OAuthCredentialsError,
-  CREDENTIALS_PATH_ENV,
   createAuthFrontend,
 } = require("../dist/index.js")
 
 const FAKE_ID = "1234567890-fakeclientid.apps.googleusercontent.com"
 const FAKE_SECRET = "GOCSPX-thisIsAFakeTestSecretValue"
 
-// Isolate from any real env/credentials on the machine.
+// Isolate from any real env on the machine.
 delete process.env.GOOGLE_CLIENT_ID
 delete process.env.GOOGLE_CLIENT_SECRET
-delete process.env[CREDENTIALS_PATH_ENV]
-
-const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "oaf-creds-"))
-const credFile = path.join(tmpDir, "app_internal_act3.json")
-const badFile = path.join(tmpDir, "bad.json")
-const missingFile = path.join(tmpDir, "does_not_exist.json")
-
-function writeCreds(obj) {
-  fs.writeFileSync(credFile, JSON.stringify(obj, null, 2))
-}
 
 let passed = 0
 function ok(name) {
@@ -48,96 +34,74 @@ function ok(name) {
   console.log(`  ✓ ${name}`)
 }
 
-// --- 1. File resolution: exact act3_internal_app.google hierarchy --------------------------
-writeCreds({ act3_internal_app: { google: { clientId: FAKE_ID, clientSecret: FAKE_SECRET } } })
+// --- 1. Env resolution: generic GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET ---------------------
 {
-  const r = loadGoogleCredentials({ path: credFile })
-  assert.strictEqual(r.clientId, FAKE_ID, "clientId from file")
-  assert.strictEqual(r.clientSecret, FAKE_SECRET, "clientSecret from file")
+  process.env.GOOGLE_CLIENT_ID = FAKE_ID
+  process.env.GOOGLE_CLIENT_SECRET = FAKE_SECRET
+  const r = loadGoogleCredentials()
+  assert.strictEqual(r.clientId, FAKE_ID, "clientId from env")
+  assert.strictEqual(r.clientSecret, FAKE_SECRET, "clientSecret from env")
   assert.strictEqual(r.ok, true, "ok when both present")
-  assert.strictEqual(r.clientIdSource, "file", "clientId source = file")
-  ok("reads clientId/clientSecret from act3_internal_app.google in the JSON file")
+  assert.strictEqual(r.clientIdSource, "env", "clientId source = env")
+  delete process.env.GOOGLE_CLIENT_ID
+  delete process.env.GOOGLE_CLIENT_SECRET
+  ok("reads clientId/clientSecret from the generic GOOGLE_CLIENT_ID/SECRET env vars")
 }
 
-// --- 2. Env overrides file (resolution order) ----------------------------------------------
+// --- 2. Explicit config overrides env (resolution order) -----------------------------------
 {
   process.env.GOOGLE_CLIENT_ID = "env-id.apps.googleusercontent.com"
   process.env.GOOGLE_CLIENT_SECRET = "env-secret"
-  const r = loadGoogleCredentials({ path: credFile })
-  assert.strictEqual(r.clientId, "env-id.apps.googleusercontent.com", "env wins over file")
-  assert.strictEqual(r.clientIdSource, "env", "source = env")
-  delete process.env.GOOGLE_CLIENT_ID
-  delete process.env.GOOGLE_CLIENT_SECRET
-  ok("environment variables override the credentials file")
-}
-
-// --- 3. Explicit config overrides env + file -----------------------------------------------
-{
-  process.env.GOOGLE_CLIENT_ID = "env-id"
-  const r = loadGoogleCredentials({ clientId: "cfg-id", clientSecret: "cfg-secret", path: credFile })
-  assert.strictEqual(r.clientId, "cfg-id", "config wins")
+  const r = loadGoogleCredentials({ clientId: "cfg-id", clientSecret: "cfg-secret" })
+  assert.strictEqual(r.clientId, "cfg-id", "config wins over env")
   assert.strictEqual(r.clientIdSource, "config", "source = config")
   delete process.env.GOOGLE_CLIENT_ID
-  ok("explicit config overrides env and file")
+  delete process.env.GOOGLE_CLIENT_SECRET
+  ok("an explicit config value (passed in by the host app) overrides the env var")
 }
 
-// --- 4. Missing file → not ok, no throw, clear remediation ---------------------------------
+// --- 3. No file fallback: the library reads no host-app credentials file -------------------
 {
-  const r = loadGoogleCredentials({ path: missingFile })
-  assert.strictEqual(r.ok, false, "not ok when file missing")
-  assert.strictEqual(r.clientId, "", "empty clientId when missing")
-  const msg = credentialsRemediation(r.path)
-  assert.ok(msg.includes(missingFile), "remediation names the file path")
-  assert.ok(msg.includes("act3_internal_app"), "remediation shows the JSON hierarchy")
-  assert.ok(msg.includes("GOOGLE_CLIENT_ID"), "remediation lists env-var alternative")
-  ok("missing credentials → not ok, with a path+shape remediation message")
+  // With nothing passed and no env, the credential is simply "missing" — the library does NOT go
+  // looking in ~/.credentials/<anything>. (Resolution is config → env only.)
+  const r = loadGoogleCredentials()
+  assert.strictEqual(r.ok, false, "not ok when neither config nor env supplies a value")
+  assert.strictEqual(r.clientId, "", "empty clientId")
+  assert.strictEqual(r.clientIdSource, "missing", "source = missing (never 'file')")
+  ok("resolves config → env only; there is no host-app file fallback in the library")
+}
+
+// --- 4. Remediation is generic + secret-free -----------------------------------------------
+{
+  const msg = credentialsRemediation()
+  assert.ok(msg.includes("createAuthFrontend"), "remediation names the API entry point")
+  assert.ok(msg.includes("GOOGLE_CLIENT_ID"), "remediation lists the generic env-var alternative")
+  // It must NOT name any host application's file/path/key — the library knows none.
+  assert.ok(!msg.includes("app_internal_act3"), "remediation names no app-specific JSON key")
+  assert.ok(!msg.includes(".credentials"), "remediation names no app-specific file path")
+  assert.ok(!msg.includes(FAKE_SECRET), "remediation never echoes a secret")
+  ok("remediation is generic (API + env), secret-free, and names no host-app file")
 }
 
 // --- 5. assertGoogleCredentials throws a secret-free OAuthCredentialsError ------------------
 {
   let threw = null
   try {
-    assertGoogleCredentials({ path: missingFile })
+    assertGoogleCredentials()
   } catch (e) {
     threw = e
   }
   assert.ok(threw instanceof OAuthCredentialsError, "throws OAuthCredentialsError")
   assert.strictEqual(threw.code, "oauth_not_configured", "machine code present")
-  assert.ok(threw.message.includes(missingFile), "error names the path")
-  ok("assertGoogleCredentials throws a clear OAuthCredentialsError when unconfigured")
+  assert.ok(!threw.message.includes("app_internal_act3"), "error names no app-specific key")
+  ok("assertGoogleCredentials throws a clear, generic OAuthCredentialsError when unconfigured")
 }
 
-// --- 6. Malformed JSON file → OAuthCredentialsError -----------------------------------------
-{
-  fs.writeFileSync(badFile, "{ not valid json ")
-  let threw = null
-  try {
-    googleCredentialsFromFile(badFile)
-  } catch (e) {
-    threw = e
-  }
-  assert.ok(threw instanceof OAuthCredentialsError, "malformed JSON throws")
-  assert.ok(threw.message.includes(badFile), "error names the malformed file")
-  ok("a malformed credentials file raises a clear error (not a silent fallthrough)")
-}
-
-// --- 7. No-secret-leak guarantee: error text never contains the secret ---------------------
-{
-  writeCreds({ act3_internal_app: { google: { clientId: "", clientSecret: "" } } })
-  const r = loadGoogleCredentials({ path: credFile })
-  const msg = credentialsRemediation(r.path)
-  assert.ok(!msg.includes(FAKE_SECRET), "remediation must not contain any real secret")
-  // even with a populated file, the remediation/asserts never echo the secret
-  writeCreds({ act3_internal_app: { google: { clientId: FAKE_ID, clientSecret: FAKE_SECRET } } })
-  assert.ok(!credentialsRemediation(credFile).includes(FAKE_SECRET), "no secret in remediation")
-  ok("error/remediation output never leaks the secret credential values")
-}
-
-// --- 8. Fail-loud guard: SSO start returns 503 oauth_not_configured (no Google redirect) ----
+// --- 6. Fail-loud guard: SSO start returns 503 oauth_not_configured (no Google redirect) ----
 async function testGuard() {
-  // Build the embedded middleware with NO credentials available.
+  // Build the embedded middleware with NO credentials available (none passed, none in env).
   const mw = createAuthFrontend({
-    google: { redirectUri: "http://localhost:9111/api/v1/oauth_callback", credentialsFile: missingFile },
+    google: { redirectUri: "http://localhost:9111/api/v1/oauth_callback" },
     allowedDomains: ["act3ai.com"],
     sessionSecret: "test-secret",
     logger: () => {}, // silence expected warn/error
@@ -155,15 +119,16 @@ async function testGuard() {
     assert.ok(!loc || !/accounts\.google\.com/.test(loc), "never redirects to Google")
     const body = await res.json()
     assert.strictEqual(body.error, "oauth_not_configured", "machine code in body")
-    assert.ok(body.remediation.includes("act3_internal_app"), "remediation in body")
+    assert.ok(body.remediation.includes("createAuthFrontend"), "generic remediation in body")
+    assert.ok(!body.remediation.includes("app_internal_act3"), "body names no app-specific key")
     assert.ok(!body.remediation.includes(FAKE_SECRET), "body leaks no secret")
     ok("/sign_in/sso fails closed with 503 oauth_not_configured instead of redirecting to Google")
   } finally {
     server.close()
   }
 
-  // And the happy path: with a real (fake) credential, /sign_in/sso DOES 302 to Google with a
-  // non-empty client_id.
+  // And the happy path: with credentials passed in via the API, /sign_in/sso DOES 302 to Google
+  // with a non-empty client_id.
   const mw2 = createAuthFrontend({
     google: {
       clientId: FAKE_ID,
@@ -186,7 +151,7 @@ async function testGuard() {
     assert.ok(/accounts\.google\.com/.test(loc), "redirects to Google")
     const u = new URL(loc)
     assert.strictEqual(u.searchParams.get("client_id"), FAKE_ID, "non-empty client_id")
-    ok("with credentials present, /sign_in/sso 302s to Google with the configured client_id")
+    ok("with credentials passed in, /sign_in/sso 302s to Google with the configured client_id")
   } finally {
     server2.close()
   }
@@ -194,11 +159,9 @@ async function testGuard() {
 
 testGuard()
   .then(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true })
     console.log(`\nAll ${passed} credential tests passed.`)
   })
   .catch((err) => {
     console.error("\nTEST FAILED:", err)
-    fs.rmSync(tmpDir, { recursive: true, force: true })
     process.exit(1)
   })

@@ -230,32 +230,19 @@ function defaultResolveGrants(identity) {
     };
 }
 function normalizeConfig(config) {
-    // Resolve the Google OAuth credentials inside the library: explicit config → GOOGLE_CLIENT_ID/
-    // SECRET env → out-of-repo credentials file. We capture a secret-free remediation message rather
-    // than throwing here, so a missing credential surfaces as a clear 503 at request time (and the
-    // SAML path, which needs no Google credential, still works). A *malformed* credentials file is a
-    // real misconfiguration: we keep its (secret-free) message too.
-    let clientId = "";
-    let clientSecret = "";
-    let googleRemediation = "";
-    try {
-        const resolved = (0, credentials_js_1.loadGoogleCredentials)({
-            clientId: config.google.clientId,
-            clientSecret: config.google.clientSecret,
-            path: config.google.credentialsFile,
-        });
-        clientId = resolved.clientId;
-        clientSecret = resolved.clientSecret;
-        if (!resolved.ok)
-            googleRemediation = (0, credentials_js_1.credentialsRemediation)(resolved.path);
-    }
-    catch (err) {
-        if (err instanceof credentials_js_1.OAuthCredentialsError)
-            googleRemediation = err.message;
-        else
-            throw err;
-    }
-    const googleConfigured = Boolean(clientId && clientSecret);
+    // Resolve the Google OAuth credentials the library was given: explicit config → generic
+    // GOOGLE_CLIENT_ID/SECRET env. The library reads no app-specific file — the embedding app sources
+    // the value and passes it in. We capture a secret-free remediation message rather than throwing,
+    // so a missing credential surfaces as a clear 503 at request time (and the SAML path, which needs
+    // no Google credential, still works).
+    const resolved = (0, credentials_js_1.loadGoogleCredentials)({
+        clientId: config.google.clientId,
+        clientSecret: config.google.clientSecret,
+    });
+    const clientId = resolved.clientId;
+    const clientSecret = resolved.clientSecret;
+    const googleConfigured = resolved.ok;
+    const googleRemediation = resolved.ok ? "" : (0, credentials_js_1.credentialsRemediation)();
     return {
         google: {
             clientId,

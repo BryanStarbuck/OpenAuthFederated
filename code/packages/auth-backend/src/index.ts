@@ -49,14 +49,9 @@ export {
 export type { SamlSpConfig, SamlAcsResult } from "./saml.js"
 export {
   loadGoogleCredentials,
-  googleCredentialsFromFile,
   assertGoogleCredentials,
-  resolveCredentialsPath,
   credentialsRemediation,
   OAuthCredentialsError,
-  DEFAULT_CREDENTIALS_PATH,
-  CREDENTIALS_PATH_ENV,
-  CREDENTIALS_APP_KEY,
 } from "./credentials.js"
 export type {
   GoogleCredentials,
