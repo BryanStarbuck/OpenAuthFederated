@@ -114,9 +114,10 @@ class BaseCore {
     }
 }
 /**
- * Map the documented callback rejection codes
- * (`docs/apis/frontend/sign-up.mdx#domain-enforcement`) to a friendly message. Defaults to the
- * domain-enforcement copy since that is the only rejection the two-global-login flow produces.
+ * Map the documented callback rejection codes (`docs/apis/frontend/errors.mdx`) to a friendly
+ * fallback message — used only when the platform did not send its own `error_message`. Covers
+ * every rejection the federated, domain-gated flow can produce so the user always sees a
+ * specific reason rather than a generic "try again."
  */
 function rejectionMessage(code, presentedDomain) {
     const who = presentedDomain ? ` ('${presentedDomain}')` : "";
@@ -124,9 +125,54 @@ function rejectionMessage(code, presentedDomain) {
         case "identity_domain_not_allowed":
         case "domain_not_allowed":
             return `This app is restricted to company accounts. The identity${who} is not part of an allowed company domain.`;
+        case "identity_email_unverified":
+            return `That Google account's email is not verified, so sign-in can't continue. Use your company Google Workspace account.`;
+        case "identity_blocked":
+            return `This account${who} has been blocked from accessing the app. Contact your administrator.`;
+        case "attempt_expired":
+        case "session_expired":
+            return "Your sign-in attempt expired before it completed. Please try again.";
+        case "sign_in_not_completed":
+            return "Sign-in could not be completed. Please try again.";
         default:
             return "Sign-in could not be completed. Please try again.";
     }
+}
+/**
+ * Build the rich {@link AuthRejection} the SDK hands back to the app from the error query
+ * parameters the platform appends to the callback URL on a refused identity. Mirrors the
+ * platform error envelope so the frontend rejection carries the same detail as the API error:
+ * `error`/`error_code`, `error_message`, `error_long_message`, `presented_domain`,
+ * `allowed_domains` (comma-separated), `email_verified`, and `trace_id`. Returns `null` when no
+ * error param is present (i.e. the handshake did not fail at the callback). See
+ * `docs/apis/frontend/errors.mdx#redirect-callback-parameters`.
+ */
+function rejectionFromParams(params) {
+    const code = params.get("error") ?? params.get("error_code");
+    if (!code)
+        return null;
+    const presentedDomain = params.get("presented_domain") ?? undefined;
+    const allowedRaw = params.get("allowed_domains");
+    const allowedDomains = allowedRaw
+        ? allowedRaw.split(",").map((d) => d.trim()).filter(Boolean)
+        : undefined;
+    const emailVerifiedRaw = params.get("email_verified");
+    const emailVerified = emailVerifiedRaw == null ? undefined : emailVerifiedRaw === "true";
+    const meta = {};
+    if (allowedDomains?.length)
+        meta.allowedDomains = allowedDomains;
+    if (presentedDomain)
+        meta.presentedDomain = presentedDomain;
+    if (emailVerified !== undefined)
+        meta.emailVerified = emailVerified;
+    return {
+        code,
+        message: params.get("error_message") ?? rejectionMessage(code, presentedDomain),
+        longMessage: params.get("error_long_message") ?? undefined,
+        presentedDomain,
+        meta: Object.keys(meta).length ? meta : undefined,
+        traceId: params.get("trace_id") ?? undefined,
+    };
 }
 /**
  * Local dev mock: no Google round-trip, no running server. Sign-in establishes a session
@@ -185,26 +231,42 @@ export class DevAuthCore extends BaseCore {
         const pending = raw ? JSON.parse(raw) : null;
         const domain = pending?.domain ?? this.allowedDomains[0];
         // Domain enforcement (the rejection path of §7.3): even though the dev mock has no real
-        // Google round-trip, model the platform's domain gate so the rejection is exercisable.
-        // An explicit `?auth_reject=<domain>` on the callback URL simulates an outsider returning
-        // from the IdP; a pending domain outside the allowlist is likewise refused. No session is
-        // created — mirrors `identity_domain_not_allowed`.
+        // Google round-trip, model the platform's domain gate so the rejection is exercisable —
+        // and with the *same rich shape* the real platform returns, so the app's error UI can be
+        // built and tested entirely against the dev mock. An explicit `?auth_reject=<domain>` on the
+        // callback URL simulates an outsider returning from the IdP (optionally
+        // `&auth_reject_code=identity_email_unverified` to exercise a different reason); a pending
+        // domain outside the allowlist is likewise refused. No session is created.
         let presentedDomain = domain;
+        let simulatedCode = null;
         try {
-            const simulated = new URLSearchParams(window.location.search).get("auth_reject");
+            const search = new URLSearchParams(window.location.search);
+            const simulated = search.get("auth_reject");
             if (simulated)
                 presentedDomain = simulated;
+            simulatedCode = search.get("auth_reject_code");
         }
         catch {
             // window.location unavailable (SSR) — fall back to the pending domain.
         }
-        if (!presentedDomain || !this.allowedDomains.includes(presentedDomain)) {
+        if (simulatedCode || !presentedDomain || !this.allowedDomains.includes(presentedDomain)) {
+            const code = simulatedCode ?? "identity_domain_not_allowed";
+            const emailVerified = code !== "identity_email_unverified";
             this.setSnapshot(EMPTY_SNAPSHOT);
             return {
                 error: {
-                    code: "identity_domain_not_allowed",
-                    message: rejectionMessage("identity_domain_not_allowed", presentedDomain),
+                    code,
+                    message: rejectionMessage(code, presentedDomain),
+                    longMessage: `The upstream identity authenticated, but the app refused it (${code}). No account ` +
+                        `was created and no session was started. Allowed company domains: ` +
+                        `${this.allowedDomains.join(", ")}.`,
                     presentedDomain,
+                    meta: {
+                        allowedDomains: this.allowedDomains,
+                        presentedDomain,
+                        emailVerified,
+                    },
+                    traceId: `trace_dev_${domainSlug(presentedDomain ?? "unknown")}`,
                 },
             };
         }
@@ -430,21 +492,15 @@ export class RealAuthCore extends BaseCore {
     async completeRedirectCallback() {
         const params = new URLSearchParams(window.location.search);
         // Domain enforcement rejection (§7.3): the platform redirects back to the callback with an
-        // error code rather than a session when the verified identity fails domain enforcement.
-        // No session was created — surface the rejection instead of forwarding the user on. See
-        // `docs/apis/frontend/sign-up.mdx#domain-enforcement`.
-        const errorCode = params.get("error") ?? params.get("error_code");
-        if (errorCode) {
-            const presentedDomain = params.get("presented_domain") ?? undefined;
+        // error envelope (in query params) rather than a session when the verified identity fails
+        // domain enforcement. No session was created — surface the rich rejection (code, message,
+        // long message, allowed/presented domains, trace id) instead of forwarding the user on, so
+        // the app can show a specific reason. See `docs/apis/frontend/errors.mdx`.
+        const rejection = rejectionFromParams(params);
+        if (rejection) {
             this.activeSessionId = null;
             this.setSnapshot(EMPTY_SNAPSHOT);
-            return {
-                error: {
-                    code: errorCode,
-                    message: params.get("error_message") ?? rejectionMessage(errorCode, presentedDomain),
-                    presentedDomain,
-                },
-            };
+            return { error: rejection };
         }
         await this.load();
         // A reachable Frontend API that nonetheless yields no active session here means the attempt
@@ -454,6 +510,8 @@ export class RealAuthCore extends BaseCore {
                 error: {
                     code: "sign_in_not_completed",
                     message: rejectionMessage("sign_in_not_completed"),
+                    longMessage: "The sign-in handshake returned, but no active session was established. The attempt " +
+                        "may have expired or been refused upstream. Please try signing in again.",
                 },
             };
         }

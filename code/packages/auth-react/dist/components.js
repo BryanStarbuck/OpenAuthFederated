@@ -27,6 +27,19 @@ export function readAuthError() {
         return null;
     }
 }
+/**
+ * Read the most recent sign-in rejection once, on mount. For apps that render their **own**
+ * sign-in screen (instead of the drop-in `<SignIn>`) and still want to show why the last
+ * attempt was refused — e.g. a wrong/unauthorized Google account. One-shot: the rejection is
+ * cleared as it is read, so a refresh won't re-show a stale message.
+ */
+export function useAuthError() {
+    const [rejection, setRejection] = useState(null);
+    useEffect(() => {
+        setRejection(readAuthError());
+    }, []);
+    return rejection;
+}
 const DEFAULT_PRIMARY = "#0f766e";
 const card = {
     width: "100%",
@@ -78,12 +91,9 @@ function FederatedAuth(props) {
     const { signUp } = useSignUp();
     const complete = props.forceRedirectUrl ?? props.fallbackRedirectUrl ?? "/";
     const color = primaryColor(props.appearance, config.appearance);
-    // Surface a rejection from a prior callback bounce (e.g. domain enforcement, §7.3). Read once
-    // on mount and clear it, so a refresh doesn't re-show a stale message.
-    const [rejection, setRejection] = useState(null);
-    useEffect(() => {
-        setRejection(readAuthError());
-    }, []);
+    // Surface a rejection from a prior callback bounce (e.g. domain enforcement, §7.3). One-shot,
+    // cleared on read, so a refresh doesn't re-show a stale message.
+    const rejection = useAuthError();
     const start = (connectionId) => {
         const authenticate = props.mode === "sign-up"
             ? signUp.authenticateWithRedirect
@@ -95,7 +105,7 @@ function FederatedAuth(props) {
             redirectUrlComplete: complete,
         });
     };
-    return (_jsxs("div", { style: card, children: [_jsx("h1", { style: { fontSize: 18, fontWeight: 700, margin: 0 }, children: "Internal App" }), _jsx("p", { style: { fontSize: 13, color: "#6b7280", marginTop: 4 }, children: "Employees only. Continue with your company Google Workspace." }), rejection && (_jsx("div", { role: "alert", style: rejectionBanner, children: rejection.message })), connections.map((conn) => (_jsxs("button", { type: "button", onClick: () => start(conn.id), style: bigButton(color), children: ["Continue with ", conn.domain] }, conn.id))), _jsx(GoogleOneTap, { fallbackRedirectUrl: complete, signInForceRedirectUrl: complete }), _jsx("p", { style: { fontSize: 11, color: "#9ca3af", marginTop: 14 }, children: "No passwords. Access is restricted to company accounts." })] }));
+    return (_jsxs("div", { style: card, children: [_jsx("h1", { style: { fontSize: 18, fontWeight: 700, margin: 0 }, children: "Internal App" }), _jsx("p", { style: { fontSize: 13, color: "#6b7280", marginTop: 4 }, children: "Employees only. Continue with your company Google Workspace." }), rejection && (_jsxs("div", { role: "alert", style: rejectionBanner, children: [_jsx("strong", { style: { display: "block" }, children: rejection.message }), rejection.longMessage && (_jsx("span", { style: { display: "block", marginTop: 4 }, children: rejection.longMessage })), rejection.meta?.allowedDomains?.length ? (_jsxs("span", { style: { display: "block", marginTop: 4 }, children: ["Allowed company ", rejection.meta.allowedDomains.length > 1 ? "domains" : "domain", ":", " ", rejection.meta.allowedDomains.join(", "), "."] })) : null] })), connections.map((conn) => (_jsxs("button", { type: "button", onClick: () => start(conn.id), style: bigButton(color), children: ["Continue with ", conn.domain] }, conn.id))), _jsx(GoogleOneTap, { fallbackRedirectUrl: complete, signInForceRedirectUrl: complete }), _jsx("p", { style: { fontSize: 11, color: "#9ca3af", marginTop: 14 }, children: "No passwords. Access is restricted to company accounts." })] }));
 }
 /** Complete federated sign-in experience (no password field). */
 export function SignIn(props) {

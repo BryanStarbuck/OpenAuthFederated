@@ -2,6 +2,13 @@ import { type ReactNode } from "react";
 import type { Appearance, AuthRejection, PermissionCheck } from "./types.js";
 /** Read and clear any stashed callback rejection (one-shot). */
 export declare function readAuthError(): AuthRejection | null;
+/**
+ * Read the most recent sign-in rejection once, on mount. For apps that render their **own**
+ * sign-in screen (instead of the drop-in `<SignIn>`) and still want to show why the last
+ * attempt was refused — e.g. a wrong/unauthorized Google account. One-shot: the rejection is
+ * cleared as it is read, so a refresh won't re-show a stale message.
+ */
+export declare function useAuthError(): AuthRejection | null;
 interface SignInProps {
     routing?: "hash" | "path" | "virtual";
     path?: string;
