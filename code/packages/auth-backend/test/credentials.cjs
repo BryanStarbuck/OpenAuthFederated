@@ -18,7 +18,7 @@ const {
   assertGoogleCredentials,
   credentialsRemediation,
   OAuthCredentialsError,
-  createClerkFrontend,
+  createFederatedFrontend,
   createAuthFrontend,
 } = require("../dist/index.js")
 
@@ -75,7 +75,7 @@ function ok(name) {
 // --- 4. Remediation is generic + secret-free -----------------------------------------------
 {
   const msg = credentialsRemediation()
-  assert.ok(msg.includes("createClerkFrontend"), "remediation names the API entry point")
+  assert.ok(msg.includes("createFederatedFrontend"), "remediation names the API entry point")
   assert.ok(msg.includes("GOOGLE_CLIENT_ID"), "remediation lists the generic env-var alternative")
   // It must NOT name any host application's file/path/key — the library knows none.
   assert.ok(!msg.includes("app_internal_act3"), "remediation names no app-specific JSON key")
@@ -120,7 +120,7 @@ async function testGuard() {
     assert.ok(!loc || !/accounts\.google\.com/.test(loc), "never redirects to Google")
     const body = await res.json()
     assert.strictEqual(body.error, "oauth_not_configured", "machine code in body")
-    assert.ok(body.remediation.includes("createClerkFrontend"), "generic remediation in body")
+    assert.ok(body.remediation.includes("createFederatedFrontend"), "generic remediation in body")
     assert.ok(!body.remediation.includes("app_internal_act3"), "body names no app-specific key")
     assert.ok(!body.remediation.includes(FAKE_SECRET), "body leaks no secret")
     ok("/sign_in/sso fails closed with 503 oauth_not_configured instead of redirecting to Google")
@@ -157,9 +157,9 @@ async function testGuard() {
     server2.close()
   }
 
-  // And the Clerk-idiomatic shape: createClerkFrontend with a connections[] array carrying the
+  // And the Federated-idiomatic shape: createFederatedFrontend with a connections[] array carrying the
   // oauth_google strategy must behave identically to the legacy google{} block.
-  const mw3 = createClerkFrontend({
+  const mw3 = createFederatedFrontend({
     connections: [
       {
         strategy: "oauth_google",

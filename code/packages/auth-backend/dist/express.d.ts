@@ -1,14 +1,12 @@
 /**
- * Express adapter — the drop-in counterpart to `@clerk/express`
- * (clerk.com/docs/reference/express/{clerk-middleware,require-auth,get-auth}).
+ * Express adapter.
  *
- * Provides `clerkMiddleware()`, `requireAuth()`, and `getAuth(req)` with the same names, call
- * order, and semantics as Clerk's Express SDK, so a backend can swap `@clerk/express` for
- * `@auth/backend` without touching call sites:
+ * Provides `federatedMiddleware()`, `requireAuth()`, and `getAuth(req)`, all imported from
+ * `@auth/backend`:
  *
  * ```ts
- * import { clerkMiddleware, requireAuth, getAuth } from "@auth/backend"
- * app.use(clerkMiddleware())                 // attaches the Auth object to req.auth
+ * import { federatedMiddleware, requireAuth, getAuth } from "@auth/backend"
+ * app.use(federatedMiddleware())                 // attaches the Auth object to req.auth
  * app.get("/me", requireAuth(), (req, res) => res.json(getAuth(req)))
  * ```
  *
@@ -20,7 +18,7 @@ import { type AuthObject, type AuthRequestLike } from "./middleware.js";
 import type { VerifyTokenOptions } from "./verify.js";
 /** The minimal Express-like request these helpers read from / write `auth` onto. */
 export interface ExpressLikeRequest extends AuthRequestLike {
-    /** Populated by {@link clerkMiddleware}; read by {@link getAuth}. */
+    /** Populated by {@link federatedMiddleware}; read by {@link getAuth}. */
     auth?: AuthObject;
 }
 /** The minimal Express-like response these helpers write to when rejecting a request. */
@@ -32,28 +30,28 @@ export interface ExpressLikeResponse {
     end(body?: unknown): void;
 }
 type NextFn = (err?: unknown) => void;
-/** Options accepted by {@link clerkMiddleware} / {@link requireAuth}. Superset is Clerk-compatible. */
-export interface ClerkMiddlewareOptions extends VerifyTokenOptions {
-    /** When set, {@link requireAuth} 302-redirects unauthenticated requests here (Clerk: `signInUrl`). */
+/** Options accepted by {@link federatedMiddleware} / {@link requireAuth}. Superset is Federated-compatible. */
+export interface FederatedMiddlewareOptions extends VerifyTokenOptions {
+    /** When set, {@link requireAuth} 302-redirects unauthenticated requests here (Federated: `signInUrl`). */
     signInUrl?: string;
 }
 /**
- * Express middleware that authenticates the request and attaches the Clerk-style Auth object to
+ * Express middleware that authenticates the request and attaches the Federated-style Auth object to
  * `req.auth`. Must run before any handler that calls {@link getAuth}. Never rejects — it only
- * resolves identity; use {@link requireAuth} to enforce it. Mirrors Clerk's `clerkMiddleware()`.
+ * resolves identity; use {@link requireAuth} to enforce it. Mirrors Federated's `federatedMiddleware()`.
  */
-export declare function clerkMiddleware(options?: ClerkMiddlewareOptions): (req: ExpressLikeRequest, _res: ExpressLikeResponse, next: NextFn) => void;
+export declare function federatedMiddleware(options?: FederatedMiddlewareOptions): (req: ExpressLikeRequest, _res: ExpressLikeResponse, next: NextFn) => void;
 /**
- * Express middleware that protects a route: authenticates like {@link clerkMiddleware}, then
- * rejects unauthenticated requests. Mirrors Clerk's `requireAuth()` — when `signInUrl` is set it
+ * Express middleware that protects a route: authenticates like {@link federatedMiddleware}, then
+ * rejects unauthenticated requests. Mirrors Federated's `requireAuth()` — when `signInUrl` is set it
  * 302-redirects (browser flows); otherwise it responds `401` (API flows). Authenticated requests
  * fall through with `req.auth` populated.
  */
-export declare function requireAuth(options?: ClerkMiddlewareOptions): (req: ExpressLikeRequest, res: ExpressLikeResponse, next: NextFn) => void;
+export declare function requireAuth(options?: FederatedMiddlewareOptions): (req: ExpressLikeRequest, res: ExpressLikeResponse, next: NextFn) => void;
 /**
- * Return the Clerk-style Auth object for a request. Reads what {@link clerkMiddleware} attached to
+ * Return the Federated-style Auth object for a request. Reads what {@link federatedMiddleware} attached to
  * `req.auth`; if the middleware did not run, falls back to a synchronous best-effort read of the
- * Bearer token presence (a signed-out object when absent). Mirrors Clerk's `getAuth(req)`.
+ * Bearer token presence (a signed-out object when absent). Mirrors Federated's `getAuth(req)`.
  */
 export declare function getAuth(req: ExpressLikeRequest): AuthObject;
 export {};

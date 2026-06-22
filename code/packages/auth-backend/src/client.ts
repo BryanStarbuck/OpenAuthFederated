@@ -1,10 +1,9 @@
-import type { CreateClerkClientOptions, MachineClaims, TokenClaims } from "./types.js"
+import type { CreateFederatedClientOptions, MachineClaims, TokenClaims } from "./types.js"
 import { requirePermission, requireRole } from "./permissions.js"
 import { verifyMachineToken, verifyToken } from "./verify.js"
 
 /**
- * Paginated list envelope, mirroring Clerk's `PaginatedResourceResponse<T>`
- * (clerk.com/docs/reference/backend/types/paginated-resource-response). As in Clerk, the generic
+ * Paginated list envelope `PaginatedResourceResponse<T>`. The generic
  * `T` is the *array* type — list methods are typed `PaginatedResourceResponse<User[]>` — and the
  * count field is camelCase `totalCount`.
  */
@@ -15,7 +14,7 @@ export interface PaginatedResourceResponse<T> {
 
 /**
  * @deprecated Use {@link PaginatedResourceResponse}. Kept as an alias for existing call sites.
- * Note the field rename: list methods now return `totalCount` (Clerk parity), not `total_count`.
+ * Note the field rename: list methods now return `totalCount` (Federated parity), not `total_count`.
  */
 export interface ListResponse<T> {
   data: T[]
@@ -81,7 +80,7 @@ export interface JwtTemplate {
 }
 
 /* ----------------------------------------------------------------------------------------------
- * Deprecated type aliases — the resource types were renamed to Clerk's names (User, Session,
+ * Deprecated type aliases — the resource types were renamed to Federated's names (User, Session,
  * Organization, OrganizationMembership, Invitation, JwtTemplate). The `Auth*` names remain as
  * aliases so existing imports keep compiling.
  * -------------------------------------------------------------------------------------------- */
@@ -98,7 +97,7 @@ export type AuthInvitation = Invitation
 /** @deprecated Use {@link JwtTemplate}. */
 export type AuthJwtTemplate = JwtTemplate
 
-/** `clerkClient.users` — read and deprovision users via the Backend API. */
+/** `federatedClient.users` — read and deprovision users via the Backend API. */
 class UsersResource {
   constructor(private readonly client: AuthClient) {}
 
@@ -150,7 +149,7 @@ class UsersResource {
   }
 }
 
-/** `clerkClient.sessions` — inspect, verify, and immediately revoke server-side sessions. */
+/** `federatedClient.sessions` — inspect, verify, and immediately revoke server-side sessions. */
 class SessionsResource {
   constructor(private readonly client: AuthClient) {}
 
@@ -177,7 +176,7 @@ class SessionsResource {
 
   /**
    * Stateful re-check for sensitive actions — a just-offboarded user fails here.
-   * Signature mirrors Clerk's `sessions.verifySession(sessionId, token)`; the optional `token`
+   * Signature mirrors Federated's `sessions.verifySession(sessionId, token)`; the optional `token`
    * is forwarded to the server-side verify when provided.
    */
   verifySession(sessionId: string, token?: string): Promise<Session> {
@@ -188,7 +187,7 @@ class SessionsResource {
   }
 }
 
-/** `clerkClient.organizations` — orgs/tenants and their memberships. */
+/** `federatedClient.organizations` — orgs/tenants and their memberships. */
 class OrganizationsResource {
   constructor(private readonly client: AuthClient) {}
 
@@ -301,7 +300,7 @@ class OrganizationsResource {
   }
 }
 
-/** `clerkClient.invitations` — proactively grant access before first sign-in (spec §8/§12). */
+/** `federatedClient.invitations` — proactively grant access before first sign-in (spec §8/§12). */
 class InvitationsResource {
   constructor(private readonly client: AuthClient) {}
 
@@ -340,7 +339,7 @@ class InvitationsResource {
   }
 }
 
-/** `clerkClient.jwtTemplates` — named custom-claim templates for downstream tokens (spec §15). */
+/** `federatedClient.jwtTemplates` — named custom-claim templates for downstream tokens (spec §15). */
 class JwtTemplatesResource {
   constructor(private readonly client: AuthClient) {}
 
@@ -406,7 +405,7 @@ export class AuthClient {
   private readonly audience?: string | string[]
   private readonly authorizedParties?: string[]
 
-  constructor(opts: CreateClerkClientOptions = {}) {
+  constructor(opts: CreateFederatedClientOptions = {}) {
     this.secretKey = opts.secretKey ?? process.env.AUTH_SECRET_KEY ?? ""
     this.apiUrl = opts.apiUrl ?? process.env.AUTH_BACKEND_API ?? "https://api.localhost/v1"
     this.issuer = opts.issuer ?? process.env.AUTH_JWT_ISSUER
@@ -467,10 +466,10 @@ export class AuthClient {
   }
 
   /**
-   * List request that normalizes the wire envelope to Clerk's
+   * List request that normalizes the wire envelope to Federated's
    * {@link PaginatedResourceResponse}: `{ data, totalCount }`. The Backend API returns the count
    * as snake_case `total_count`; we map it to camelCase `totalCount` here so callers see the same
-   * shape Clerk's SDK returns.
+   * shape Federated's SDK returns.
    */
   async requestList<T>(path: string, init: RequestInit = {}): Promise<PaginatedResourceResponse<T[]>> {
     const raw = await this.request<{

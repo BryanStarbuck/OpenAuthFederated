@@ -113,8 +113,8 @@ function buildAuthObject(claims, token) {
     };
 }
 /**
- * Authenticate an incoming request, mirroring Clerk's
- * `clerkClient.authenticateRequest(request, options)`. Verifies the Bearer token (if any) and
+ * Authenticate an incoming request, mirroring Federated's
+ * `federatedClient.authenticateRequest(request, options)`. Verifies the Bearer token (if any) and
  * returns a {@link RequestState}; never throws on a missing/invalid token. Accepts either a Fetch
  * `Request` or the minimal {@link AuthRequestLike} shape.
  */

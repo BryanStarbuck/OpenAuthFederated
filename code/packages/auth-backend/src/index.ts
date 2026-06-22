@@ -1,9 +1,9 @@
 import { AuthClient } from "./client.js"
-import type { CreateClerkClientOptions } from "./types.js"
+import type { CreateFederatedClientOptions } from "./types.js"
 
-// The backend client. `ClerkClient` is the Clerk-exact name; `AuthClient` is kept as an alias so
-// the surface is a drop-in for `@clerk/backend` while existing imports keep resolving.
-export { AuthClient, AuthClient as ClerkClient } from "./client.js"
+// The backend client. `FederatedClient` is the primary name; `AuthClient` is kept as an alias so
+// existing imports keep resolving.
+export { AuthClient, AuthClient as FederatedClient } from "./client.js"
 export type {
   User,
   Session,
@@ -25,7 +25,7 @@ export type {
   TokenClaims,
   MachineClaims,
   PermissionCheck,
-  CreateClerkClientOptions,
+  CreateFederatedClientOptions,
   CreateAuthClientOptions,
 } from "./types.js"
 export { verifyToken, verifyMachineToken, hasScope } from "./verify.js"
@@ -52,19 +52,19 @@ export type {
   AuthObject,
   RequestState,
 } from "./middleware.js"
-// Express adapter — drop-in for `@clerk/express`.
-export { clerkMiddleware, requireAuth, getAuth } from "./express.js"
+// Express adapter.
+export { federatedMiddleware, requireAuth, getAuth } from "./express.js"
 export type {
-  ClerkMiddlewareOptions,
+  FederatedMiddlewareOptions,
   ExpressLikeRequest,
   ExpressLikeResponse,
 } from "./express.js"
-// Embedded Frontend API. `createClerkFrontend` is the Clerk-idiomatic name (connections[]);
+// Embedded Frontend API. `createFederatedFrontend` is the Federated-idiomatic name (connections[]);
 // `createAuthFrontend` is the kept alias (also accepts the deprecated google/saml shorthand).
-export { createClerkFrontend, createAuthFrontend } from "./frontend.js"
+export { createFederatedFrontend, createAuthFrontend } from "./frontend.js"
 export type {
-  ClerkFrontendConfig,
-  ClerkConnectionConfig,
+  FederatedFrontendConfig,
+  FederatedConnectionConfig,
   GoogleConnectionConfig,
   SamlConnectionConfig,
   LegacyGoogleConfig,
@@ -94,19 +94,18 @@ export type {
 } from "./credentials.js"
 
 /**
- * Construct a configured backend client. Mirrors Clerk's `createClerkClient(options)`
- * (clerk.com/docs/reference/backend/overview). Reads AUTH_SECRET_KEY / AUTH_BACKEND_API /
- * AUTH_JWT_ISSUER when the matching option is omitted.
+ * Construct a configured backend client via `createFederatedClient(options)`. Reads
+ * AUTH_SECRET_KEY / AUTH_BACKEND_API / AUTH_JWT_ISSUER when the matching option is omitted.
  */
-export function createClerkClient(options: CreateClerkClientOptions = {}): AuthClient {
+export function createFederatedClient(options: CreateFederatedClientOptions = {}): AuthClient {
   return new AuthClient(options)
 }
 
 /**
- * @deprecated Use {@link createClerkClient}. Alias retained so existing `createAuthClient(...)`
+ * @deprecated Use {@link createFederatedClient}. Alias retained so existing `createAuthClient(...)`
  * call sites keep working unchanged.
  */
-export const createAuthClient = createClerkClient
+export const createAuthClient = createFederatedClient
 
 // Preconfigured singleton for the common case. Lazily constructed on first use so the
 // host's environment (e.g. NestJS ConfigModule loading .env) is in place before it reads
@@ -118,10 +117,10 @@ function instance(): AuthClient {
 }
 
 /**
- * Preconfigured singleton client. `clerkClient` is the Clerk-exact name; `authClient` is the kept
+ * Preconfigured singleton client. `federatedClient` is the Federated-exact name; `authClient` is the kept
  * alias. Both proxy to the same lazily-constructed instance.
  */
-export const clerkClient: AuthClient = new Proxy({} as AuthClient, {
+export const federatedClient: AuthClient = new Proxy({} as AuthClient, {
   get(_target, prop, receiver) {
     const value = Reflect.get(instance(), prop, receiver)
     return typeof value === "function" ? value.bind(instance()) : value
@@ -129,7 +128,7 @@ export const clerkClient: AuthClient = new Proxy({} as AuthClient, {
 })
 
 /**
- * @deprecated Use {@link clerkClient}. Alias retained so existing `authClient.*` call sites keep
+ * @deprecated Use {@link federatedClient}. Alias retained so existing `authClient.*` call sites keep
  * working unchanged.
  */
-export const authClient: AuthClient = clerkClient
+export const authClient: AuthClient = federatedClient

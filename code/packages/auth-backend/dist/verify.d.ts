@@ -1,22 +1,21 @@
 import type { MachineClaims, TokenClaims } from "./types.js";
 /**
- * Options for {@link verifyToken}, mirroring Clerk's `verifyToken(token, options)`
- * (clerk.com/docs/reference/backend/verify-token). Embedded mode honours `issuer`; the remaining
- * Clerk keys are accepted for drop-in source-compatibility and applied where they have meaning in
+ * Options for {@link verifyToken} — `verifyToken(token, options)`. Embedded mode honours `issuer`;
+ * the remaining keys are accepted for source-compatibility and applied where they have meaning in
  * networkless verification.
  */
 export interface VerifyTokenOptions {
     /** Expected token issuer (`iss`). Defaults to AUTH_JWT_ISSUER. */
     issuer?: string;
-    /** Expected audience (`aud`). Accepted for Clerk parity. */
+    /** Expected audience (`aud`). Accepted for Federated parity. */
     audience?: string | string[];
-    /** Authorized parties (`azp`) accepted on the token. Accepted for Clerk parity. */
+    /** Authorized parties (`azp`) accepted on the token. Accepted for Federated parity. */
     authorizedParties?: string[];
-    /** Clock-skew tolerance in ms (Clerk default 5000). Accepted for Clerk parity. */
+    /** Clock-skew tolerance in ms (Federated default 5000). Accepted for Federated parity. */
     clockSkewInMs?: number;
-    /** JWKS public key for networkless RS256 verification. Accepted for Clerk parity. */
+    /** JWKS public key for networkless RS256 verification. Accepted for Federated parity. */
     jwtKey?: string;
-    /** Secret key override. Accepted for Clerk parity. */
+    /** Secret key override. Accepted for Federated parity. */
     secretKey?: string;
 }
 /**

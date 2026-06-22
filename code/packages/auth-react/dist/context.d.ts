@@ -15,7 +15,7 @@ interface AuthContextValue {
     connections: Connection[];
 }
 export declare function useAuthContext(): AuthContextValue;
-export interface ClerkProviderProps {
+export interface FederatedProviderProps {
     children: ReactNode;
     /** Browser-safe publishable key (`pk_live_…` / `pk_test_…`). */
     publishableKey?: string;
@@ -33,18 +33,17 @@ export interface ClerkProviderProps {
     devSharedSecret?: string;
 }
 /**
- * @deprecated Use {@link ClerkProviderProps}. Alias retained for existing imports.
+ * @deprecated Use {@link FederatedProviderProps}. Alias retained for existing imports.
  */
-export type AuthProviderProps = ClerkProviderProps;
+export type AuthProviderProps = FederatedProviderProps;
 /**
- * Root provider. Mirrors Clerk's `<ClerkProvider>` (clerk.com/docs/react/reference/components/
- * clerk-provider): wrap the app, pass `publishableKey` / `frontendApi`, and the hooks/components
- * become available. `<AuthProvider>` is kept as an alias.
+ * Root provider `<FederatedProvider>`: wrap the app, pass `publishableKey` / `frontendApi`, and the
+ * hooks/components become available. `<AuthProvider>` is kept as an alias.
  */
-export declare function ClerkProvider(props: ClerkProviderProps): ReactNode;
+export declare function FederatedProvider(props: FederatedProviderProps): ReactNode;
 /**
- * @deprecated Use {@link ClerkProvider}. Alias retained so existing `<AuthProvider>` usage keeps
+ * @deprecated Use {@link FederatedProvider}. Alias retained so existing `<AuthProvider>` usage keeps
  * working unchanged.
  */
-export declare const AuthProvider: typeof ClerkProvider;
+export declare const AuthProvider: typeof FederatedProvider;
 export {};

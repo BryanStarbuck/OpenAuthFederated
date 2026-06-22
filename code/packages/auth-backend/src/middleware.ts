@@ -130,7 +130,7 @@ export async function getRequestAuth(
 }
 
 /**
- * The Clerk-style **Auth object** (clerk.com/docs/reference/backend/types/auth-object) returned
+ * The **Auth object** returned
  * by `getAuth(req)` / `requestState.toAuth()`. Discriminated on `isAuthenticated`; signed-out
  * requests carry `null` ids. `has()` mirrors the frontend `has()`; `getToken()` returns the
  * verified Bearer token (embedded mode has no separate token-mint round trip).
@@ -140,15 +140,14 @@ export interface AuthObject {
   userId: string | null
   sessionId: string | null
   orgId: string | null
-  /** The full verified claim set (Clerk: `sessionClaims`). */
+  /** The full verified claim set (Federated: `sessionClaims`). */
   sessionClaims: TokenClaims | null
   has(check?: PermissionCheck): boolean
   getToken(): Promise<string | null>
 }
 
 /**
- * The result of {@link authenticateRequest}, mirroring Clerk's `RequestState`
- * (clerk.com/docs/reference/backend/authenticate-request). Call `toAuth()` for the Auth object.
+ * The result of {@link authenticateRequest} — a `RequestState`. Call `toAuth()` for the Auth object.
  */
 export interface RequestState {
   isAuthenticated: boolean
@@ -175,8 +174,8 @@ function buildAuthObject(claims: TokenClaims | null, token: string | null): Auth
 }
 
 /**
- * Authenticate an incoming request, mirroring Clerk's
- * `clerkClient.authenticateRequest(request, options)`. Verifies the Bearer token (if any) and
+ * Authenticate an incoming request, mirroring Federated's
+ * `federatedClient.authenticateRequest(request, options)`. Verifies the Bearer token (if any) and
  * returns a {@link RequestState}; never throws on a missing/invalid token. Accepts either a Fetch
  * `Request` or the minimal {@link AuthRequestLike} shape.
  */

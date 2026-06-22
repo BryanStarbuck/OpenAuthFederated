@@ -1,7 +1,7 @@
 {
   "name": "@auth/backend",
   "version": "0.3.0",
-  "description": "OpenAuthFederated Backend SDK — a Clerk-compatible drop-in: createClerkClient, clerkClient (users/sessions/organizations), authenticateRequest, verifyToken, clerkMiddleware/requireAuth/getAuth, and the embedded createClerkFrontend.",
+  "description": "OpenAuthFederated Backend SDK — a Federated-compatible drop-in: createFederatedClient, federatedClient (users/sessions/organizations), authenticateRequest, verifyToken, federatedMiddleware/requireAuth/getAuth, and the embedded createFederatedFrontend.",
   "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

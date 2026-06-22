@@ -1,6 +1,6 @@
-// Root provider. `ClerkProvider` is the Clerk-exact name; `AuthProvider` is the kept alias.
-export { ClerkProvider, AuthProvider, useAuthContext } from "./context.js"
-export type { ClerkProviderProps, AuthProviderProps } from "./context.js"
+// Root provider. `FederatedProvider` is the Federated-exact name; `AuthProvider` is the kept alias.
+export { FederatedProvider, AuthProvider, useAuthContext } from "./context.js"
+export type { FederatedProviderProps, AuthProviderProps } from "./context.js"
 export {
   useAuth,
   useUser,
@@ -11,8 +11,8 @@ export {
   useOrganization,
   useOrganizationList,
   useReverification,
-  // `useClerk` is the Clerk-exact name; `useOpenAuth` is the kept alias.
-  useClerk,
+  // `useFederated` is the Federated-exact name; `useOpenAuth` is the kept alias.
+  useFederated,
   useOpenAuth,
 } from "./hooks.js"
 export {
@@ -36,9 +36,9 @@ export {
   AuthLoading,
   AuthDegraded,
   AuthFailed,
-  // Clerk-named aliases for the load-state gates.
-  AuthLoaded as ClerkLoaded,
-  AuthLoading as ClerkLoading,
+  // Federated-named aliases for the load-state gates.
+  AuthLoaded as FederatedLoaded,
+  AuthLoading as FederatedLoading,
   OrganizationSwitcher,
   OrganizationList,
   OrganizationProfile,

@@ -7,7 +7,7 @@ import type {
   SdkOrganization,
 } from "./types.js"
 
-/** Auth state + tokens without hydrating the full profile. Mirrors Clerk's `useAuth()`. */
+/** Auth state + tokens without hydrating the full profile. Mirrors Federated's `useAuth()`. */
 export function useAuth() {
   const { core, snapshot, isLoaded } = useAuthContext()
   const activeMembership =
@@ -18,13 +18,13 @@ export function useAuth() {
     userId: snapshot.userId,
     sessionId: snapshot.sessionId,
     orgId: snapshot.orgId,
-    /** Active-org role (Clerk parity). Null when there is no active org. */
+    /** Active-org role (Federated parity). Null when there is no active org. */
     orgRole: activeMembership?.role ?? null,
-    /** Active-org slug (Clerk parity). Null when there is no active org. */
+    /** Active-org slug (Federated parity). Null when there is no active org. */
     orgSlug: activeMembership?.organization.slug ?? null,
     /** Raw session claims are not exposed to the browser in embedded mode; always null. */
     sessionClaims: null as Record<string, unknown> | null,
-    /** Impersonation actor (Clerk parity); unused here, always null. */
+    /** Impersonation actor (Federated parity); unused here, always null. */
     actor: null as Record<string, unknown> | null,
     getToken: (opts?: { template?: string }) => core.getToken(opts),
     has: (check?: PermissionCheck) => core.has(check),
@@ -58,7 +58,7 @@ export function useSessionList() {
   const sessions = snapshot.isSignedIn
     ? [{ id: snapshot.sessionId, status: "active" as const }]
     : []
-  // Clerk's useSessionList exposes setActive({ session?, organization? }). Single-session here,
+  // Federated's useSessionList exposes setActive({ session?, organization? }). Single-session here,
   // so a session switch is a no-op; an organization switch routes to the tab-scoped active org.
   const setActive = useCallback(
     async (p: { session?: string | null; organization?: string | null }) => {
@@ -146,11 +146,11 @@ export function useReverification<Args extends unknown[], R>(
 }
 
 /**
- * Imperative client object for actions not covered by the focused hooks. Mirrors Clerk's
- * `useClerk()` — the handle to imperative methods (`setActive`, `signOut`) plus the current
+ * Imperative client object for actions not covered by the focused hooks. Mirrors Federated's
+ * `useFederated()` — the handle to imperative methods (`setActive`, `signOut`) plus the current
  * user/session/organization snapshot.
  */
-export function useClerk() {
+export function useFederated() {
   const { core, snapshot, isLoaded } = useAuthContext()
   const organization =
     snapshot.memberships.find((m) => m.organization.id === snapshot.orgId)?.organization ?? null
@@ -165,7 +165,7 @@ export function useClerk() {
 }
 
 /**
- * @deprecated Use {@link useClerk}. Alias retained so existing `useOpenAuth()` call sites keep
+ * @deprecated Use {@link useFederated}. Alias retained so existing `useOpenAuth()` call sites keep
  * working unchanged.
  */
-export const useOpenAuth = useClerk
+export const useOpenAuth = useFederated

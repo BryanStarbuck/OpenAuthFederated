@@ -53,7 +53,7 @@ function credentialsRemediation() {
         'Supply a Google OAuth 2.0 "Web application" Client ID and Client Secret to the embedding app in',
         "ONE of these ways (checked in this order; the first non-empty value wins per field):",
         "",
-        "  1. Pass them in: createClerkFrontend({ connections: [{ strategy: 'oauth_google',",
+        "  1. Pass them in: createFederatedFrontend({ connections: [{ strategy: 'oauth_google',",
         "       clientId, clientSecret, redirectUri }] }).",
         "  2. Set the environment variables: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.",
         "",

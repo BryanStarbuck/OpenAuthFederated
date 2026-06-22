@@ -1,7 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createAuthFrontend = void 0;
-exports.createClerkFrontend = createClerkFrontend;
+exports.createFederatedFrontend = createFederatedFrontend;
 const node_crypto_1 = require("node:crypto");
 const jose_1 = require("jose");
 const credentials_js_1 = require("./credentials.js");
@@ -235,7 +235,7 @@ function defaultResolveGrants(identity) {
     };
 }
 /**
- * Collapse the Clerk-idiomatic `connections[]` (and the deprecated `google`/`saml` shorthands)
+ * Collapse the Federated-idiomatic `connections[]` (and the deprecated `google`/`saml` shorthands)
  * into the `{ google, saml }` pair the request handlers consume. The first connection of each
  * strategy wins; an explicit `connections` entry takes precedence over the legacy shorthand.
  */
@@ -304,13 +304,13 @@ function normalizeConfig(config) {
 }
 /**
  * Create the embedded Frontend API middleware. Mount it where the SDK's `frontendApi` + `/v1`
- * resolves to — e.g. `app.use('/api/v1', createClerkFrontend(cfg))` with `frontendApi: '/api'`.
+ * resolves to — e.g. `app.use('/api/v1', createFederatedFrontend(cfg))` with `frontendApi: '/api'`.
  *
- * Pass connections the Clerk-idiomatic way:
- *   `createClerkFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
+ * Pass connections the Federated-idiomatic way:
+ *   `createFederatedFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
  *     redirectUri }], allowedDomains, sessionSecret })`
  */
-function createClerkFrontend(config) {
+function createFederatedFrontend(config) {
     const cfg = normalizeConfig(config);
     const secretKey = new TextEncoder().encode(cfg.sessionSecret);
     if (!cfg.googleConfigured) {
@@ -913,9 +913,9 @@ function createClerkFrontend(config) {
     };
 }
 /**
- * @deprecated Use {@link createClerkFrontend}. Alias retained so existing
+ * @deprecated Use {@link createFederatedFrontend}. Alias retained so existing
  * `createAuthFrontend({ google: { ... } })` call sites keep working unchanged (the deprecated
  * `google`/`saml` shorthand is still accepted).
  */
-exports.createAuthFrontend = createClerkFrontend;
+exports.createAuthFrontend = createFederatedFrontend;
 //# sourceMappingURL=frontend.js.map

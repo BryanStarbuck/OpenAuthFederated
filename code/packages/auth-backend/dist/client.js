@@ -3,7 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.AuthClient = void 0;
 const permissions_js_1 = require("./permissions.js");
 const verify_js_1 = require("./verify.js");
-/** `clerkClient.users` — read and deprovision users via the Backend API. */
+/** `federatedClient.users` — read and deprovision users via the Backend API. */
 class UsersResource {
     client;
     constructor(client) {
@@ -43,7 +43,7 @@ class UsersResource {
         return this.client.request(`/users/${userId}`, { method: "DELETE" });
     }
 }
-/** `clerkClient.sessions` — inspect, verify, and immediately revoke server-side sessions. */
+/** `federatedClient.sessions` — inspect, verify, and immediately revoke server-side sessions. */
 class SessionsResource {
     client;
     constructor(client) {
@@ -72,7 +72,7 @@ class SessionsResource {
     }
     /**
      * Stateful re-check for sensitive actions — a just-offboarded user fails here.
-     * Signature mirrors Clerk's `sessions.verifySession(sessionId, token)`; the optional `token`
+     * Signature mirrors Federated's `sessions.verifySession(sessionId, token)`; the optional `token`
      * is forwarded to the server-side verify when provided.
      */
     verifySession(sessionId, token) {
@@ -82,7 +82,7 @@ class SessionsResource {
         });
     }
 }
-/** `clerkClient.organizations` — orgs/tenants and their memberships. */
+/** `federatedClient.organizations` — orgs/tenants and their memberships. */
 class OrganizationsResource {
     client;
     constructor(client) {
@@ -154,7 +154,7 @@ class OrganizationsResource {
         return this.client.request(`/organizations/${params.organizationId}/memberships/${params.userId}`, { method: "DELETE" });
     }
 }
-/** `clerkClient.invitations` — proactively grant access before first sign-in (spec §8/§12). */
+/** `federatedClient.invitations` — proactively grant access before first sign-in (spec §8/§12). */
 class InvitationsResource {
     client;
     constructor(client) {
@@ -187,7 +187,7 @@ class InvitationsResource {
         return this.client.request(`/invitations/${invitationId}/revoke`, { method: "POST" });
     }
 }
-/** `clerkClient.jwtTemplates` — named custom-claim templates for downstream tokens (spec §15). */
+/** `federatedClient.jwtTemplates` — named custom-claim templates for downstream tokens (spec §15). */
 class JwtTemplatesResource {
     client;
     constructor(client) {
@@ -287,10 +287,10 @@ class AuthClient {
         return (await res.json());
     }
     /**
-     * List request that normalizes the wire envelope to Clerk's
+     * List request that normalizes the wire envelope to Federated's
      * {@link PaginatedResourceResponse}: `{ data, totalCount }`. The Backend API returns the count
      * as snake_case `total_count`; we map it to camelCase `totalCount` here so callers see the same
-     * shape Clerk's SDK returns.
+     * shape Federated's SDK returns.
      */
     async requestList(path, init = {}) {
         const raw = await this.request(path, init);

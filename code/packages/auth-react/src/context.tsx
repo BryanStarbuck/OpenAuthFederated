@@ -38,12 +38,12 @@ const AuthContext = createContext<AuthContextValue | null>(null)
 export function useAuthContext(): AuthContextValue {
   const ctx = useContext(AuthContext)
   if (!ctx) {
-    throw new Error("OpenAuthFederated: hooks and components must be used inside <ClerkProvider>.")
+    throw new Error("OpenAuthFederated: hooks and components must be used inside <FederatedProvider>.")
   }
   return ctx
 }
 
-export interface ClerkProviderProps {
+export interface FederatedProviderProps {
   children: ReactNode
   /** Browser-safe publishable key (`pk_live_…` / `pk_test_…`). */
   publishableKey?: string
@@ -62,16 +62,15 @@ export interface ClerkProviderProps {
 }
 
 /**
- * @deprecated Use {@link ClerkProviderProps}. Alias retained for existing imports.
+ * @deprecated Use {@link FederatedProviderProps}. Alias retained for existing imports.
  */
-export type AuthProviderProps = ClerkProviderProps
+export type AuthProviderProps = FederatedProviderProps
 
 /**
- * Root provider. Mirrors Clerk's `<ClerkProvider>` (clerk.com/docs/react/reference/components/
- * clerk-provider): wrap the app, pass `publishableKey` / `frontendApi`, and the hooks/components
- * become available. `<AuthProvider>` is kept as an alias.
+ * Root provider `<FederatedProvider>`: wrap the app, pass `publishableKey` / `frontendApi`, and the
+ * hooks/components become available. `<AuthProvider>` is kept as an alias.
  */
-export function ClerkProvider(props: ClerkProviderProps): ReactNode {
+export function FederatedProvider(props: FederatedProviderProps): ReactNode {
   const coreRef = useRef<AuthCore | null>(null)
   if (!coreRef.current) {
     const domains =
@@ -141,7 +140,7 @@ export function ClerkProvider(props: ClerkProviderProps): ReactNode {
 }
 
 /**
- * @deprecated Use {@link ClerkProvider}. Alias retained so existing `<AuthProvider>` usage keeps
+ * @deprecated Use {@link FederatedProvider}. Alias retained so existing `<AuthProvider>` usage keeps
  * working unchanged.
  */
-export const AuthProvider = ClerkProvider
+export const AuthProvider = FederatedProvider

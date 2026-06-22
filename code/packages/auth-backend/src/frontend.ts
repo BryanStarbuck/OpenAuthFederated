@@ -84,7 +84,7 @@ export interface ResolvedGrants {
   memberships: OrgMembership[]
 }
 
-/** A Google OAuth (OIDC) sign-in connection. `strategy` mirrors Clerk's `oauth_google`. */
+/** A Google OAuth (OIDC) sign-in connection. `strategy` mirrors Federated's `oauth_google`. */
 export interface GoogleConnectionConfig {
   strategy: "oauth_google"
   /**
@@ -106,15 +106,15 @@ export interface GoogleConnectionConfig {
   hostedDomain?: string
 }
 
-/** A SAML 2.0 sign-in connection. `strategy` mirrors Clerk's enterprise SSO vocabulary. */
+/** A SAML 2.0 sign-in connection. `strategy` mirrors Federated's enterprise SSO vocabulary. */
 export type SamlConnectionConfig = { strategy: "saml" } & SamlSpConfig
 
 /**
- * One configured sign-in connection. Mirrors Clerk's connection/strategy model
- * (`oauth_google`, SAML) so credentials are passed by API in a Clerk-idiomatic shape rather than
+ * One configured sign-in connection. Mirrors Federated's connection/strategy model
+ * (`oauth_google`, SAML) so credentials are passed by API in a Federated-idiomatic shape rather than
  * via a provider-specific block.
  */
-export type ClerkConnectionConfig = GoogleConnectionConfig | SamlConnectionConfig
+export type FederatedConnectionConfig = GoogleConnectionConfig | SamlConnectionConfig
 
 /** Shape of the legacy Google block (`google: { ... }`) accepted as deprecated shorthand. */
 export interface LegacyGoogleConfig {
@@ -124,14 +124,14 @@ export interface LegacyGoogleConfig {
   hostedDomain?: string
 }
 
-export interface ClerkFrontendConfig {
+export interface FederatedFrontendConfig {
   /**
-   * The sign-in connections this app offers. The Clerk-idiomatic way to pass OAuth/SAML
+   * The sign-in connections this app offers. The Federated-idiomatic way to pass OAuth/SAML
    * credentials by API:
    *   `connections: [{ strategy: 'oauth_google', clientId, clientSecret, redirectUri }]`
    * At most one connection per strategy is used (the first of each wins).
    */
-  connections?: ClerkConnectionConfig[]
+  connections?: FederatedConnectionConfig[]
   /**
    * @deprecated Use {@link connections} with `{ strategy: 'oauth_google', ... }`. Retained as a
    * shorthand so existing `createAuthFrontend({ google: { ... } })` call sites keep working.
@@ -161,9 +161,9 @@ export interface ClerkFrontendConfig {
 }
 
 /**
- * @deprecated Use {@link ClerkFrontendConfig}. Alias retained so older imports resolve unchanged.
+ * @deprecated Use {@link FederatedFrontendConfig}. Alias retained so older imports resolve unchanged.
  */
-export type AuthFrontendConfig = ClerkFrontendConfig
+export type AuthFrontendConfig = FederatedFrontendConfig
 
 const STATE_COOKIE = "oaf_oauth_state"
 const SAML_RELAY_COOKIE = "oaf_saml_relay"
@@ -405,11 +405,11 @@ interface InternalConfig {
 }
 
 /**
- * Collapse the Clerk-idiomatic `connections[]` (and the deprecated `google`/`saml` shorthands)
+ * Collapse the Federated-idiomatic `connections[]` (and the deprecated `google`/`saml` shorthands)
  * into the `{ google, saml }` pair the request handlers consume. The first connection of each
  * strategy wins; an explicit `connections` entry takes precedence over the legacy shorthand.
  */
-function normalizeConnections(config: ClerkFrontendConfig): {
+function normalizeConnections(config: FederatedFrontendConfig): {
   google?: LegacyGoogleConfig
   saml?: SamlSpConfig
 } {
@@ -439,7 +439,7 @@ function normalizeConnections(config: ClerkFrontendConfig): {
   return { google, saml }
 }
 
-function normalizeConfig(config: ClerkFrontendConfig): InternalConfig {
+function normalizeConfig(config: FederatedFrontendConfig): InternalConfig {
   const { google: googleCfg, saml: samlCfg } = normalizeConnections(config)
 
   // Resolve the Google OAuth credentials the library was given: explicit config → generic
@@ -485,14 +485,14 @@ function normalizeConfig(config: ClerkFrontendConfig): InternalConfig {
 
 /**
  * Create the embedded Frontend API middleware. Mount it where the SDK's `frontendApi` + `/v1`
- * resolves to — e.g. `app.use('/api/v1', createClerkFrontend(cfg))` with `frontendApi: '/api'`.
+ * resolves to — e.g. `app.use('/api/v1', createFederatedFrontend(cfg))` with `frontendApi: '/api'`.
  *
- * Pass connections the Clerk-idiomatic way:
- *   `createClerkFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
+ * Pass connections the Federated-idiomatic way:
+ *   `createFederatedFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
  *     redirectUri }], allowedDomains, sessionSecret })`
  */
-export function createClerkFrontend(
-  config: ClerkFrontendConfig,
+export function createFederatedFrontend(
+  config: FederatedFrontendConfig,
 ): (req: IncomingMessage, res: ServerResponse, next?: (err?: unknown) => void) => void {
   const cfg = normalizeConfig(config)
   const secretKey = new TextEncoder().encode(cfg.sessionSecret)
@@ -1170,8 +1170,8 @@ export function createClerkFrontend(
 }
 
 /**
- * @deprecated Use {@link createClerkFrontend}. Alias retained so existing
+ * @deprecated Use {@link createFederatedFrontend}. Alias retained so existing
  * `createAuthFrontend({ google: { ... } })` call sites keep working unchanged (the deprecated
  * `google`/`saml` shorthand is still accepted).
  */
-export const createAuthFrontend = createClerkFrontend
+export const createAuthFrontend = createFederatedFrontend
