@@ -1,23 +1,37 @@
-import type { CreateAuthClientOptions, MachineClaims, TokenClaims } from "./types.js";
+import type { CreateClerkClientOptions, MachineClaims, TokenClaims } from "./types.js";
+/**
+ * Paginated list envelope, mirroring Clerk's `PaginatedResourceResponse<T>`
+ * (clerk.com/docs/reference/backend/types/paginated-resource-response). As in Clerk, the generic
+ * `T` is the *array* type — list methods are typed `PaginatedResourceResponse<User[]>` — and the
+ * count field is camelCase `totalCount`.
+ */
+export interface PaginatedResourceResponse<T> {
+    data: T;
+    totalCount: number;
+}
+/**
+ * @deprecated Use {@link PaginatedResourceResponse}. Kept as an alias for existing call sites.
+ * Note the field rename: list methods now return `totalCount` (Clerk parity), not `total_count`.
+ */
 export interface ListResponse<T> {
     data: T[];
-    total_count: number;
+    totalCount: number;
 }
-export interface AuthUser {
+export interface User {
     object: "user";
     id: string;
     primaryEmailAddress?: string;
     publicMetadata?: Record<string, unknown>;
     [k: string]: unknown;
 }
-export interface AuthSession {
+export interface Session {
     object: "session";
     id: string;
     status: string;
     user_id: string;
     [k: string]: unknown;
 }
-export interface AuthOrganization {
+export interface Organization {
     object: "organization";
     id: string;
     name: string;
@@ -25,7 +39,7 @@ export interface AuthOrganization {
     max_allowed_memberships?: number;
     [k: string]: unknown;
 }
-export interface AuthMembership {
+export interface OrganizationMembership {
     object: "organization_membership";
     id: string;
     organization_id: string;
@@ -36,7 +50,7 @@ export interface AuthMembership {
     permissions?: string[];
     [k: string]: unknown;
 }
-export interface AuthInvitation {
+export interface Invitation {
     object: "invitation";
     id: string;
     email_address: string;
@@ -46,7 +60,7 @@ export interface AuthInvitation {
     url?: string;
     [k: string]: unknown;
 }
-export interface AuthJwtTemplate {
+export interface JwtTemplate {
     object: "jwt_template";
     id: string;
     name: string;
@@ -55,74 +69,110 @@ export interface AuthJwtTemplate {
     allowed_clock_skew?: number;
     [k: string]: unknown;
 }
-/** `authClient.users` — read and deprovision users via the Backend API. */
+/** @deprecated Use {@link User}. */
+export type AuthUser = User;
+/** @deprecated Use {@link Session}. */
+export type AuthSession = Session;
+/** @deprecated Use {@link Organization}. */
+export type AuthOrganization = Organization;
+/** @deprecated Use {@link OrganizationMembership}. */
+export type AuthMembership = OrganizationMembership;
+/** @deprecated Use {@link Invitation}. */
+export type AuthInvitation = Invitation;
+/** @deprecated Use {@link JwtTemplate}. */
+export type AuthJwtTemplate = JwtTemplate;
+/** `clerkClient.users` — read and deprovision users via the Backend API. */
 declare class UsersResource {
     private readonly client;
     constructor(client: AuthClient);
-    getUser(userId: string): Promise<AuthUser>;
+    getUser(userId: string): Promise<User>;
     getUserList(params?: {
         emailAddress?: string[];
+        userId?: string[];
+        query?: string;
         limit?: number;
         offset?: number;
         orderBy?: string;
-    }): Promise<ListResponse<AuthUser>>;
+    }): Promise<PaginatedResourceResponse<User[]>>;
     updateUserMetadata(userId: string, body: {
         publicMetadata?: Record<string, unknown>;
-    }): Promise<AuthUser>;
-    deleteUser(userId: string): Promise<AuthUser>;
+        privateMetadata?: Record<string, unknown>;
+        unsafeMetadata?: Record<string, unknown>;
+    }): Promise<User>;
+    deleteUser(userId: string): Promise<User>;
 }
-/** `authClient.sessions` — inspect, verify, and immediately revoke server-side sessions. */
+/** `clerkClient.sessions` — inspect, verify, and immediately revoke server-side sessions. */
 declare class SessionsResource {
     private readonly client;
     constructor(client: AuthClient);
+    getSession(sessionId: string): Promise<Session>;
     getSessionList(params?: {
+        clientId?: string;
         userId?: string;
         status?: string;
-    }): Promise<ListResponse<AuthSession>>;
-    revokeSession(sessionId: string): Promise<AuthSession>;
-    /** Stateful re-check for sensitive actions — a just-offboarded user fails here. */
-    verifySession(sessionId: string): Promise<AuthSession>;
+        limit?: number;
+        offset?: number;
+    }): Promise<PaginatedResourceResponse<Session[]>>;
+    revokeSession(sessionId: string): Promise<Session>;
+    /**
+     * Stateful re-check for sensitive actions — a just-offboarded user fails here.
+     * Signature mirrors Clerk's `sessions.verifySession(sessionId, token)`; the optional `token`
+     * is forwarded to the server-side verify when provided.
+     */
+    verifySession(sessionId: string, token?: string): Promise<Session>;
 }
-/** `authClient.organizations` — orgs/tenants and their memberships. */
+/** `clerkClient.organizations` — orgs/tenants and their memberships. */
 declare class OrganizationsResource {
     private readonly client;
     constructor(client: AuthClient);
     getOrganization(params: {
         organizationId: string;
-    }): Promise<AuthOrganization>;
+    } | {
+        slug: string;
+    }): Promise<Organization>;
+    getOrganizationList(params?: {
+        limit?: number;
+        offset?: number;
+        query?: string;
+    }): Promise<PaginatedResourceResponse<Organization[]>>;
     getOrganizationMembershipList(params: {
         organizationId: string;
-    }): Promise<ListResponse<AuthMembership>>;
+        limit?: number;
+        offset?: number;
+    }): Promise<PaginatedResourceResponse<OrganizationMembership[]>>;
     createOrganization(body: {
         name: string;
+        createdBy?: string;
         slug?: string;
-        max_allowed_memberships?: number;
-    }): Promise<AuthOrganization>;
+        publicMetadata?: Record<string, unknown>;
+        maxAllowedMemberships?: number;
+    }): Promise<Organization>;
     updateOrganization(organizationId: string, body: {
         name?: string;
         slug?: string;
-        max_allowed_memberships?: number;
-    }): Promise<AuthOrganization>;
-    deleteOrganization(organizationId: string): Promise<AuthOrganization>;
+        publicMetadata?: Record<string, unknown>;
+        maxAllowedMemberships?: number;
+    }): Promise<Organization>;
+    deleteOrganization(organizationId: string): Promise<Organization>;
     /** Add a member with a role — the RBAC join used by JIT/SCIM provisioning. */
     createOrganizationMembership(params: {
         organizationId: string;
         userId: string;
         role: string;
-    }): Promise<AuthMembership>;
+    }): Promise<OrganizationMembership>;
     /** Update a member's role — e.g. when their upstream group membership changes. */
     updateOrganizationMembership(params: {
         organizationId: string;
         userId: string;
         role: string;
-    }): Promise<AuthMembership>;
+    }): Promise<OrganizationMembership>;
     /** Remove a member — e.g. SCIM deprovisioning or losing the gating group. */
     deleteOrganizationMembership(params: {
         organizationId: string;
         userId: string;
-    }): Promise<AuthMembership>;
+    }): Promise<OrganizationMembership>;
 }
-/** `authClient.invitations` — proactively grant access before first sign-in (spec §8/§12). */
+/** `clerkClient.invitations` — proactively grant access before first sign-in (spec §8/§12). */
 declare class InvitationsResource {
     private readonly client;
     constructor(client: AuthClient);
@@ -130,32 +180,33 @@ declare class InvitationsResource {
         status?: "pending" | "accepted" | "revoked";
         limit?: number;
         offset?: number;
-    }): Promise<ListResponse<AuthInvitation>>;
+    }): Promise<PaginatedResourceResponse<Invitation[]>>;
     createInvitation(body: {
         emailAddress: string;
+        redirectUrl?: string;
         organizationId?: string;
         role?: string;
         publicMetadata?: Record<string, unknown>;
-    }): Promise<AuthInvitation>;
-    revokeInvitation(invitationId: string): Promise<AuthInvitation>;
+    }): Promise<Invitation>;
+    revokeInvitation(invitationId: string): Promise<Invitation>;
 }
-/** `authClient.jwtTemplates` — named custom-claim templates for downstream tokens (spec §15). */
+/** `clerkClient.jwtTemplates` — named custom-claim templates for downstream tokens (spec §15). */
 declare class JwtTemplatesResource {
     private readonly client;
     constructor(client: AuthClient);
-    getJwtTemplateList(): Promise<ListResponse<AuthJwtTemplate>>;
+    getJwtTemplateList(): Promise<PaginatedResourceResponse<JwtTemplate[]>>;
     createJwtTemplate(body: {
         name: string;
         claims: Record<string, unknown>;
         lifetime?: number;
         allowed_clock_skew?: number;
-    }): Promise<AuthJwtTemplate>;
+    }): Promise<JwtTemplate>;
     updateJwtTemplate(templateId: string, body: Partial<{
         name: string;
         claims: Record<string, unknown>;
         lifetime: number;
         allowed_clock_skew: number;
-    }>): Promise<AuthJwtTemplate>;
+    }>): Promise<JwtTemplate>;
     deleteJwtTemplate(templateId: string): Promise<{
         id: string;
         deleted: boolean;
@@ -181,9 +232,12 @@ export declare class AuthClient {
     private readonly secretKey;
     private readonly apiUrl;
     private readonly issuer?;
-    constructor(opts?: CreateAuthClientOptions);
+    private readonly jwtKey?;
+    private readonly audience?;
+    private readonly authorizedParties?;
+    constructor(opts?: CreateClerkClientOptions);
     get isDevMode(): boolean;
-    /** Networkless JWT verification (JWKS in prod, HS256 dev secret in dev mode). */
+    /** Networkless JWT verification (JWKS in prod, HS256 dev/embedded secret otherwise). */
     verifyToken(token: string): Promise<TokenClaims>;
     /** Verify a token and assert a `<feature>:<action>` permission; throws `Forbidden`. */
     requirePermission(token: string, permission: string): Promise<TokenClaims>;
@@ -193,5 +247,12 @@ export declare class AuthClient {
     verifyMachineToken(token: string): Promise<MachineClaims>;
     /** Low-level authorized request to the Backend API. */
     request<T>(path: string, init?: RequestInit): Promise<T>;
+    /**
+     * List request that normalizes the wire envelope to Clerk's
+     * {@link PaginatedResourceResponse}: `{ data, totalCount }`. The Backend API returns the count
+     * as snake_case `total_count`; we map it to camelCase `totalCount` here so callers see the same
+     * shape Clerk's SDK returns.
+     */
+    requestList<T>(path: string, init?: RequestInit): Promise<PaginatedResourceResponse<T[]>>;
 }
 export {};

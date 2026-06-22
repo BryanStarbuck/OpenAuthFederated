@@ -1,4 +1,5 @@
 import type { PermissionCheck, TokenClaims } from "./types.js";
+import { type VerifyTokenOptions } from "./verify.js";
 /**
  * Edge/route protection helpers — the backend counterpart to the `<Protect>` component and
  * the `auth().protect({ permission })` pattern documented in the capability spec (§9).
@@ -50,9 +51,41 @@ export interface RequestAuth {
  * Resolve the auth context for a request: verify the Bearer token (if any) and return a
  * {@link RequestAuth}. Never throws on a missing token — call `protect()` to enforce.
  */
-export declare function getRequestAuth(req: AuthRequestLike, opts?: {
-    issuer?: string;
-}): Promise<RequestAuth>;
+export declare function getRequestAuth(req: AuthRequestLike, opts?: VerifyTokenOptions): Promise<RequestAuth>;
+/**
+ * The Clerk-style **Auth object** (clerk.com/docs/reference/backend/types/auth-object) returned
+ * by `getAuth(req)` / `requestState.toAuth()`. Discriminated on `isAuthenticated`; signed-out
+ * requests carry `null` ids. `has()` mirrors the frontend `has()`; `getToken()` returns the
+ * verified Bearer token (embedded mode has no separate token-mint round trip).
+ */
+export interface AuthObject {
+    isAuthenticated: boolean;
+    userId: string | null;
+    sessionId: string | null;
+    orgId: string | null;
+    /** The full verified claim set (Clerk: `sessionClaims`). */
+    sessionClaims: TokenClaims | null;
+    has(check?: PermissionCheck): boolean;
+    getToken(): Promise<string | null>;
+}
+/**
+ * The result of {@link authenticateRequest}, mirroring Clerk's `RequestState`
+ * (clerk.com/docs/reference/backend/authenticate-request). Call `toAuth()` for the Auth object.
+ */
+export interface RequestState {
+    isAuthenticated: boolean;
+    status: "signed-in" | "signed-out";
+    token: string | null;
+    tokenType: "session_token";
+    toAuth(): AuthObject;
+}
+/**
+ * Authenticate an incoming request, mirroring Clerk's
+ * `clerkClient.authenticateRequest(request, options)`. Verifies the Bearer token (if any) and
+ * returns a {@link RequestState}; never throws on a missing/invalid token. Accepts either a Fetch
+ * `Request` or the minimal {@link AuthRequestLike} shape.
+ */
+export declare function authenticateRequest(req: AuthRequestLike, opts?: VerifyTokenOptions): Promise<RequestState>;
 /**
  * Compose route protection like the spec's Next.js example (§9):
  *
@@ -68,6 +101,4 @@ export declare function getRequestAuth(req: AuthRequestLike, opts?: {
  * `protect()` is how a request is rejected. The framework adapter maps the error's `status`
  * to a response.
  */
-export declare function authMiddleware(handler: (auth: () => RequestAuth, req: AuthRequestLike) => void | Promise<void>, opts?: {
-    issuer?: string;
-}): (req: AuthRequestLike) => Promise<void>;
+export declare function authMiddleware(handler: (auth: () => RequestAuth, req: AuthRequestLike) => void | Promise<void>, opts?: VerifyTokenOptions): (req: AuthRequestLike) => Promise<void>;

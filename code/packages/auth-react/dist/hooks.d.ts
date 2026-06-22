@@ -1,11 +1,19 @@
 import type { AuthenticateWithRedirectParams, PermissionCheck, SdkMembership, SdkOrganization } from "./types.js";
-/** Auth state + tokens without hydrating the full profile. */
+/** Auth state + tokens without hydrating the full profile. Mirrors Clerk's `useAuth()`. */
 export declare function useAuth(): {
     isLoaded: boolean;
     isSignedIn: boolean;
     userId: string | null;
     sessionId: string | null;
     orgId: string | null;
+    /** Active-org role (Clerk parity). Null when there is no active org. */
+    orgRole: string | null;
+    /** Active-org slug (Clerk parity). Null when there is no active org. */
+    orgSlug: string | null;
+    /** Raw session claims are not exposed to the browser in embedded mode; always null. */
+    sessionClaims: Record<string, unknown> | null;
+    /** Impersonation actor (Clerk parity); unused here, always null. */
+    actor: Record<string, unknown> | null;
     getToken: (opts?: {
         template?: string;
     }) => Promise<string | null>;
@@ -38,6 +46,10 @@ export declare function useSessionList(): {
         id: string | null;
         status: "active";
     }[];
+    setActive: (p: {
+        session?: string | null;
+        organization?: string | null;
+    }) => Promise<void>;
 };
 /** Drive a custom sign-in flow against the upstream IdP. */
 export declare function useSignIn(): {
@@ -79,8 +91,12 @@ export declare function useOrganizationList(_opts?: {
 export declare function useReverification<Args extends unknown[], R>(action: (...args: Args) => Promise<R> | R, opts?: {
     maxAgeSeconds?: number;
 }): (...args: Args) => Promise<R>;
-/** Imperative client object for actions not covered by the focused hooks. */
-export declare function useOpenAuth(): {
+/**
+ * Imperative client object for actions not covered by the focused hooks. Mirrors Clerk's
+ * `useClerk()` — the handle to imperative methods (`setActive`, `signOut`) plus the current
+ * user/session/organization snapshot.
+ */
+export declare function useClerk(): {
     loaded: boolean;
     user: import("./types.js").SdkUser | null;
     session: {
@@ -94,3 +110,8 @@ export declare function useOpenAuth(): {
         redirectUrl?: string;
     }) => Promise<void>;
 };
+/**
+ * @deprecated Use {@link useClerk}. Alias retained so existing `useOpenAuth()` call sites keep
+ * working unchanged.
+ */
+export declare const useOpenAuth: typeof useClerk;

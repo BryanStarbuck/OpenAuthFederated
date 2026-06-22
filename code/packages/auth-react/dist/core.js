@@ -175,6 +175,23 @@ function rejectionFromParams(params) {
     };
 }
 /**
+ * Read the `exp` (epoch seconds) claim from a JWT *without* verifying it — used only to time the
+ * client-side access-token cache, never for a trust decision. Returns null if it can't be parsed.
+ */
+function readJwtExp(jwt) {
+    try {
+        const payload = jwt.split(".")[1];
+        if (!payload)
+            return null;
+        const json = atob(payload.replace(/-/g, "+").replace(/_/g, "/"));
+        const exp = JSON.parse(json).exp;
+        return typeof exp === "number" ? exp : null;
+    }
+    catch {
+        return null;
+    }
+}
+/**
  * Local dev mock: no Google round-trip, no running server. Sign-in establishes a session
  * in localStorage and `getToken()` mints a short-lived HS256 JWT with the shared dev secret
  * that `@auth/backend` verifies in dev mode.
@@ -385,6 +402,13 @@ export class RealAuthCore extends BaseCore {
     publishableKey;
     allowedDomains;
     activeSessionId = null;
+    // Cached access token + its `exp` (epoch seconds), and a single in-flight mint so a page-load
+    // fan-out of queries triggers one network mint, not one per request. Without this the SDK
+    // would POST /tokens on every API call (60s TTL), so any transient mint failure would surface
+    // as a 401 and sign the user out — the "times out too often" symptom.
+    token = null;
+    tokenExp = 0;
+    inflight = null;
     constructor(frontendApi, publishableKey, allowedDomains) {
         super();
         this.frontendApi = frontendApi;
@@ -444,6 +468,8 @@ export class RealAuthCore extends BaseCore {
         });
     }
     applyClient(client) {
+        // Session identity may have changed — never serve a token cached against a prior session.
+        this.clearTokenCache();
         const activeId = client.last_active_session_id;
         const session = (client.sessions ?? []).find((s) => s.id === activeId && s.status === "active");
         if (!session) {
@@ -520,9 +546,29 @@ export class RealAuthCore extends BaseCore {
     async getToken(opts = {}) {
         if (!this.activeSessionId)
             return null;
+        // A templated token is minted fresh each call (its claim shape may differ) and never cached.
+        if (opts.template)
+            return this.mintToken(opts.template);
+        const now = Math.floor(Date.now() / 1000);
+        // Reuse the cached access token until ~10s before expiry. Org switches / sign-out invalidate
+        // the cache (clearTokenCache below), so a stale-grant token is never served.
+        if (this.token && this.tokenExp - now > 10)
+            return this.token;
+        // Single-flight: concurrent callers share one in-flight mint instead of each hitting /tokens.
+        if (this.inflight)
+            return this.inflight;
+        this.inflight = this.mintToken().finally(() => {
+            this.inflight = null;
+        });
+        return this.inflight;
+    }
+    /** POST to the Frontend API to mint an access JWT. Caches the default (non-templated) token. */
+    async mintToken(template) {
+        if (!this.activeSessionId)
+            return null;
         // A named JWT template mints against a different Frontend-API path (spec §15).
-        const path = opts.template
-            ? `${this.base()}/client/sessions/${this.activeSessionId}/tokens/${opts.template}`
+        const path = template
+            ? `${this.base()}/client/sessions/${this.activeSessionId}/tokens/${template}`
             : `${this.base()}/client/sessions/${this.activeSessionId}/tokens`;
         const res = await fetch(path, {
             method: "POST",
@@ -533,7 +579,18 @@ export class RealAuthCore extends BaseCore {
         if (!res.ok)
             return null;
         const data = (await res.json());
-        return data.jwt ?? null;
+        const jwt = data.jwt ?? null;
+        if (jwt && !template) {
+            this.token = jwt;
+            // Time the cache off the token's own `exp`; fall back to the 60s default TTL if unreadable.
+            this.tokenExp = readJwtExp(jwt) ?? Math.floor(Date.now() / 1000) + 60;
+        }
+        return jwt;
+    }
+    /** Drop the cached access token so the next getToken() re-mints with current grants. */
+    clearTokenCache() {
+        this.token = null;
+        this.tokenExp = 0;
     }
     async setActiveOrg(orgId) {
         if (!this.activeSessionId)
@@ -554,6 +611,8 @@ export class RealAuthCore extends BaseCore {
             // best-effort; local active-org write below still applies for this tab
         }
         this.writeActiveOrg(orgId);
+        // The cached token carries the prior org's grants — drop it so the next mint re-scopes.
+        this.clearTokenCache();
         this.setSnapshot({ ...this.snapshot, orgId });
     }
     async reverify() {
@@ -578,6 +637,7 @@ export class RealAuthCore extends BaseCore {
             // best-effort; clear local state regardless
         }
         this.activeSessionId = null;
+        this.clearTokenCache();
         this.writeActiveOrg(null);
         this.setSnapshot(EMPTY_SNAPSHOT);
         if (opts.redirectUrl)

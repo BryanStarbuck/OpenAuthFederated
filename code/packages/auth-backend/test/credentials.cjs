@@ -18,6 +18,7 @@ const {
   assertGoogleCredentials,
   credentialsRemediation,
   OAuthCredentialsError,
+  createClerkFrontend,
   createAuthFrontend,
 } = require("../dist/index.js")
 
@@ -74,7 +75,7 @@ function ok(name) {
 // --- 4. Remediation is generic + secret-free -----------------------------------------------
 {
   const msg = credentialsRemediation()
-  assert.ok(msg.includes("createAuthFrontend"), "remediation names the API entry point")
+  assert.ok(msg.includes("createClerkFrontend"), "remediation names the API entry point")
   assert.ok(msg.includes("GOOGLE_CLIENT_ID"), "remediation lists the generic env-var alternative")
   // It must NOT name any host application's file/path/key — the library knows none.
   assert.ok(!msg.includes("app_internal_act3"), "remediation names no app-specific JSON key")
@@ -119,7 +120,7 @@ async function testGuard() {
     assert.ok(!loc || !/accounts\.google\.com/.test(loc), "never redirects to Google")
     const body = await res.json()
     assert.strictEqual(body.error, "oauth_not_configured", "machine code in body")
-    assert.ok(body.remediation.includes("createAuthFrontend"), "generic remediation in body")
+    assert.ok(body.remediation.includes("createClerkFrontend"), "generic remediation in body")
     assert.ok(!body.remediation.includes("app_internal_act3"), "body names no app-specific key")
     assert.ok(!body.remediation.includes(FAKE_SECRET), "body leaks no secret")
     ok("/sign_in/sso fails closed with 503 oauth_not_configured instead of redirecting to Google")
@@ -151,9 +152,39 @@ async function testGuard() {
     assert.ok(/accounts\.google\.com/.test(loc), "redirects to Google")
     const u = new URL(loc)
     assert.strictEqual(u.searchParams.get("client_id"), FAKE_ID, "non-empty client_id")
-    ok("with credentials passed in, /sign_in/sso 302s to Google with the configured client_id")
+    ok("with credentials passed in (legacy google{} alias), /sign_in/sso 302s to Google")
   } finally {
     server2.close()
+  }
+
+  // And the Clerk-idiomatic shape: createClerkFrontend with a connections[] array carrying the
+  // oauth_google strategy must behave identically to the legacy google{} block.
+  const mw3 = createClerkFrontend({
+    connections: [
+      {
+        strategy: "oauth_google",
+        clientId: FAKE_ID,
+        clientSecret: FAKE_SECRET,
+        redirectUri: "http://localhost:9111/api/v1/oauth_callback",
+      },
+    ],
+    allowedDomains: ["act3ai.com"],
+    sessionSecret: "test-secret",
+    logger: () => {},
+  })
+  const server3 = http.createServer((req, res) => mw3(req, res))
+  await new Promise((resolve) => server3.listen(0, resolve))
+  const port3 = server3.address().port
+  try {
+    const res = await fetch(`http://localhost:${port3}/sign_in/sso?redirect_url=/cb`, {
+      redirect: "manual",
+    })
+    assert.strictEqual(res.status, 302, "302 to Google from connections[] config")
+    const u = new URL(res.headers.get("location"))
+    assert.strictEqual(u.searchParams.get("client_id"), FAKE_ID, "client_id from connections[]")
+    ok("connections: [{ strategy: 'oauth_google', ... }] 302s to Google with the configured client_id")
+  } finally {
+    server3.close()
   }
 }
 

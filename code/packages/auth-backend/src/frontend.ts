@@ -1,6 +1,8 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto"
 import type { IncomingMessage, ServerResponse } from "node:http"
 
+import { createRemoteJWKSet, jwtVerify, SignJWT } from "jose"
+
 import { credentialsRemediation, loadGoogleCredentials } from "./credentials.js"
 import {
   buildSamlClient,
@@ -39,19 +41,15 @@ const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 const GOOGLE_ISSUERS = ["https://accounts.google.com", "accounts.google.com"]
 
-// `jose` is ESM-only; load it through a real dynamic import() so this package stays consumable
-// from a CommonJS host (NestJS). Mirrors verify.ts.
-type Jose = typeof import("jose")
-let josePromise: Promise<Jose> | null = null
-function jose(): Promise<Jose> {
-  if (!josePromise) josePromise = import("jose")
-  return josePromise
-}
-
-let googleJwks: ReturnType<Jose["createRemoteJWKSet"]> | null = null
-async function googleKeySet(): Promise<ReturnType<Jose["createRemoteJWKSet"]>> {
+// `jose` v5 is a dual ESM/CJS package (its package.json `exports` has a `require` entry), so the
+// static import above is safe from a CommonJS host (NestJS): NodeNext compiles it to
+// `require("jose")`, resolving to jose's CJS build. We deliberately do NOT use a dynamic
+// `import("jose")` — under any vm-based module loader without `importModuleDynamically` (notably
+// jest/ts-jest's CJS sandbox), a runtime `import()` throws
+// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG. Mirrors verify.ts.
+let googleJwks: ReturnType<typeof createRemoteJWKSet> | null = null
+function googleKeySet(): ReturnType<typeof createRemoteJWKSet> {
   if (!googleJwks) {
-    const { createRemoteJWKSet } = await jose()
     googleJwks = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"))
   }
   return googleJwks
@@ -86,31 +84,64 @@ export interface ResolvedGrants {
   memberships: OrgMembership[]
 }
 
-export interface AuthFrontendConfig {
-  google: {
-    /**
-     * Google OAuth Web-client id. **Optional.** When omitted/empty, the library falls back to the
-     * generic `GOOGLE_CLIENT_ID` environment variable (see `credentials.ts`). The embedding app
-     * owns where the value is sourced from (its own secrets file/env) and passes it in here; the
-     * library never reads an app-specific credentials file. Never hardcode the value or commit it.
-     */
-    clientId?: string
-    /**
-     * Google OAuth Web-client secret. **Optional** — resolved the same way as {@link clientId}
-     * (explicit value here, then the generic `GOOGLE_CLIENT_SECRET` env var). Never hardcode the
-     * value or commit it.
-     */
-    clientSecret?: string
-    /** Must exactly match an Authorized redirect URI in the Google Cloud OAuth client. */
-    redirectUri: string
-    /** Google Workspace hosted domain to hint + enforce (`hd`). Optional. */
-    hostedDomain?: string
-  }
+/** A Google OAuth (OIDC) sign-in connection. `strategy` mirrors Clerk's `oauth_google`. */
+export interface GoogleConnectionConfig {
+  strategy: "oauth_google"
   /**
-   * Optional SAML 2.0 Service Provider configuration. When present and `enabled`, the same
-   * middleware also serves the SAML SP routes (`/saml/metadata`, `/saml/login`, `/saml/acs`)
-   * and `/sign_in/sso?strategy=saml`. A SAML sign-in establishes the *same* session as the OIDC
-   * path. All SAML XML handling lives in `saml.ts`; the host app only supplies this config.
+   * Google OAuth Web-client id. **Optional.** When omitted/empty, the library falls back to the
+   * generic `GOOGLE_CLIENT_ID` environment variable (see `credentials.ts`). The embedding app
+   * owns where the value is sourced from (its own secrets file/env) and passes it in here; the
+   * library never reads an app-specific credentials file. Never hardcode the value or commit it.
+   */
+  clientId?: string
+  /**
+   * Google OAuth Web-client secret. **Optional** — resolved the same way as {@link clientId}
+   * (explicit value here, then the generic `GOOGLE_CLIENT_SECRET` env var). Never hardcode the
+   * value or commit it.
+   */
+  clientSecret?: string
+  /** Must exactly match an Authorized redirect URI in the Google Cloud OAuth client. */
+  redirectUri: string
+  /** Google Workspace hosted domain to hint + enforce (`hd`). Optional. */
+  hostedDomain?: string
+}
+
+/** A SAML 2.0 sign-in connection. `strategy` mirrors Clerk's enterprise SSO vocabulary. */
+export type SamlConnectionConfig = { strategy: "saml" } & SamlSpConfig
+
+/**
+ * One configured sign-in connection. Mirrors Clerk's connection/strategy model
+ * (`oauth_google`, SAML) so credentials are passed by API in a Clerk-idiomatic shape rather than
+ * via a provider-specific block.
+ */
+export type ClerkConnectionConfig = GoogleConnectionConfig | SamlConnectionConfig
+
+/** Shape of the legacy Google block (`google: { ... }`) accepted as deprecated shorthand. */
+export interface LegacyGoogleConfig {
+  clientId?: string
+  clientSecret?: string
+  redirectUri: string
+  hostedDomain?: string
+}
+
+export interface ClerkFrontendConfig {
+  /**
+   * The sign-in connections this app offers. The Clerk-idiomatic way to pass OAuth/SAML
+   * credentials by API:
+   *   `connections: [{ strategy: 'oauth_google', clientId, clientSecret, redirectUri }]`
+   * At most one connection per strategy is used (the first of each wins).
+   */
+  connections?: ClerkConnectionConfig[]
+  /**
+   * @deprecated Use {@link connections} with `{ strategy: 'oauth_google', ... }`. Retained as a
+   * shorthand so existing `createAuthFrontend({ google: { ... } })` call sites keep working.
+   */
+  google?: LegacyGoogleConfig
+  /**
+   * @deprecated Use {@link connections} with `{ strategy: 'saml', ... }`. Retained shorthand.
+   * When present and `enabled`, the middleware serves the SAML SP routes (`/saml/metadata`,
+   * `/saml/login`, `/saml/acs`) and `/sign_in/sso?strategy=saml`. A SAML sign-in establishes the
+   * *same* session as the OIDC path. All SAML XML handling lives in `saml.ts`.
    */
   saml?: SamlSpConfig
   /** Email/`hd` domains permitted to complete sign-in. Anything else is rejected. */
@@ -128,6 +159,11 @@ export interface AuthFrontendConfig {
   resolveGrants?: (identity: OidcIdentity) => ResolvedGrants
   logger?: (level: "info" | "warn" | "error", message: string, meta?: unknown) => void
 }
+
+/**
+ * @deprecated Use {@link ClerkFrontendConfig}. Alias retained so older imports resolve unchanged.
+ */
+export type AuthFrontendConfig = ClerkFrontendConfig
 
 const STATE_COOKIE = "oaf_oauth_state"
 const SAML_RELAY_COOKIE = "oaf_saml_relay"
@@ -158,7 +194,11 @@ function queryOf(req: IncomingMessage): URLSearchParams {
 }
 
 function parseCookies(req: IncomingMessage): Record<string, string> {
-  const header = req.headers.cookie
+  // Guard against request objects that arrive without `headers` (e.g. a minimal/malformed
+  // request, or a non-Node caller constructing the object itself). Without this, the bare
+  // `req.headers.cookie` deref throws "Cannot read properties of undefined (reading 'cookie')"
+  // — the crash seen as "auth-frontend handler threw" in AuthFrontend logs.
+  const header = req?.headers?.cookie
   if (!header) return {}
   const out: Record<string, string> = {}
   for (const part of header.split(";")) {
@@ -346,10 +386,15 @@ interface ResolvedGoogleConfig {
   hostedDomain?: string
 }
 
-interface InternalConfig
-  extends Required<Omit<AuthFrontendConfig, "issuer" | "logger" | "google" | "resolveGrants" | "saml">> {
+interface InternalConfig {
   google: ResolvedGoogleConfig
   saml?: SamlSpConfig
+  allowedDomains: string[]
+  sessionSecret: string
+  sessionCookieName: string
+  sessionTtlSeconds: number
+  accessTokenTtlSeconds: number
+  cookieSecure: boolean
   issuer?: string
   resolveGrants: (identity: OidcIdentity) => ResolvedGrants
   log: (level: "info" | "warn" | "error", message: string, meta?: unknown) => void
@@ -359,15 +404,52 @@ interface InternalConfig
   googleRemediation: string
 }
 
-function normalizeConfig(config: AuthFrontendConfig): InternalConfig {
+/**
+ * Collapse the Clerk-idiomatic `connections[]` (and the deprecated `google`/`saml` shorthands)
+ * into the `{ google, saml }` pair the request handlers consume. The first connection of each
+ * strategy wins; an explicit `connections` entry takes precedence over the legacy shorthand.
+ */
+function normalizeConnections(config: ClerkFrontendConfig): {
+  google?: LegacyGoogleConfig
+  saml?: SamlSpConfig
+} {
+  const connections = config.connections ?? []
+  const googleConn = connections.find(
+    (c): c is GoogleConnectionConfig => c.strategy === "oauth_google",
+  )
+  const samlConn = connections.find((c): c is SamlConnectionConfig => c.strategy === "saml")
+
+  const google: LegacyGoogleConfig | undefined = googleConn
+    ? {
+        clientId: googleConn.clientId,
+        clientSecret: googleConn.clientSecret,
+        redirectUri: googleConn.redirectUri,
+        hostedDomain: googleConn.hostedDomain,
+      }
+    : config.google
+
+  let saml: SamlSpConfig | undefined
+  if (samlConn) {
+    const { strategy: _strategy, ...rest } = samlConn
+    saml = rest
+  } else {
+    saml = config.saml
+  }
+
+  return { google, saml }
+}
+
+function normalizeConfig(config: ClerkFrontendConfig): InternalConfig {
+  const { google: googleCfg, saml: samlCfg } = normalizeConnections(config)
+
   // Resolve the Google OAuth credentials the library was given: explicit config → generic
   // GOOGLE_CLIENT_ID/SECRET env. The library reads no app-specific file — the embedding app sources
   // the value and passes it in. We capture a secret-free remediation message rather than throwing,
   // so a missing credential surfaces as a clear 503 at request time (and the SAML path, which needs
   // no Google credential, still works).
   const resolved = loadGoogleCredentials({
-    clientId: config.google.clientId,
-    clientSecret: config.google.clientSecret,
+    clientId: googleCfg?.clientId,
+    clientSecret: googleCfg?.clientSecret,
   })
   const clientId = resolved.clientId
   const clientSecret = resolved.clientSecret
@@ -378,12 +460,12 @@ function normalizeConfig(config: AuthFrontendConfig): InternalConfig {
     google: {
       clientId,
       clientSecret,
-      redirectUri: config.google.redirectUri,
-      hostedDomain: config.google.hostedDomain,
+      redirectUri: googleCfg?.redirectUri ?? "",
+      hostedDomain: googleCfg?.hostedDomain,
     },
     googleConfigured,
     googleRemediation,
-    saml: config.saml?.enabled ? config.saml : undefined,
+    saml: samlCfg?.enabled ? samlCfg : undefined,
     allowedDomains: config.allowedDomains.map((d) => d.trim().toLowerCase()).filter(Boolean),
     sessionSecret: config.sessionSecret,
     issuer: config.issuer,
@@ -403,10 +485,14 @@ function normalizeConfig(config: AuthFrontendConfig): InternalConfig {
 
 /**
  * Create the embedded Frontend API middleware. Mount it where the SDK's `frontendApi` + `/v1`
- * resolves to — e.g. `app.use('/api/v1', createAuthFrontend(cfg))` with `frontendApi: '/api'`.
+ * resolves to — e.g. `app.use('/api/v1', createClerkFrontend(cfg))` with `frontendApi: '/api'`.
+ *
+ * Pass connections the Clerk-idiomatic way:
+ *   `createClerkFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
+ *     redirectUri }], allowedDomains, sessionSecret })`
  */
-export function createAuthFrontend(
-  config: AuthFrontendConfig,
+export function createClerkFrontend(
+  config: ClerkFrontendConfig,
 ): (req: IncomingMessage, res: ServerResponse, next?: (err?: unknown) => void) => void {
   const cfg = normalizeConfig(config)
   const secretKey = new TextEncoder().encode(cfg.sessionSecret)
@@ -414,7 +500,8 @@ export function createAuthFrontend(
   if (!cfg.googleConfigured) {
     // Loud at construction, but non-fatal: SAML still works, and the OIDC routes fail closed with
     // a clear 503 (see guardGoogleConfigured) instead of redirecting to Google with an empty
-    // client_id. The remediation text names the file path + JSON shape and contains no secrets.
+    // client_id. The remediation text is source-agnostic (it names no host file path — that is the
+    // embedding app's concern; see credentialsRemediation) and contains no secrets.
     cfg.log(
       "warn",
       "Google OAuth client is not configured; Google sign-in routes will return 503 until it is.\n" +
@@ -426,7 +513,6 @@ export function createAuthFrontend(
   }
 
   async function signSession(record: SessionRecord): Promise<string> {
-    const { SignJWT } = await jose()
     return await new SignJWT({
       email: record.email,
       name: record.name,
@@ -452,7 +538,6 @@ export function createAuthFrontend(
     const raw = parseCookies(req)[cfg.sessionCookieName]
     if (!raw) return null
     try {
-      const { jwtVerify } = await jose()
       const { payload } = await jwtVerify(raw, secretKey)
       const m = (payload.memberships as OrgMembership[] | undefined) ?? []
       return {
@@ -518,7 +603,6 @@ export function createAuthFrontend(
   }
 
   async function mintAccessToken(session: SessionRecord, orgId: string | null): Promise<string> {
-    const { SignJWT } = await jose()
     const g = grantsForOrg(session, orgId)
     return await new SignJWT({
       email: session.email,
@@ -546,7 +630,6 @@ export function createAuthFrontend(
     redirectUrlComplete: string
     domain?: string
   }): Promise<string> {
-    const { SignJWT } = await jose()
     return await new SignJWT(state as unknown as Record<string, unknown>)
       .setProtectedHeader({ alg: "HS256" })
       .setIssuedAt()
@@ -565,7 +648,6 @@ export function createAuthFrontend(
     const raw = parseCookies(req)[STATE_COOKIE]
     if (!raw) return null
     try {
-      const { jwtVerify } = await jose()
       const { payload } = await jwtVerify(raw, secretKey)
       return payload as unknown as {
         state: string
@@ -587,8 +669,9 @@ export function createAuthFrontend(
    * NOT redirect the browser to Google with an empty `client_id` (which yields a confusing Google
    * "Error 400: invalid_request — Missing required parameter: client_id" page). Instead return a
    * clear app-side 503 whose body carries the machine code `oauth_not_configured` and the
-   * secret-free remediation (file path + required JSON shape). Returns true when it handled the
-   * request (caller should stop). The SAML path does not call this — it needs no Google credential.
+   * secret-free, source-agnostic remediation (no host file path — that is the embedding app's
+   * concern). Returns true when it handled the request (caller should stop). The SAML path does not
+   * call this — it needs no Google credential.
    */
   function guardGoogleConfigured(res: ServerResponse): boolean {
     if (cfg.googleConfigured) return false
@@ -743,8 +826,7 @@ export function createAuthFrontend(
     // Verify the id_token signature against Google's JWKS and check the standard claims.
     let identity: OidcIdentity
     try {
-      const { jwtVerify } = await jose()
-      const jwks = await googleKeySet()
+      const jwks = googleKeySet()
       const { payload } = await jwtVerify(idToken, jwks, {
         issuer: GOOGLE_ISSUERS,
         audience: cfg.google.clientId,
@@ -852,6 +934,15 @@ export function createAuthFrontend(
     const body = await readJsonBody(req)
     const orgId = (body.org_id as string | undefined) ?? session.orgId
     const jwt = await mintAccessToken(session, orgId)
+    // Sliding session: re-issue the session cookie on each mint so an actively-used session rolls
+    // forward instead of hard-expiring at the absolute sessionTtl. Re-signed (not just a Max-Age
+    // bump) so the JWT `exp` advances in lockstep with the cookie. The client caches the access
+    // token (~60s TTL), so during active use this rolls roughly once a minute, not per request.
+    const sessionJwt = await signSession(session)
+    setCookie(res, cfg.sessionCookieName, sessionJwt, {
+      maxAgeSeconds: cfg.sessionTtlSeconds,
+      secure: cfg.cookieSecure,
+    })
     sendJson(res, 200, { jwt, object: "token" })
   }
 
@@ -911,7 +1002,6 @@ export function createAuthFrontend(
     redirectUrl: string
     redirectUrlComplete: string
   }): Promise<string> {
-    const { SignJWT } = await jose()
     return await new SignJWT(state as unknown as Record<string, unknown>)
       .setProtectedHeader({ alg: "HS256" })
       .setIssuedAt()
@@ -927,7 +1017,6 @@ export function createAuthFrontend(
     const raw = parseCookies(req)[SAML_RELAY_COOKIE]
     if (!raw) return null
     try {
-      const { jwtVerify } = await jose()
       const { payload } = await jwtVerify(raw, secretKey)
       return payload as unknown as {
         relayState: string
@@ -1079,3 +1168,10 @@ export function createAuthFrontend(
       })
   }
 }
+
+/**
+ * @deprecated Use {@link createClerkFrontend}. Alias retained so existing
+ * `createAuthFrontend({ google: { ... } })` call sites keep working unchanged (the deprecated
+ * `google`/`saml` shorthand is still accepted).
+ */
+export const createAuthFrontend = createClerkFrontend

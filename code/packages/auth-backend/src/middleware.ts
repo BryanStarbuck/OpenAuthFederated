@@ -1,6 +1,6 @@
 import { checkClaims } from "./permissions.js"
 import type { PermissionCheck, TokenClaims } from "./types.js"
-import { verifyToken } from "./verify.js"
+import { verifyToken, type VerifyTokenOptions } from "./verify.js"
 
 /**
  * Edge/route protection helpers — the backend counterpart to the `<Protect>` component and
@@ -118,7 +118,7 @@ function buildAuth(claims: TokenClaims | null): RequestAuth {
  */
 export async function getRequestAuth(
   req: AuthRequestLike,
-  opts: { issuer?: string } = {},
+  opts: VerifyTokenOptions = {},
 ): Promise<RequestAuth> {
   const token = bearerToken(req)
   if (!token) return buildAuth(null)
@@ -126,6 +126,80 @@ export async function getRequestAuth(
     return buildAuth(await verifyToken(token, opts))
   } catch {
     return buildAuth(null)
+  }
+}
+
+/**
+ * The Clerk-style **Auth object** (clerk.com/docs/reference/backend/types/auth-object) returned
+ * by `getAuth(req)` / `requestState.toAuth()`. Discriminated on `isAuthenticated`; signed-out
+ * requests carry `null` ids. `has()` mirrors the frontend `has()`; `getToken()` returns the
+ * verified Bearer token (embedded mode has no separate token-mint round trip).
+ */
+export interface AuthObject {
+  isAuthenticated: boolean
+  userId: string | null
+  sessionId: string | null
+  orgId: string | null
+  /** The full verified claim set (Clerk: `sessionClaims`). */
+  sessionClaims: TokenClaims | null
+  has(check?: PermissionCheck): boolean
+  getToken(): Promise<string | null>
+}
+
+/**
+ * The result of {@link authenticateRequest}, mirroring Clerk's `RequestState`
+ * (clerk.com/docs/reference/backend/authenticate-request). Call `toAuth()` for the Auth object.
+ */
+export interface RequestState {
+  isAuthenticated: boolean
+  status: "signed-in" | "signed-out"
+  token: string | null
+  tokenType: "session_token"
+  toAuth(): AuthObject
+}
+
+function buildAuthObject(claims: TokenClaims | null, token: string | null): AuthObject {
+  return {
+    isAuthenticated: Boolean(claims),
+    userId: (claims?.sub as string | undefined) ?? null,
+    sessionId: (claims?.sid as string | undefined) ?? null,
+    orgId: (claims?.org_id as string | undefined) ?? null,
+    sessionClaims: claims,
+    has(check: PermissionCheck = {}) {
+      return claims ? checkClaims(claims, check) : false
+    },
+    async getToken() {
+      return token
+    },
+  }
+}
+
+/**
+ * Authenticate an incoming request, mirroring Clerk's
+ * `clerkClient.authenticateRequest(request, options)`. Verifies the Bearer token (if any) and
+ * returns a {@link RequestState}; never throws on a missing/invalid token. Accepts either a Fetch
+ * `Request` or the minimal {@link AuthRequestLike} shape.
+ */
+export async function authenticateRequest(
+  req: AuthRequestLike,
+  opts: VerifyTokenOptions = {},
+): Promise<RequestState> {
+  const token = bearerToken(req)
+  let claims: TokenClaims | null = null
+  if (token) {
+    try {
+      claims = await verifyToken(token, opts)
+    } catch {
+      claims = null
+    }
+  }
+  const isAuthenticated = Boolean(claims)
+  return {
+    isAuthenticated,
+    status: isAuthenticated ? "signed-in" : "signed-out",
+    token,
+    tokenType: "session_token",
+    toAuth: () => buildAuthObject(claims, token),
   }
 }
 
@@ -146,7 +220,7 @@ export async function getRequestAuth(
  */
 export function authMiddleware(
   handler: (auth: () => RequestAuth, req: AuthRequestLike) => void | Promise<void>,
-  opts: { issuer?: string } = {},
+  opts: VerifyTokenOptions = {},
 ): (req: AuthRequestLike) => Promise<void> {
   return async (req) => {
     const resolved = await getRequestAuth(req, opts)

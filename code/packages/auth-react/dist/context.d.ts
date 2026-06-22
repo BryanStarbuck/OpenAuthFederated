@@ -15,7 +15,7 @@ interface AuthContextValue {
     connections: Connection[];
 }
 export declare function useAuthContext(): AuthContextValue;
-export interface AuthProviderProps {
+export interface ClerkProviderProps {
     children: ReactNode;
     /** Browser-safe publishable key (`pk_live_…` / `pk_test_…`). */
     publishableKey?: string;
@@ -32,5 +32,19 @@ export interface AuthProviderProps {
     /** Shared HS256 secret used to mint dev JWTs; must match the backend's AUTH_DEV_SHARED_SECRET. */
     devSharedSecret?: string;
 }
-export declare function AuthProvider(props: AuthProviderProps): ReactNode;
+/**
+ * @deprecated Use {@link ClerkProviderProps}. Alias retained for existing imports.
+ */
+export type AuthProviderProps = ClerkProviderProps;
+/**
+ * Root provider. Mirrors Clerk's `<ClerkProvider>` (clerk.com/docs/react/reference/components/
+ * clerk-provider): wrap the app, pass `publishableKey` / `frontendApi`, and the hooks/components
+ * become available. `<AuthProvider>` is kept as an alias.
+ */
+export declare function ClerkProvider(props: ClerkProviderProps): ReactNode;
+/**
+ * @deprecated Use {@link ClerkProvider}. Alias retained so existing `<AuthProvider>` usage keeps
+ * working unchanged.
+ */
+export declare const AuthProvider: typeof ClerkProvider;
 export {};

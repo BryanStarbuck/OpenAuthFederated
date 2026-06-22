@@ -1,7 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.createAuthFrontend = createAuthFrontend;
+exports.createAuthFrontend = void 0;
+exports.createClerkFrontend = createClerkFrontend;
 const node_crypto_1 = require("node:crypto");
+const jose_1 = require("jose");
 const credentials_js_1 = require("./credentials.js");
 const saml_js_1 = require("./saml.js");
 /**
@@ -31,17 +33,16 @@ const saml_js_1 = require("./saml.js");
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_ISSUERS = ["https://accounts.google.com", "accounts.google.com"];
-let josePromise = null;
-function jose() {
-    if (!josePromise)
-        josePromise = import("jose");
-    return josePromise;
-}
+// `jose` v5 is a dual ESM/CJS package (its package.json `exports` has a `require` entry), so the
+// static import above is safe from a CommonJS host (NestJS): NodeNext compiles it to
+// `require("jose")`, resolving to jose's CJS build. We deliberately do NOT use a dynamic
+// `import("jose")` — under any vm-based module loader without `importModuleDynamically` (notably
+// jest/ts-jest's CJS sandbox), a runtime `import()` throws
+// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG. Mirrors verify.ts.
 let googleJwks = null;
-async function googleKeySet() {
+function googleKeySet() {
     if (!googleJwks) {
-        const { createRemoteJWKSet } = await jose();
-        googleJwks = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
+        googleJwks = (0, jose_1.createRemoteJWKSet)(new URL("https://www.googleapis.com/oauth2/v3/certs"));
     }
     return googleJwks;
 }
@@ -71,7 +72,11 @@ function queryOf(req) {
     }
 }
 function parseCookies(req) {
-    const header = req.headers.cookie;
+    // Guard against request objects that arrive without `headers` (e.g. a minimal/malformed
+    // request, or a non-Node caller constructing the object itself). Without this, the bare
+    // `req.headers.cookie` deref throws "Cannot read properties of undefined (reading 'cookie')"
+    // — the crash seen as "auth-frontend handler threw" in AuthFrontend logs.
+    const header = req?.headers?.cookie;
     if (!header)
         return {};
     const out = {};
@@ -229,15 +234,43 @@ function defaultResolveGrants(identity) {
         memberships: [membership],
     };
 }
+/**
+ * Collapse the Clerk-idiomatic `connections[]` (and the deprecated `google`/`saml` shorthands)
+ * into the `{ google, saml }` pair the request handlers consume. The first connection of each
+ * strategy wins; an explicit `connections` entry takes precedence over the legacy shorthand.
+ */
+function normalizeConnections(config) {
+    const connections = config.connections ?? [];
+    const googleConn = connections.find((c) => c.strategy === "oauth_google");
+    const samlConn = connections.find((c) => c.strategy === "saml");
+    const google = googleConn
+        ? {
+            clientId: googleConn.clientId,
+            clientSecret: googleConn.clientSecret,
+            redirectUri: googleConn.redirectUri,
+            hostedDomain: googleConn.hostedDomain,
+        }
+        : config.google;
+    let saml;
+    if (samlConn) {
+        const { strategy: _strategy, ...rest } = samlConn;
+        saml = rest;
+    }
+    else {
+        saml = config.saml;
+    }
+    return { google, saml };
+}
 function normalizeConfig(config) {
+    const { google: googleCfg, saml: samlCfg } = normalizeConnections(config);
     // Resolve the Google OAuth credentials the library was given: explicit config → generic
     // GOOGLE_CLIENT_ID/SECRET env. The library reads no app-specific file — the embedding app sources
     // the value and passes it in. We capture a secret-free remediation message rather than throwing,
     // so a missing credential surfaces as a clear 503 at request time (and the SAML path, which needs
     // no Google credential, still works).
     const resolved = (0, credentials_js_1.loadGoogleCredentials)({
-        clientId: config.google.clientId,
-        clientSecret: config.google.clientSecret,
+        clientId: googleCfg?.clientId,
+        clientSecret: googleCfg?.clientSecret,
     });
     const clientId = resolved.clientId;
     const clientSecret = resolved.clientSecret;
@@ -247,12 +280,12 @@ function normalizeConfig(config) {
         google: {
             clientId,
             clientSecret,
-            redirectUri: config.google.redirectUri,
-            hostedDomain: config.google.hostedDomain,
+            redirectUri: googleCfg?.redirectUri ?? "",
+            hostedDomain: googleCfg?.hostedDomain,
         },
         googleConfigured,
         googleRemediation,
-        saml: config.saml?.enabled ? config.saml : undefined,
+        saml: samlCfg?.enabled ? samlCfg : undefined,
         allowedDomains: config.allowedDomains.map((d) => d.trim().toLowerCase()).filter(Boolean),
         sessionSecret: config.sessionSecret,
         issuer: config.issuer,
@@ -271,15 +304,20 @@ function normalizeConfig(config) {
 }
 /**
  * Create the embedded Frontend API middleware. Mount it where the SDK's `frontendApi` + `/v1`
- * resolves to — e.g. `app.use('/api/v1', createAuthFrontend(cfg))` with `frontendApi: '/api'`.
+ * resolves to — e.g. `app.use('/api/v1', createClerkFrontend(cfg))` with `frontendApi: '/api'`.
+ *
+ * Pass connections the Clerk-idiomatic way:
+ *   `createClerkFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
+ *     redirectUri }], allowedDomains, sessionSecret })`
  */
-function createAuthFrontend(config) {
+function createClerkFrontend(config) {
     const cfg = normalizeConfig(config);
     const secretKey = new TextEncoder().encode(cfg.sessionSecret);
     if (!cfg.googleConfigured) {
         // Loud at construction, but non-fatal: SAML still works, and the OIDC routes fail closed with
         // a clear 503 (see guardGoogleConfigured) instead of redirecting to Google with an empty
-        // client_id. The remediation text names the file path + JSON shape and contains no secrets.
+        // client_id. The remediation text is source-agnostic (it names no host file path — that is the
+        // embedding app's concern; see credentialsRemediation) and contains no secrets.
         cfg.log("warn", "Google OAuth client is not configured; Google sign-in routes will return 503 until it is.\n" +
             cfg.googleRemediation);
     }
@@ -287,8 +325,7 @@ function createAuthFrontend(config) {
         cfg.log("warn", "AUTH_SESSION_SECRET is unset or default — set a strong secret before production.");
     }
     async function signSession(record) {
-        const { SignJWT } = await jose();
-        return await new SignJWT({
+        return await new jose_1.SignJWT({
             email: record.email,
             name: record.name,
             first_name: record.firstName,
@@ -313,8 +350,7 @@ function createAuthFrontend(config) {
         if (!raw)
             return null;
         try {
-            const { jwtVerify } = await jose();
-            const { payload } = await jwtVerify(raw, secretKey);
+            const { payload } = await (0, jose_1.jwtVerify)(raw, secretKey);
             const m = payload.memberships ?? [];
             return {
                 sid: payload.sid ?? "",
@@ -374,9 +410,8 @@ function createAuthFrontend(config) {
         return { roles: session.roles, permissions: session.permissions, orgId: session.orgId };
     }
     async function mintAccessToken(session, orgId) {
-        const { SignJWT } = await jose();
         const g = grantsForOrg(session, orgId);
-        return await new SignJWT({
+        return await new jose_1.SignJWT({
             email: session.email,
             sid: session.sid,
             org_id: g.orgId,
@@ -393,8 +428,7 @@ function createAuthFrontend(config) {
     }
     // --- OAuth state (CSRF + PKCE + return targets) carried in a short-lived signed cookie ----
     async function signState(state) {
-        const { SignJWT } = await jose();
-        return await new SignJWT(state)
+        return await new jose_1.SignJWT(state)
             .setProtectedHeader({ alg: "HS256" })
             .setIssuedAt()
             .setExpirationTime(`${STATE_TTL_SECONDS}s`)
@@ -405,8 +439,7 @@ function createAuthFrontend(config) {
         if (!raw)
             return null;
         try {
-            const { jwtVerify } = await jose();
-            const { payload } = await jwtVerify(raw, secretKey);
+            const { payload } = await (0, jose_1.jwtVerify)(raw, secretKey);
             return payload;
         }
         catch {
@@ -419,8 +452,9 @@ function createAuthFrontend(config) {
      * NOT redirect the browser to Google with an empty `client_id` (which yields a confusing Google
      * "Error 400: invalid_request — Missing required parameter: client_id" page). Instead return a
      * clear app-side 503 whose body carries the machine code `oauth_not_configured` and the
-     * secret-free remediation (file path + required JSON shape). Returns true when it handled the
-     * request (caller should stop). The SAML path does not call this — it needs no Google credential.
+     * secret-free, source-agnostic remediation (no host file path — that is the embedding app's
+     * concern). Returns true when it handled the request (caller should stop). The SAML path does not
+     * call this — it needs no Google credential.
      */
     function guardGoogleConfigured(res) {
         if (cfg.googleConfigured)
@@ -560,9 +594,8 @@ function createAuthFrontend(config) {
         // Verify the id_token signature against Google's JWKS and check the standard claims.
         let identity;
         try {
-            const { jwtVerify } = await jose();
-            const jwks = await googleKeySet();
-            const { payload } = await jwtVerify(idToken, jwks, {
+            const jwks = googleKeySet();
+            const { payload } = await (0, jose_1.jwtVerify)(idToken, jwks, {
                 issuer: GOOGLE_ISSUERS,
                 audience: cfg.google.clientId,
             });
@@ -659,6 +692,15 @@ function createAuthFrontend(config) {
         const body = await readJsonBody(req);
         const orgId = body.org_id ?? session.orgId;
         const jwt = await mintAccessToken(session, orgId);
+        // Sliding session: re-issue the session cookie on each mint so an actively-used session rolls
+        // forward instead of hard-expiring at the absolute sessionTtl. Re-signed (not just a Max-Age
+        // bump) so the JWT `exp` advances in lockstep with the cookie. The client caches the access
+        // token (~60s TTL), so during active use this rolls roughly once a minute, not per request.
+        const sessionJwt = await signSession(session);
+        setCookie(res, cfg.sessionCookieName, sessionJwt, {
+            maxAgeSeconds: cfg.sessionTtlSeconds,
+            secure: cfg.cookieSecure,
+        });
         sendJson(res, 200, { jwt, object: "token" });
     }
     async function handleTouch(req, res) {
@@ -712,8 +754,7 @@ function createAuthFrontend(config) {
         return samlClient;
     }
     async function signSamlRelay(state) {
-        const { SignJWT } = await jose();
-        return await new SignJWT(state)
+        return await new jose_1.SignJWT(state)
             .setProtectedHeader({ alg: "HS256" })
             .setIssuedAt()
             .setExpirationTime(`${STATE_TTL_SECONDS}s`)
@@ -724,8 +765,7 @@ function createAuthFrontend(config) {
         if (!raw)
             return null;
         try {
-            const { jwtVerify } = await jose();
-            const { payload } = await jwtVerify(raw, secretKey);
+            const { payload } = await (0, jose_1.jwtVerify)(raw, secretKey);
             return payload;
         }
         catch {
@@ -872,4 +912,10 @@ function createAuthFrontend(config) {
         });
     };
 }
+/**
+ * @deprecated Use {@link createClerkFrontend}. Alias retained so existing
+ * `createAuthFrontend({ google: { ... } })` call sites keep working unchanged (the deprecated
+ * `google`/`saml` shorthand is still accepted).
+ */
+exports.createAuthFrontend = createClerkFrontend;
 //# sourceMappingURL=frontend.js.map

@@ -3,12 +3,13 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.verifyToken = verifyToken;
 exports.verifyMachineToken = verifyMachineToken;
 exports.hasScope = hasScope;
-let josePromise = null;
-function jose() {
-    if (!josePromise)
-        josePromise = import("jose");
-    return josePromise;
-}
+const jose_1 = require("jose");
+// `jose` v5 is a dual ESM/CJS package (its package.json `exports` has a `require` entry), so a
+// plain static import is safe from a CommonJS host (NestJS): NodeNext compiles this to
+// `require("jose")`, which resolves to jose's CJS build. We deliberately do NOT use a dynamic
+// `import("jose")` here — under any vm-based module loader without `importModuleDynamically`
+// (notably jest/ts-jest's CJS sandbox), a runtime `import()` throws
+// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG.
 /** Per-issuer remote JWKS set, cached so verification is networkless after the first call. */
 const jwksCache = new Map();
 function isDevMode() {
@@ -45,9 +46,13 @@ function symmetricSecret() {
 async function verifyToken(token, opts = {}) {
     if (!token)
         throw new Error("verifyToken: empty token");
-    const { jwtVerify, createRemoteJWKSet } = await jose();
     if (isDevMode() || isEmbedded()) {
-        const { payload } = await jwtVerify(token, symmetricSecret());
+        const verifyOpts = {};
+        if (opts.audience !== undefined)
+            verifyOpts.audience = opts.audience;
+        if (opts.clockSkewInMs !== undefined)
+            verifyOpts.clockTolerance = Math.ceil(opts.clockSkewInMs / 1000);
+        const { payload } = await (0, jose_1.jwtVerify)(token, symmetricSecret(), verifyOpts);
         return payload;
     }
     const issuer = opts.issuer ?? process.env.AUTH_JWT_ISSUER;
@@ -56,10 +61,15 @@ async function verifyToken(token, opts = {}) {
     let jwks = jwksCache.get(issuer);
     if (!jwks) {
         const url = new URL(`${issuer.replace(/\/+$/, "")}/.well-known/jwks.json`);
-        jwks = createRemoteJWKSet(url);
+        jwks = (0, jose_1.createRemoteJWKSet)(url);
         jwksCache.set(issuer, jwks);
     }
-    const { payload } = await jwtVerify(token, jwks, { issuer });
+    const jwksOpts = { issuer };
+    if (opts.audience !== undefined)
+        jwksOpts.audience = opts.audience;
+    if (opts.clockSkewInMs !== undefined)
+        jwksOpts.clockTolerance = Math.ceil(opts.clockSkewInMs / 1000);
+    const { payload } = await (0, jose_1.jwtVerify)(token, jwks, jwksOpts);
     return payload;
 }
 /**

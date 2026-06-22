@@ -71,6 +71,9 @@ export declare class RealAuthCore extends BaseCore {
     private readonly publishableKey;
     private readonly allowedDomains;
     private activeSessionId;
+    private token;
+    private tokenExp;
+    private inflight;
     constructor(frontendApi: string, publishableKey: string, allowedDomains: string[]);
     private base;
     private headers;
@@ -83,6 +86,10 @@ export declare class RealAuthCore extends BaseCore {
     getToken(opts?: {
         template?: string;
     }): Promise<string | null>;
+    /** POST to the Frontend API to mint an access JWT. Caches the default (non-templated) token. */
+    private mintToken;
+    /** Drop the cached access token so the next getToken() re-mints with current grants. */
+    private clearTokenCache;
     setActiveOrg(orgId: string | null): Promise<void>;
     reverify(): Promise<void>;
     signOut(opts?: {

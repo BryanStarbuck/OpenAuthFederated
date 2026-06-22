@@ -1,7 +1,7 @@
 {
   "name": "@auth/backend",
-  "version": "0.2.1",
-  "description": "OpenAuthFederated Backend SDK — a typed authClient (verifyToken, users, sessions, organizations) authorized with a secret key.",
+  "version": "0.3.0",
+  "description": "OpenAuthFederated Backend SDK — a Clerk-compatible drop-in: createClerkClient, clerkClient (users/sessions/organizations), authenticateRequest, verifyToken, clerkMiddleware/requireAuth/getAuth, and the embedded createClerkFrontend.",
   "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

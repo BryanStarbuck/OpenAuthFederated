@@ -5,11 +5,16 @@ const AuthContext = createContext(null);
 export function useAuthContext() {
     const ctx = useContext(AuthContext);
     if (!ctx) {
-        throw new Error("OpenAuthFederated: hooks and components must be used inside <AuthProvider>.");
+        throw new Error("OpenAuthFederated: hooks and components must be used inside <ClerkProvider>.");
     }
     return ctx;
 }
-export function AuthProvider(props) {
+/**
+ * Root provider. Mirrors Clerk's `<ClerkProvider>` (clerk.com/docs/react/reference/components/
+ * clerk-provider): wrap the app, pass `publishableKey` / `frontendApi`, and the hooks/components
+ * become available. `<AuthProvider>` is kept as an alias.
+ */
+export function ClerkProvider(props) {
     const coreRef = useRef(null);
     if (!coreRef.current) {
         const domains = props.allowedDomains && props.allowedDomains.length > 0
@@ -57,4 +62,9 @@ export function AuthProvider(props) {
     ]);
     return _jsx(AuthContext.Provider, { value: value, children: props.children });
 }
+/**
+ * @deprecated Use {@link ClerkProvider}. Alias retained so existing `<AuthProvider>` usage keeps
+ * working unchanged.
+ */
+export const AuthProvider = ClerkProvider;
 //# sourceMappingURL=context.js.map

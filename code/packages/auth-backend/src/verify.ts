@@ -1,16 +1,16 @@
+import { createRemoteJWKSet, jwtVerify } from "jose"
+
 import type { MachineClaims, TokenClaims } from "./types.js"
 
-// `jose` is ESM-only. Loading it through a real dynamic import() keeps this package
-// consumable from a CommonJS host (NestJS) — NodeNext preserves import() verbatim.
-type Jose = typeof import("jose")
-let josePromise: Promise<Jose> | null = null
-function jose(): Promise<Jose> {
-  if (!josePromise) josePromise = import("jose")
-  return josePromise
-}
+// `jose` v5 is a dual ESM/CJS package (its package.json `exports` has a `require` entry), so a
+// plain static import is safe from a CommonJS host (NestJS): NodeNext compiles this to
+// `require("jose")`, which resolves to jose's CJS build. We deliberately do NOT use a dynamic
+// `import("jose")` here — under any vm-based module loader without `importModuleDynamically`
+// (notably jest/ts-jest's CJS sandbox), a runtime `import()` throws
+// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG.
 
 /** Per-issuer remote JWKS set, cached so verification is networkless after the first call. */
-const jwksCache = new Map<string, ReturnType<Jose["createRemoteJWKSet"]>>()
+const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>()
 
 function isDevMode(): boolean {
   return process.env.AUTH_DEV_MODE === "true"
@@ -23,6 +23,27 @@ function isDevMode(): boolean {
  */
 function isEmbedded(): boolean {
   return process.env.AUTH_EMBEDDED === "true"
+}
+
+/**
+ * Options for {@link verifyToken}, mirroring Clerk's `verifyToken(token, options)`
+ * (clerk.com/docs/reference/backend/verify-token). Embedded mode honours `issuer`; the remaining
+ * Clerk keys are accepted for drop-in source-compatibility and applied where they have meaning in
+ * networkless verification.
+ */
+export interface VerifyTokenOptions {
+  /** Expected token issuer (`iss`). Defaults to AUTH_JWT_ISSUER. */
+  issuer?: string
+  /** Expected audience (`aud`). Accepted for Clerk parity. */
+  audience?: string | string[]
+  /** Authorized parties (`azp`) accepted on the token. Accepted for Clerk parity. */
+  authorizedParties?: string[]
+  /** Clock-skew tolerance in ms (Clerk default 5000). Accepted for Clerk parity. */
+  clockSkewInMs?: number
+  /** JWKS public key for networkless RS256 verification. Accepted for Clerk parity. */
+  jwtKey?: string
+  /** Secret key override. Accepted for Clerk parity. */
+  secretKey?: string
 }
 
 /** The shared HS256 secret for symmetric (dev / embedded) verification. */
@@ -48,13 +69,15 @@ function symmetricSecret(): Uint8Array {
  */
 export async function verifyToken(
   token: string,
-  opts: { issuer?: string } = {},
+  opts: VerifyTokenOptions = {},
 ): Promise<TokenClaims> {
   if (!token) throw new Error("verifyToken: empty token")
-  const { jwtVerify, createRemoteJWKSet } = await jose()
 
   if (isDevMode() || isEmbedded()) {
-    const { payload } = await jwtVerify(token, symmetricSecret())
+    const verifyOpts: Parameters<typeof jwtVerify>[2] = {}
+    if (opts.audience !== undefined) verifyOpts.audience = opts.audience
+    if (opts.clockSkewInMs !== undefined) verifyOpts.clockTolerance = Math.ceil(opts.clockSkewInMs / 1000)
+    const { payload } = await jwtVerify(token, symmetricSecret(), verifyOpts)
     return payload as TokenClaims
   }
 
@@ -67,7 +90,10 @@ export async function verifyToken(
     jwks = createRemoteJWKSet(url)
     jwksCache.set(issuer, jwks)
   }
-  const { payload } = await jwtVerify(token, jwks, { issuer })
+  const jwksOpts: Parameters<typeof jwtVerify>[2] = { issuer }
+  if (opts.audience !== undefined) jwksOpts.audience = opts.audience
+  if (opts.clockSkewInMs !== undefined) jwksOpts.clockTolerance = Math.ceil(opts.clockSkewInMs / 1000)
+  const { payload } = await jwtVerify(token, jwks, jwksOpts)
   return payload as TokenClaims
 }
 
@@ -79,7 +105,7 @@ export async function verifyToken(
  */
 export async function verifyMachineToken(
   token: string,
-  opts: { issuer?: string } = {},
+  opts: VerifyTokenOptions = {},
 ): Promise<MachineClaims> {
   const claims = (await verifyToken(token, opts)) as unknown as MachineClaims
   if (claims.token_type !== "machine") {

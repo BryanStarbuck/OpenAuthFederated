@@ -4,6 +4,7 @@ exports.AuthError = void 0;
 exports.createRouteMatcher = createRouteMatcher;
 exports.bearerToken = bearerToken;
 exports.getRequestAuth = getRequestAuth;
+exports.authenticateRequest = authenticateRequest;
 exports.authMiddleware = authMiddleware;
 const permissions_js_1 = require("./permissions.js");
 const verify_js_1 = require("./verify.js");
@@ -95,6 +96,47 @@ async function getRequestAuth(req, opts = {}) {
     catch {
         return buildAuth(null);
     }
+}
+function buildAuthObject(claims, token) {
+    return {
+        isAuthenticated: Boolean(claims),
+        userId: claims?.sub ?? null,
+        sessionId: claims?.sid ?? null,
+        orgId: claims?.org_id ?? null,
+        sessionClaims: claims,
+        has(check = {}) {
+            return claims ? (0, permissions_js_1.checkClaims)(claims, check) : false;
+        },
+        async getToken() {
+            return token;
+        },
+    };
+}
+/**
+ * Authenticate an incoming request, mirroring Clerk's
+ * `clerkClient.authenticateRequest(request, options)`. Verifies the Bearer token (if any) and
+ * returns a {@link RequestState}; never throws on a missing/invalid token. Accepts either a Fetch
+ * `Request` or the minimal {@link AuthRequestLike} shape.
+ */
+async function authenticateRequest(req, opts = {}) {
+    const token = bearerToken(req);
+    let claims = null;
+    if (token) {
+        try {
+            claims = await (0, verify_js_1.verifyToken)(token, opts);
+        }
+        catch {
+            claims = null;
+        }
+    }
+    const isAuthenticated = Boolean(claims);
+    return {
+        isAuthenticated,
+        status: isAuthenticated ? "signed-in" : "signed-out",
+        token,
+        tokenType: "session_token",
+        toAuth: () => buildAuthObject(claims, token),
+    };
 }
 /**
  * Compose route protection like the spec's Next.js example (§9):

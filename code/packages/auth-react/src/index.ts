@@ -1,5 +1,6 @@
-export { AuthProvider, useAuthContext } from "./context.js"
-export type { AuthProviderProps } from "./context.js"
+// Root provider. `ClerkProvider` is the Clerk-exact name; `AuthProvider` is the kept alias.
+export { ClerkProvider, AuthProvider, useAuthContext } from "./context.js"
+export type { ClerkProviderProps, AuthProviderProps } from "./context.js"
 export {
   useAuth,
   useUser,
@@ -10,6 +11,8 @@ export {
   useOrganization,
   useOrganizationList,
   useReverification,
+  // `useClerk` is the Clerk-exact name; `useOpenAuth` is the kept alias.
+  useClerk,
   useOpenAuth,
 } from "./hooks.js"
 export {
@@ -33,6 +36,9 @@ export {
   AuthLoading,
   AuthDegraded,
   AuthFailed,
+  // Clerk-named aliases for the load-state gates.
+  AuthLoaded as ClerkLoaded,
+  AuthLoading as ClerkLoading,
   OrganizationSwitcher,
   OrganizationList,
   OrganizationProfile,

@@ -1,7 +1,7 @@
 {
   "name": "@auth/react",
-  "version": "0.1.0",
-  "description": "OpenAuthFederated React SDK — AuthProvider, hooks, and drop-in federated sign-in components for a React SPA.",
+  "version": "0.2.0",
+  "description": "OpenAuthFederated React SDK — a Clerk-compatible drop-in: ClerkProvider, useAuth/useUser/useClerk hooks, and SignIn/SignedIn/Protect/UserButton components for a React SPA.",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",

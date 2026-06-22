@@ -1,14 +1,23 @@
 import { useCallback } from "react";
 import { useAuthContext } from "./context.js";
-/** Auth state + tokens without hydrating the full profile. */
+/** Auth state + tokens without hydrating the full profile. Mirrors Clerk's `useAuth()`. */
 export function useAuth() {
     const { core, snapshot, isLoaded } = useAuthContext();
+    const activeMembership = snapshot.memberships.find((m) => m.organization.id === snapshot.orgId) ?? null;
     return {
         isLoaded,
         isSignedIn: snapshot.isSignedIn,
         userId: snapshot.userId,
         sessionId: snapshot.sessionId,
         orgId: snapshot.orgId,
+        /** Active-org role (Clerk parity). Null when there is no active org. */
+        orgRole: activeMembership?.role ?? null,
+        /** Active-org slug (Clerk parity). Null when there is no active org. */
+        orgSlug: activeMembership?.organization.slug ?? null,
+        /** Raw session claims are not exposed to the browser in embedded mode; always null. */
+        sessionClaims: null,
+        /** Impersonation actor (Clerk parity); unused here, always null. */
+        actor: null,
         getToken: (opts) => core.getToken(opts),
         has: (check) => core.has(check),
         signOut: (opts) => core.signOut(opts),
@@ -34,11 +43,17 @@ export function useSession() {
 }
 /** All sessions for the current user (the dev mock surfaces only the active one). */
 export function useSessionList() {
-    const { snapshot, isLoaded } = useAuthContext();
+    const { core, snapshot, isLoaded } = useAuthContext();
     const sessions = snapshot.isSignedIn
         ? [{ id: snapshot.sessionId, status: "active" }]
         : [];
-    return { isLoaded, sessions };
+    // Clerk's useSessionList exposes setActive({ session?, organization? }). Single-session here,
+    // so a session switch is a no-op; an organization switch routes to the tab-scoped active org.
+    const setActive = useCallback(async (p) => {
+        if (p.organization !== undefined)
+            await core.setActiveOrg(p.organization);
+    }, [core]);
+    return { isLoaded, sessions, setActive };
 }
 /** Drive a custom sign-in flow against the upstream IdP. */
 export function useSignIn() {
@@ -91,8 +106,12 @@ export function useReverification(action, opts = {}) {
         return await action(...args);
     }, [core, action, maxAge]);
 }
-/** Imperative client object for actions not covered by the focused hooks. */
-export function useOpenAuth() {
+/**
+ * Imperative client object for actions not covered by the focused hooks. Mirrors Clerk's
+ * `useClerk()` — the handle to imperative methods (`setActive`, `signOut`) plus the current
+ * user/session/organization snapshot.
+ */
+export function useClerk() {
     const { core, snapshot, isLoaded } = useAuthContext();
     const organization = snapshot.memberships.find((m) => m.organization.id === snapshot.orgId)?.organization ?? null;
     return {
@@ -104,4 +123,9 @@ export function useOpenAuth() {
         signOut: (opts) => core.signOut(opts),
     };
 }
+/**
+ * @deprecated Use {@link useClerk}. Alias retained so existing `useOpenAuth()` call sites keep
+ * working unchanged.
+ */
+export const useOpenAuth = useClerk;
 //# sourceMappingURL=hooks.js.map
