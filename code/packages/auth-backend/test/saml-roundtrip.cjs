@@ -68,17 +68,21 @@ function signedResponse({ email = "bryan@act3ai.com" } = {}) {
 const b64 = (xml) => Buffer.from(xml, "utf8").toString("base64")
 
 ;(async () => {
-  const client = buildSamlClient({
+  const cfg = {
     enabled: true,
     idpEntityId: IDP_ENTITY,
     idpSsoUrl: "https://accounts.google.com/o/saml2/idp?idpid=TESTIDP",
     idpCert: certPem,
     spEntityId: SP_ENTITY,
     acsUrl: ACS,
-  })
+    // The reference IdP (Google) signs the assertion; treat a valid signed assertion as a verified
+    // email for this test (the new default is fail-closed unless opted in).
+    trustAssertedEmailVerified: true,
+  }
+  const client = buildSamlClient(cfg)
 
   // 1. Valid signed assertion → mapped identity.
-  const ok = await validateSamlAcs(client, { SAMLResponse: b64(signedResponse()), RelayState: "x" })
+  const ok = await validateSamlAcs(client, { SAMLResponse: b64(signedResponse()), RelayState: "x" }, cfg)
   assert.strictEqual(ok.identity.email, "bryan@act3ai.com", "email maps from NameID")
   assert.strictEqual(ok.identity.givenName, "Bryan", "givenName maps from attribute")
   assert.strictEqual(ok.identity.familyName, "Starbuck", "familyName maps from attribute")
@@ -88,23 +92,24 @@ const b64 = (xml) => Buffer.from(xml, "utf8").toString("base64")
   // 2. Tampered assertion (signature no longer matches) → rejected.
   const tampered = b64(signedResponse().replace("bryan@act3ai.com", "attacker@evil.com"))
   await assert.rejects(
-    () => validateSamlAcs(client, { SAMLResponse: tampered, RelayState: "x" }),
+    () => validateSamlAcs(client, { SAMLResponse: tampered, RelayState: "x" }, cfg),
     /signature/i,
     "tampered assertion must be rejected",
   )
   console.log("✅ tampered assertion rejected")
 
   // 3. Wrong audience (validator configured for a different SP) → rejected.
-  const wrongAud = buildSamlClient({
+  const wrongCfg = {
     enabled: true,
     idpEntityId: IDP_ENTITY,
     idpSsoUrl: "x",
     idpCert: certPem,
     spEntityId: "https://some-other-sp.example/saml",
     acsUrl: ACS,
-  })
+  }
+  const wrongAud = buildSamlClient(wrongCfg)
   await assert.rejects(
-    () => validateSamlAcs(wrongAud, { SAMLResponse: b64(signedResponse()), RelayState: "x" }),
+    () => validateSamlAcs(wrongAud, { SAMLResponse: b64(signedResponse()), RelayState: "x" }, wrongCfg),
     /audience/i,
     "wrong audience must be rejected",
   )

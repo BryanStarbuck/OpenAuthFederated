@@ -24,6 +24,7 @@ export interface ExpressLikeRequest extends AuthRequestLike {
 /** The minimal Express-like response these helpers write to when rejecting a request. */
 export interface ExpressLikeResponse {
     statusCode?: number;
+    headersSent?: boolean;
     setHeader(name: string, value: string): void;
     status?(code: number): ExpressLikeResponse;
     json?(body: unknown): unknown;

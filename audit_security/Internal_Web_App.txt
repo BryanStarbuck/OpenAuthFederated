@@ -1,0 +1,701 @@
+Internal Web App
+Scope analyzed:
+  /Users/bryan/BGit/all/app/code/packages/backend
+  /Users/bryan/BGit/all/app/code/packages/frontend
+  /Users/bryan/BGit/all/app/cli
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend  (library, as consumed)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react     (library, as consumed)
+Summary: 19 security findings in how the Internal Web App consumes OpenAuthFederated and in its own auth-adjacent code.
+
+
+TABLE OF CONTENTS
+1. Hardcoded shared HS256 secret lets anyone forge session/access tokens  [CRITICAL]
+2. Backend forces AUTH_EMBEDDED=true and a fallback secret at boot, even in production  [CRITICAL]
+3. Server-side session revocation / offboarding silently does nothing (wrong store)  [CRITICAL]
+4. SAML accepts assertion without requiring the Response signature, with replay protection disabled  [HIGH]
+5. SAML sign-in trusts email as verified unconditionally  [HIGH]
+6. Effectively permanent sessions: ~10-year TTL, no idle timeout, no sid rotation  [HIGH]
+7. State-changing session endpoints are cookie-authenticated with no CSRF defense  [HIGH]
+8. CORS reflects any origin with credentials when CORS_ORIGINS is unset  [HIGH]
+9. Dev-auth mock can be force-enabled and mints fully-privileged fake employee tokens  [HIGH]
+10. Cookies are not Secure and are SameSite=Lax outside production  [MEDIUM]
+11. Public unauthenticated client-error sink enables log injection / log flooding  [MEDIUM]
+12. Webhook endpoint accepts unsigned requests whenever NODE_ENV != production  [MEDIUM]
+13. No security response headers (HSTS, CSP, X-Content-Type-Options, etc.)  [MEDIUM]
+14. PermissionsGuard is opt-in per route; default posture is authenticated-but-unauthorized-allowed  [MEDIUM]
+15. Open-redirect surface in the embedded redirect_url handling reachable by this app  [MEDIUM]
+16. /health/auth-config publicly leaks credentials-file presence  [LOW]
+17. Error envelope and logs echo request path / domain values without neutralization  [LOW]
+18. Access-token grants are sourced from client-supplied org_id without re-checking membership on the mint path  [LOW]
+19. Auth library is consumed via a local filesystem link with unpinned auth-critical deps  [LOW]
+
+
+DETAILS
+====================================================================
+1. Hardcoded shared HS256 secret lets anyone forge session/access tokens  [CRITICAL]
+
+SITUATION / PROBLEM:
+The string "local-dev-shared-secret-change-me" is committed in the frontend source and is also the backend's default value for AUTH_SESSION_SECRET. In embedded mode the SAME HS256 secret signs and verifies BOTH the session cookie and the short-lived access tokens. Anyone who reads the repository knows the secret and can mint a valid access token for any user/roles/permissions.
+
+ROOT CAUSE:
+A "dev convenience" shared secret was baked into source (frontend resolveDevAuth.ts) and wired as the backend fallback (auth-frontend.ts) so the dev mock's mint-secret equals the backend's verify-secret. The library's embedded verifier only rejects the one well-known literal "dev-shared-secret"; this app deliberately chose a DIFFERENT literal precisely to slip past that guard, so the library never refuses it.
+
+SCENARIO:
+An attacker clones the repo (or reads the frontend bundle), forges an HS256 JWT with alg HS256, sub=user_x, roles=["org:admin"], permissions=["*:write","org:sys_memberships:manage"], iss matching the configured issuer, and a 1-minute exp signed with the committed secret. They send it as a Bearer token to any protected route. AuthFederatedStrategy verifies it against the same secret and authorizes the request with admin permissions.
+
+RISK:
+Full authentication and authorization bypass. An attacker becomes any employee with any role/permission. High impact; trivial likelihood if the secret is not overridden in the deployment env.
+
+REPRO STEPS:
+1. Read LOCAL_DEV_SHARED_SECRET from the frontend source.
+2. Sign an HS256 JWT carrying sub, email on an allowed domain, roles, permissions, and a short exp.
+3. Call GET /api/auth/me (and any RBAC-gated route) with Authorization: Bearer <forged>.
+4. Observe a 200 with the forged identity / permissions.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/frontend/src/lib/resolveDevAuth.ts (line ~23)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/auth-frontend.ts (lines 66-71)
+  /Users/bryan/BGit/all/app/code/packages/frontend/src/lib/devAuthCore.ts (lines 232-265)
+  /Users/bryan/BGit/all/app/code/packages/frontend/src/main.tsx (lines 55-57)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts (lines 57-66, 88-94)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 549-587, 717-733)
+
+CALL COUNT:
+3 call sites set/consume the literal: the frontend constant export (resolveDevAuth.ts), the backend fallback assignment (auth-frontend.ts lines 66-71), and the dev core mint (devAuthCore.ts).
+
+FIX:
+* Root cause being fixed: a guessable signing secret shipped in source and used as a runtime default.
+* How: refuse to start unless AUTH_SESSION_SECRET is explicitly provided and is high-entropy; never embed any secret in source.
+* Structure of the fix: move secret resolution to a fail-closed loader; reuse the library loadOrCreateSecret for non-shared deployments.
+* Files changed and how:
+  - auth-frontend.ts: delete the "local-dev-shared-secret-change-me" fallback; throw at boot when AUTH_SESSION_SECRET is unset/weak; stop unconditionally setting process.env.AUTH_SESSION_SECRET to a default.
+  - resolveDevAuth.ts / devAuthCore.ts / main.tsx: remove the committed constant; require the dev secret to be injected via env only on localhost, never compiled in.
+  - Library frontend.ts/verify.ts: extend the rejected-default list to any low-entropy value (length/entropy check) rather than matching a single literal.
+
+
+====================================================================
+2. Backend forces AUTH_EMBEDDED=true and a fallback secret at boot, even in production  [CRITICAL]
+
+SITUATION / PROBLEM:
+buildAuthFrontend() sets process.env.AUTH_EMBEDDED = "true" and process.env.AUTH_SESSION_SECRET to a resolved value whenever those are unset, at every boot, with no production guard. This pins the whole app into embedded HS256 mode (symmetric secret can both mint and verify) instead of asymmetric JWKS verification, and guarantees a secret is always present — including the hardcoded fallback from Finding 1.
+
+ROOT CAUSE:
+Bootstrap-time mutation of process.env to make mint-secret === verify-secret "work out of the box". There is no branch that, in production, demands an explicit strong secret or switches to JWKS/RS256.
+
+SCENARIO:
+The app is deployed with neither AUTH_SESSION_SECRET nor AUTH_EMBEDDED set. At boot the code sets AUTH_EMBEDDED=true and AUTH_SESSION_SECRET=local-dev-shared-secret-change-me. The production app now verifies forged HS256 tokens (Finding 1) and never reaches the safer JWKS path.
+
+RISK:
+Production silently runs in symmetric-secret embedded mode with a known secret. Combined with Finding 1 this is a total auth bypass. High impact; medium likelihood (depends on deploy hygiene, but the code makes the insecure path the default).
+
+REPRO STEPS:
+1. Start the backend with NODE_ENV=production and no AUTH_SESSION_SECRET / AUTH_EMBEDDED.
+2. Inspect process.env after bootstrap — both are now set to the embedded defaults.
+3. Forge a token per Finding 1 and authenticate.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/auth-frontend.ts (lines 66-71)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/main.ts (line 36)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts (lines 27-29, 88-94)
+
+CALL COUNT:
+1 call site: auth-frontend.ts lines 70-71 (executed once at bootstrap via main.ts line 36).
+
+FIX:
+* Root cause being fixed: unconditional embedded-mode + secret defaulting at boot.
+* How: gate the env mutation on a non-production check, and in production require an explicit strong secret (or JWKS issuer) or throw.
+* Structure of the fix: a single resolveAuthMode() that returns {embedded, secret} and fails closed when production lacks a strong secret.
+* Files changed and how:
+  - auth-frontend.ts: only set AUTH_EMBEDDED/AUTH_SESSION_SECRET when NODE_ENV !== production; in production validate a strong secret or AUTH_JWT_ISSUER and otherwise throw before app.listen.
+
+
+====================================================================
+3. Server-side session revocation / offboarding silently does nothing (wrong store)  [CRITICAL]
+
+SITUATION / PROBLEM:
+The app's sign-out and admin "revoke all sessions" call federatedClient.sessions.* which performs HTTP requests to AUTH_BACKEND_API (default https://api.localhost/v1). But this deployment runs embedded with a FileSessionStore on disk; there is no Backend API server. The revoke/list/verify calls therefore fail (or hit a non-existent host) and the durable embedded session record is never tombstoned. The "immediate revocation despite short token life" guarantee the app advertises does not hold.
+
+ROOT CAUSE:
+Two parallel session models are mixed: the embedded createFederatedFrontend + FileSessionStore (the real store for this app) versus the remote AuthClient REST resources. SessionsService was wired to the REST resources, not to the embedded FileSessionStore actually backing sessions.
+
+SCENARIO:
+An employee is offboarded. An admin calls POST /api/sessions/revoke-user. SessionsService.getSessionList hits https://api.localhost/v1/sessions and throws; the catch logs a warning and returns 0. The offboarded user's on-disk session record stays valid; because the session cookie self-heals and TTL is ~10 years (Finding 6), the user keeps minting access tokens and retains access.
+
+RISK:
+Revocation, sign-out-everywhere, and offboarding are non-functional. A terminated or compromised user cannot be cut off. High impact; high likelihood (any revoke attempt).
+
+REPRO STEPS:
+1. Sign in (a sess_*.json appears under the FileSessionStore root).
+2. Call POST /api/sessions/sign-out or /api/sessions/revoke-user.
+3. Observe the call errors against api.localhost and the on-disk record is unchanged / not revoked.
+4. Continue calling protected routes with the still-valid cookie/token.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/sessions/sessions.service.ts (lines 24-64)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/sessions/sessions.controller.ts (lines 32-58)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/auth-frontend.ts (lines 102-130)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts (lines 152-188, 408-456)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/session-store.ts (lines 124-198)
+
+CALL COUNT:
+3 call sites in sessions.service.ts use the wrong store (revokeSession in revoke and in revokeAllForUser, verifySession in isActive).
+
+FIX:
+* Root cause being fixed: app revokes against a non-existent REST backend instead of the embedded FileSessionStore that actually holds sessions.
+* How: have SessionsService operate the same FileSessionStore instance the frontend middleware uses (remove/list against disk), or run a real Backend API and point AUTH_BACKEND_API at it.
+* Structure of the fix: share a single SessionStore via DI; expose remove/list/tombstone through it.
+* Files changed and how:
+  - auth-frontend.ts: construct the FileSessionStore as an injectable provider and export it.
+  - sessions.service.ts: inject that store; implement revoke/revokeAllForUser/isActive against it (it already supports remove/list/tombstone).
+
+
+====================================================================
+4. SAML accepts assertion without requiring the Response signature, with replay protection disabled  [HIGH]
+
+SITUATION / PROBLEM:
+When SAML is enabled, this app passes config straight through to the library. The library defaults wantAuthnResponseSigned to false (only the assertion is required signed) AND sets validateInResponseTo to "never". The app sets neither, so the SP accepts a SAML Response whose outer envelope is unsigned and performs no InResponseTo binding between the AuthnRequest and the Response. The only anti-replay control is the app-level RelayState cookie.
+
+ROOT CAUSE:
+Library defaults (saml.ts) chosen for Google compatibility, combined with the app never overriding wantAuthnResponseSigned, and InResponseTo validation being turned off in favor of a RelayState cookie. An attacker-replayed or wrapped Response is harder to reject without response-level signing + InResponseTo.
+
+SCENARIO:
+An attacker who captures a victim's signed assertion (from logs, a proxy, or a prior exchange) replays it to /api/v1/saml/acs. With InResponseTo not validated and the Response envelope unsigned, the SP relies only on the assertion's NotOnOrAfter window and the RelayState cookie; within that window, and if the attacker can supply a matching RelayState cookie (same-site or via a forged login start), the assertion can be replayed. XML signature-wrapping risk is also elevated without response-level signing.
+
+RISK:
+SAML assertion replay / signature-wrapping leading to session establishment as the victim. High impact; medium likelihood (requires assertion capture or wrapping).
+
+REPRO STEPS:
+1. Enable SAML (AUTH_SAML_ENABLED=true).
+2. Capture a valid signed assertion within its validity window.
+3. POST it to /api/v1/saml/acs with a self-consistent RelayState cookie/param.
+4. Observe a session cookie issued for the victim.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts (lines 46-50, 63-89, 119-162)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 1259-1296)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/auth-frontend.ts (lines 151-194)
+
+CALL COUNT:
+1 app call site builds the SAML config (resolveSamlConfig in auth-frontend.ts) and never sets wantAuthnResponseSigned; 1 library ACS handler validates it.
+
+FIX:
+* Root cause being fixed: weak SAML acceptance posture (response not signed, no InResponseTo).
+* How: require response-level signing where the IdP supports it and re-enable InResponseTo with a shared store; keep RelayState as defense-in-depth, not the sole control.
+* Structure of the fix: app sets wantAuthnResponseSigned true (configurable per-IdP); library re-enables ValidateInResponseTo with a small persistent cache.
+* Files changed and how:
+  - auth-frontend.ts: pass wantAuthnResponseSigned: true (env-overridable) into the SAML connection.
+  - saml.ts/frontend.ts: support an InResponseTo cache so validateInResponseTo can be enabled in the embedded model.
+
+
+====================================================================
+5. SAML sign-in trusts email as verified unconditionally  [HIGH]
+
+SITUATION / PROBLEM:
+On the SAML path the library hardcodes emailVerified: true for the mapped identity, then the shared finishSignIn enforces domain only on that already-trusted email. There is no equivalent of the OIDC email_verified check. If an IdP (or a mis-mapped attribute / a non-Google IdP this SP could be pointed at) emits an email the domain of which is allowed but which is not actually controlled/verified, the SP accepts it.
+
+ROOT CAUSE:
+saml.ts assumes "a valid signed Workspace assertion implies a verified email" and sets emailVerified true regardless of IdP attributes; the app does not constrain idpEntityId/issuer to Google, so the assumption can be violated.
+
+SCENARIO:
+The SP is configured against an IdP that lets a user set an arbitrary email attribute on an allowed domain (or NameID is spoofable). The signed assertion passes; emailVerified is forced true; domain enforcement passes; the attacker is signed in as someone@alloweddomain.
+
+RISK:
+Account takeover / impersonation within an allowed domain. High impact; likelihood depends on IdP, but the code removes a control that should exist.
+
+REPRO STEPS:
+1. Point the SP at an IdP that does not strictly verify the email attribute.
+2. Authenticate with an email on an allowed domain you do not own.
+3. Observe a session established for that email.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts (lines 144-162)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 976-1001, 1259-1296)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/auth-frontend.ts (lines 151-194)
+
+CALL COUNT:
+1 library call site sets emailVerified true (saml.ts); 1 app call site enables SAML.
+
+FIX:
+* Root cause being fixed: unconditional email-verified trust on SAML.
+* How: pin the SAML issuer to the configured Google IdP entityId and only treat email as verified when the assertion comes from that issuer; otherwise require an explicit verified attribute.
+* Files changed and how:
+  - saml.ts: derive emailVerified from issuer match + an asserted attribute rather than hardcoding true.
+  - auth-frontend.ts: keep idpEntityId locked to the Google Workspace value.
+
+
+====================================================================
+6. Effectively permanent sessions: ~10-year TTL, no idle timeout, no sid rotation  [HIGH]
+
+SITUATION / PROBLEM:
+The app sets sessionTtlSeconds to ~10 years and inactivityTimeoutSeconds to 0. The session cookie is a sliding window re-issued on each token mint, and the session id is never rotated on sign-in or privilege change. So a stolen session cookie is usable for a decade, no idle timeout ever closes it, and there is no fixation/rotation defense.
+
+ROOT CAUSE:
+Deliberate "stay signed in forever" configuration in auth-frontend.ts (lines 88-100) plus a library that never rotates sid (frontend.ts mints/refreshes but keeps the same sid; reverify only stamps lastVerifiedAt).
+
+SCENARIO:
+An attacker steals the session cookie (XSS-adjacent, shared machine, backup of the disk store, or a logged value). Because there is no idle timeout, no rotation, and a 10-year absolute TTL, the cookie keeps minting access tokens indefinitely; even sign-out is unreliable (Finding 3).
+
+RISK:
+Long-lived session hijack with no natural expiry and no rotation. High impact; medium likelihood.
+
+REPRO STEPS:
+1. Sign in; capture the session cookie.
+2. Wait arbitrarily long without activity.
+3. Replay the cookie to /api/v1/client/sessions/:id/tokens and obtain a fresh access token.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/auth-frontend.ts (lines 88-130)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 515-525, 1003-1044, 1059-1139)
+
+CALL COUNT:
+1 app call site configures TTL/inactivity (auth-frontend.ts); the library mint/touch/reverify handlers reuse the same sid.
+
+FIX:
+* Root cause being fixed: no idle timeout, decade-long absolute TTL, no sid rotation.
+* How: set a sane inactivity timeout and a shorter maximum lifetime; rotate sid on sign-in and on privilege/org change.
+* Files changed and how:
+  - auth-frontend.ts: set inactivityTimeoutSeconds (e.g. hours) and a bounded sessionTtlSeconds (e.g. days/weeks).
+  - frontend.ts: issue a new sid on finishSignIn and on org switch/reverify (session rotation).
+
+
+====================================================================
+7. State-changing session endpoints are cookie-authenticated with no CSRF defense  [HIGH]
+
+SITUATION / PROBLEM:
+The embedded Frontend API mounted at /api/v1 authenticates the session via the oaf_act3hub_session cookie (SameSite=Lax). Several state-changing endpoints — POST /tokens (mint), POST /touch (set active org), POST /remove (sign out), GET /reverify — act purely on the cookie with no CSRF token / double-submit / Origin check. SameSite=Lax does not protect top-level POST navigations and does not protect GET /reverify.
+
+ROOT CAUSE:
+The library relies on SameSite alone and uses the Authorization: Bearer publishableKey header (not a secret) as the only non-cookie input. No CSRF token is required for cookie-authenticated mutations.
+
+SCENARIO:
+A logged-in employee visits a malicious page that auto-submits a form POST to /api/v1/client/sessions/<id>/remove (or triggers GET /reverify). The browser attaches the session cookie; the action executes cross-site (sign the user out, or flip active org / RBAC scope mid-session).
+
+RISK:
+CSRF on session lifecycle and active-org/RBAC scope. Medium-high impact; medium likelihood.
+
+REPRO STEPS:
+1. While signed in, load an attacker page that issues a cross-site POST to /api/v1/client/sessions/<known-sid>/remove or /touch.
+2. Observe the session changes without the user's intent.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 252-267, 1059-1153)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/main.ts (lines 26-36)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/auth-frontend.ts (lines 107-130)
+
+CALL COUNT:
+1 app mount point (main.ts line 36) exposes all library mutation routes; 4 mutating handlers in frontend.ts.
+
+FIX:
+* Root cause being fixed: cookie-authenticated mutations without CSRF defense.
+* How: require an Origin/Referer allowlist check and/or a CSRF double-submit token on the mutating Frontend API routes; make /reverify a POST.
+* Files changed and how:
+  - frontend.ts: add Origin checking + a CSRF token tied to the session for /tokens,/touch,/remove,/reverify.
+  - app side: ensure the SPA sends the CSRF token; keep cookieSecure + SameSite at least Lax.
+
+
+====================================================================
+8. CORS reflects any origin with credentials when CORS_ORIGINS is unset  [HIGH]
+
+SITUATION / PROBLEM:
+main.ts enables CORS with credentials: true and origin: origins.length ? origins : true. When CORS_ORIGINS is empty, origin becomes true, which reflects the caller's Origin and returns Access-Control-Allow-Credentials: true — allowing any website to make credentialed cross-origin requests to the API.
+
+ROOT CAUSE:
+A permissive fallback (true) for the allowed-origins list combined with credentials: true.
+
+SCENARIO:
+The app is deployed without CORS_ORIGINS set. A malicious site issues credentialed fetches to /api/...; the browser allows it because the server reflects the Origin and allows credentials. Combined with the cookie-based session, this broadens the CSRF/data-exfiltration surface.
+
+RISK:
+Cross-origin credentialed access to all APIs from arbitrary sites. High impact; medium likelihood (config-dependent).
+
+REPRO STEPS:
+1. Start backend with CORS_ORIGINS unset.
+2. From any origin, fetch('/api/auth/me', {credentials:'include'}) after the victim is signed in.
+3. Observe CORS headers permit the response.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/main.ts (lines 25-30)
+
+CALL COUNT:
+1 call site: main.ts enableCors.
+
+FIX:
+* Root cause being fixed: wildcard-with-credentials CORS fallback.
+* How: never fall back to true when credentials are enabled; require an explicit origin allowlist or refuse to start.
+* Files changed and how:
+  - main.ts: when CORS_ORIGINS is empty, either disable credentials or throw at boot; never pass origin: true with credentials: true.
+
+
+====================================================================
+9. Dev-auth mock can be force-enabled and mints fully-privileged fake employee tokens  [HIGH]
+
+SITUATION / PROBLEM:
+DevAuthCore fabricates a dev@<domain> employee with permissions ["*:read","*:write","org:sys_memberships:manage"] and mints HS256 tokens the backend accepts. The gate is VITE_AUTH_DEV_MODE=true + localhost + no credentials file. Because the signing secret is the committed default (Finding 1) and the backend verifies it, the dev mock is not isolated to the browser — its tokens authorize real backend calls. The only thing standing between "dev convenience" and "admin bypass" is the three-part gate and the secret staying secret.
+
+ROOT CAUSE:
+A client-trusted identity core that self-asserts roles/permissions and signs with a shared secret the backend honors. The "no real verification" path produces tokens indistinguishable to the backend from real ones.
+
+SCENARIO:
+On any host where the secret is the default and AUTH_EMBEDDED is on, an attacker reproduces the dev core's mint (Finding 1) to assert org:admin. Even with the gate intact for the browser, the backend cannot tell a dev-minted token from a real one because both are HS256 over the same secret.
+
+RISK:
+Privileged impersonation. High impact; likelihood tied to Findings 1/2.
+
+REPRO STEPS:
+1. Read the dev secret and the dev core's claim shape.
+2. Mint an admin token; call protected/admin routes.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/frontend/src/lib/devAuthCore.ts (lines 188-265)
+  /Users/bryan/BGit/all/app/code/packages/frontend/src/lib/resolveDevAuth.ts (entire)
+  /Users/bryan/BGit/all/app/code/packages/frontend/src/main.tsx (lines 44-79)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/health/health.controller.ts (lines 48-69)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/auth.strategy.ts (lines 41-87)
+
+CALL COUNT:
+2 frontend call sites (main.tsx builds the core; devAuthCore.ts mints); the backend strategy verifies the resulting token at every request.
+
+FIX:
+* Root cause being fixed: dev tokens are backend-trusted because they share the real secret.
+* How: give the dev mock its OWN distinct, non-production verifier path so backend can refuse dev-minted tokens in any non-local deployment; never share the production verify-secret with the dev mint-secret.
+* Files changed and how:
+  - Separate the dev secret from AUTH_SESSION_SECRET; backend rejects dev-issuer tokens unless NODE_ENV is local. Remove committed secrets (Finding 1).
+
+
+====================================================================
+10. Cookies are not Secure and are SameSite=Lax outside production  [MEDIUM]
+
+SITUATION / PROBLEM:
+cookieSecure is set to isProd only, so in any non-production deployment the session/state/relay cookies lack the Secure attribute and can ride over plain HTTP. All cookies are SameSite=Lax (never Strict) and there is no __Host-/__Secure- prefix.
+
+ROOT CAUSE:
+cookieSecure tied solely to NODE_ENV === production; library setCookie hardcodes SameSite default Lax.
+
+SCENARIO:
+A staging/HTTP deployment or a proxy that terminates TLS upstream serves cookies without Secure; a network attacker reads the session cookie over HTTP.
+
+RISK:
+Session cookie disclosure over non-TLS transport. Medium impact; medium likelihood.
+
+REPRO STEPS:
+1. Run with NODE_ENV != production behind HTTP.
+2. Inspect Set-Cookie — no Secure flag on oaf_act3hub_session.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/auth-frontend.ts (line 124)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 252-274)
+
+CALL COUNT:
+1 app call site (cookieSecure: isProd); library setCookie used for all cookies.
+
+FIX:
+* Root cause being fixed: Secure flag and cookie prefixes not enforced.
+* How: set cookieSecure true whenever served over HTTPS regardless of NODE_ENV; adopt __Host- prefix and consider SameSite=Strict for the session cookie.
+* Files changed and how:
+  - auth-frontend.ts: derive cookieSecure from the actual scheme / an explicit COOKIE_SECURE env, default true.
+  - frontend.ts: support a __Host- session cookie name and Strict option.
+
+
+====================================================================
+11. Public unauthenticated client-error sink enables log injection / log flooding  [MEDIUM]
+
+SITUATION / PROBLEM:
+POST /api/client-error is @Public and writes attacker-controlled fields into the server error trail (error.err). There is no auth, no rate limit, and the payload is logged. An attacker can flood the log, fill disk, or inject crafted lines (newlines, fake log entries) into the shared error file.
+
+ROOT CAUSE:
+A deliberately public, unauthenticated logging endpoint with no rate limiting and no neutralization of logged content.
+
+SCENARIO:
+An attacker scripts thousands of POSTs with multi-line messages; the rolling log rotates rapidly (evicting real errors) and/or contains forged log lines that mislead incident response.
+
+RISK:
+Log forgery, log eviction, disk pressure. Medium impact; high likelihood (open endpoint).
+
+REPRO STEPS:
+1. POST /api/client-error repeatedly with large/newline-laden bodies.
+2. Observe error.err growth/rotation and injected lines.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/client-error/client-error.controller.ts (lines 18-30)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/client-error/client-error.service.ts
+  /Users/bryan/BGit/all/app/code/packages/backend/src/shared/logging/rolling-file-writer.ts
+
+CALL COUNT:
+1 public route: client-error.controller.ts POST.
+
+FIX:
+* Root cause being fixed: open, unbounded, un-neutralized log sink.
+* How: rate-limit per IP, cap body size, strip CR/LF from logged values, sample/aggregate.
+* Files changed and how:
+  - client-error.controller.ts/service.ts: add throttling and newline stripping; bound message length.
+
+
+====================================================================
+12. Webhook endpoint accepts unsigned requests whenever NODE_ENV != production  [MEDIUM]
+
+SITUATION / PROBLEM:
+The @Public webhook handler that upserts/deletes users from the local store skips signature verification entirely when AUTH_WEBHOOK_SIGNING_SECRET is unset and NODE_ENV !== production. Any non-production deployment (staging) accepts forged user.created/updated/deleted events with no authentication.
+
+ROOT CAUSE:
+verifySignature returns (accept) when the secret is unset and env is not production.
+
+SCENARIO:
+On staging, an attacker POSTs user.deleted for a target email and removes them from the local store, or upserts a privileged user record.
+
+RISK:
+Unauthenticated mutation of the user store on non-production. Medium impact; medium likelihood.
+
+REPRO STEPS:
+1. Run with NODE_ENV != production and no signing secret.
+2. POST /api/webhooks/auth with a user.deleted event and no signature.
+3. Observe the user removed.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/webhooks/webhooks.controller.ts (lines 37-109)
+
+CALL COUNT:
+1 public route: webhooks.controller.ts POST auth.
+
+FIX:
+* Root cause being fixed: unsigned-accept posture outside production.
+* How: require the signing secret and a valid signature in ALL environments; reject when unset.
+* Files changed and how:
+  - webhooks.controller.ts: remove the non-production accept branch; always require a valid HMAC signature.
+
+
+====================================================================
+13. No security response headers (HSTS, CSP, X-Content-Type-Options, etc.)  [MEDIUM]
+
+SITUATION / PROBLEM:
+The backend bootstrap configures CORS and validation but sets no security headers — no HSTS, no Content-Security-Policy, no X-Content-Type-Options, no X-Frame-Options/frame-ancestors, no Referrer-Policy. The SPA and API are served without these defenses.
+
+ROOT CAUSE:
+No helmet/equivalent middleware is mounted in main.ts.
+
+SCENARIO:
+Missing CSP/frame-ancestors leaves the app open to clickjacking and reduces XSS mitigation; missing HSTS allows TLS downgrade; combined with cookie-based sessions this widens impact of other findings.
+
+RISK:
+Defense-in-depth gaps amplifying XSS/clickjacking/downgrade. Medium impact; medium likelihood.
+
+REPRO STEPS:
+1. curl -I the backend; observe absence of HSTS/CSP/X-Content-Type-Options.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/main.ts (lines 11-47)
+  /Users/bryan/BGit/all/app/code/packages/frontend/vite.config.ts
+
+CALL COUNT:
+1 bootstrap site (main.ts) lacking header middleware.
+
+FIX:
+* Root cause being fixed: no security headers.
+* How: mount helmet with a tuned CSP and enable HSTS in production; set frame-ancestors none.
+* Files changed and how:
+  - main.ts: add helmet()/headers before app.listen; configure CSP for the SPA origin.
+
+
+====================================================================
+14. PermissionsGuard is opt-in per route; default posture is authenticated-but-unauthorized-allowed  [MEDIUM]
+
+SITUATION / PROBLEM:
+Only JwtAuthGuard is global. PermissionsGuard is applied per-route via @UseGuards on just two controllers (divisions PATCH, sessions revoke-user). Every other authenticated route performs no permission check, so any authenticated employee (read-only included) can call any non-decorated route. RBAC is only enforced where a developer remembered to add the guard, which is fragile (default-allow once authenticated).
+
+ROOT CAUSE:
+RBAC is decorator-driven and not globally enforced; the absence of @RequirePermission means "allow any authenticated user".
+
+SCENARIO:
+A new write route is added without @RequirePermission; a read-only employee (or a forged minimal token) can invoke it. The model relies on per-route discipline rather than a deny-by-default authorization layer.
+
+RISK:
+Privilege creep / missing authorization on routes that omit the decorator. Medium impact; medium likelihood.
+
+REPRO STEPS:
+1. Authenticate with a read-only token.
+2. Call any route lacking @RequirePermission (e.g. settings, metrics, repos).
+3. Observe success regardless of role.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/app.module.ts (lines 59-62)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/permissions.guard.ts (lines 24-44)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/divisions/divisions.controller.ts (lines 53-63)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/sessions/sessions.controller.ts (lines 44-58)
+
+CALL COUNT:
+2 routes apply PermissionsGuard; all other authenticated routes apply none.
+
+FIX:
+* Root cause being fixed: opt-in RBAC, default-allow once authenticated.
+* How: register PermissionsGuard as a global APP_GUARD that denies by default for routes lacking an explicit @RequirePermission on write methods, or require an explicit permission per non-@Public route.
+* Files changed and how:
+  - app.module.ts: add PermissionsGuard to APP_GUARD; permissions.guard.ts: treat missing metadata on mutating methods as deny.
+
+
+====================================================================
+15. Open-redirect surface in the embedded redirect_url handling reachable by this app  [MEDIUM]
+
+SITUATION / PROBLEM:
+The library's sign-in start and callback accept redirect_url / redirect_url_complete from the query string and later redirect the browser there. backToApp builds an absolute URL when the value matches ^https?:// and 302s to it. The app mounts these routes (/api/v1/sign_in/sso, /oauth_callback) without constraining redirect targets to same-origin, so a crafted redirect_url can bounce a user to an external site after the handshake.
+
+ROOT CAUSE:
+redirect targets are caller-supplied and not validated against an allowlist/same-origin; absolute http(s) values are honored.
+
+SCENARIO:
+An attacker sends a victim a link to /api/v1/sign_in/sso?redirect_url_complete=https://evil.example. After sign-in, the user is redirected to the attacker site (phishing / token-in-URL leakage if any params are appended).
+
+RISK:
+Open redirect / phishing. Medium impact; medium likelihood.
+
+REPRO STEPS:
+1. Visit /api/v1/sign_in/sso?redirect_url=https://evil.example&redirect_url_complete=https://evil.example
+2. Complete sign-in; observe redirect to the external host.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 807-870, 854-870, 1241-1257)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/main.ts (line 36)
+  /Users/bryan/BGit/all/app/code/packages/frontend/src/api/AuthBridge.tsx (sign-in entry via the SDK)
+
+CALL COUNT:
+1 app mount exposes the routes; library backToApp/handleSsoStart honor caller redirects.
+
+FIX:
+* Root cause being fixed: unvalidated redirect targets.
+* How: restrict redirect_url/redirect_url_complete to same-origin or a configured allowlist; reject absolute external URLs.
+* Files changed and how:
+  - frontend.ts: validate redirect targets against the app origin; the app can pass an allowed-origins list.
+
+
+====================================================================
+16. /health/auth-config publicly leaks credentials-file presence  [LOW]
+
+SITUATION / PROBLEM:
+A @Public endpoint returns whether the server's credentials file exists. This discloses server-side configuration state to unauthenticated callers and signals when the app is in the dev-mock-eligible state (no credentials file), which is exactly the weak-auth window.
+
+ROOT CAUSE:
+The dev-mock gate needs a server fact, exposed via an unauthenticated endpoint.
+
+SCENARIO:
+An attacker probes /api/health/auth-config; a credentialsFilePresent:false response indicates the dev-mock path may be engageable and the shared-secret window is open.
+
+RISK:
+Information disclosure aiding exploitation of Findings 1/9. Low impact; high likelihood.
+
+REPRO STEPS:
+1. GET /api/health/auth-config unauthenticated.
+2. Read credentialsFilePresent.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/health/health.controller.ts (lines 48-69)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/config/credentials-file.ts (lines 61-63)
+
+CALL COUNT:
+1 public route.
+
+FIX:
+* Root cause being fixed: leaking config state.
+* How: gate the dev mock entirely on a build-time flag so this endpoint is unnecessary in production; remove or restrict it off localhost.
+* Files changed and how:
+  - health.controller.ts: return credentialsFilePresent only on localhost; otherwise omit.
+
+
+====================================================================
+17. Error envelope and logs echo request path / domain values without neutralization  [LOW]
+
+SITUATION / PROBLEM:
+The exception filter returns the request path in the error body and logs JSON-stringified messages; the auth strategy and frontend log the presented domain. None of these strip control characters, and the error envelope reflects request-controlled path back to the client.
+
+ROOT CAUSE:
+Direct echoing of request.url and domain strings into responses/logs.
+
+SCENARIO:
+Crafted paths/domains appear verbatim in logs (minor log-shaping) and the error envelope reflects request path (reflected content; low risk given JSON content-type).
+
+RISK:
+Minor log-shaping / reflected request data. Low impact; medium likelihood.
+
+REPRO STEPS:
+1. Send a request to an erroring route with a crafted path; observe it echoed in the JSON error and logs.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/src/shared/http-exception.filter.ts (lines 45-61)
+  /Users/bryan/BGit/all/app/code/packages/backend/src/modules/auth/auth.strategy.ts (lines 58-64)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 992-1001)
+
+CALL COUNT:
+3 logging/response sites echo request-controlled values.
+
+FIX:
+* Root cause being fixed: un-neutralized echoing.
+* How: strip CR/LF from logged values; avoid reflecting raw path in client-facing bodies.
+* Files changed and how:
+  - http-exception.filter.ts: omit/normalize path; logging helpers: sanitize control chars.
+
+
+====================================================================
+18. Access-token grants are sourced from client-supplied org_id without re-checking membership on the mint path  [LOW]
+
+SITUATION / PROBLEM:
+On the frontend mint path the SDK sends the snapshot's orgId in the POST body; the library's mint handler reads body.org_id and resolves grants for that org. handleTouch checks membership, but handleMintToken takes org_id from the body and grantsForOrg falls back to base grants if not a member — it does not reject a non-member org_id, it silently downgrades. This relies on the membership list in the session being authoritative, which it is, but the trust flow (client supplies org_id) is fragile if grantsForOrg logic changes.
+
+ROOT CAUSE:
+org_id for token scoping is taken from the request body on mint without an explicit membership assertion (only an implicit fallback).
+
+SCENARIO:
+A client posts an org_id it is not a member of to /tokens; grantsForOrg returns base grants rather than an error, so no escalation today, but the design trusts client input for scope selection.
+
+RISK:
+Currently contained (fallback), but a latent escalation if grant resolution changes. Low impact; low likelihood.
+
+REPRO STEPS:
+1. POST /api/v1/client/sessions/:id/tokens with org_id of an org the user is not in.
+2. Observe base grants returned (no error).
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 706-733, 1059-1086)
+  /Users/bryan/BGit/all/app/code/packages/frontend/src/api/axios.ts (lines 44-62)
+  /Users/bryan/BGit/all/app/code/packages/frontend/src/lib/devAuthCore.ts (lines 232-265)
+
+CALL COUNT:
+1 library mint handler; 1 app call path (axios getToken → SDK mintToken).
+
+FIX:
+* Root cause being fixed: client-selected token scope without explicit membership assertion on mint.
+* How: reject a non-member org_id on mint (mirror handleTouch) instead of silently falling back.
+* Files changed and how:
+  - frontend.ts handleMintToken: 400 when org_id is not in session memberships.
+
+
+====================================================================
+19. Auth library is consumed via a local filesystem link with unpinned auth-critical deps  [LOW]
+
+SITUATION / PROBLEM:
+The app depends on @auth/backend and @auth/react via link:../../../../../Bryan_git/OpenAuthFederated/... (a local path link), and the security-critical libraries are range-pinned (@node-saml/node-saml ^5.1.0, jose ^5.9.6, passport ^0.7.0). A local link means there is no integrity-locked auth library version in the app's lockfile, and caret ranges allow drift in SAML/JWT crypto.
+
+ROOT CAUSE:
+Dev-time local linking of the auth library plus caret ranges on auth-critical packages.
+
+SCENARIO:
+A change to the linked library (or a minor bump of node-saml/jose) silently alters verification behavior for this app with no review gate.
+
+RISK:
+Supply-chain / version-drift on the auth path. Low impact; low likelihood.
+
+REPRO STEPS:
+1. Inspect package.json link: entries and caret ranges for node-saml/jose.
+
+SOURCE FILES INVOLVED:
+  /Users/bryan/BGit/all/app/code/packages/backend/package.json (@auth/backend link, passport ^0.7.0)
+  /Users/bryan/BGit/all/app/code/packages/frontend/package.json (@auth/react link, jose ^5.9.6)
+  /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/package.json (@node-saml/node-saml ^5.1.0, jose ^5.9.6)
+
+CALL COUNT:
+2 app manifests link the library; 1 library manifest pins SAML/JWT deps with carets.
+
+FIX:
+* Root cause being fixed: unpinned/link-based auth dependency.
+* How: publish/version the auth library and pin exact versions for node-saml/jose; lock integrity hashes.
+* Files changed and how:
+  - package.json files: replace link: with a pinned version; pin node-saml/jose to exact versions.
+
+====================================================================
+END OF REPORT

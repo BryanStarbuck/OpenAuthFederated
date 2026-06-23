@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { SessionMembership, SessionStore } from "./session-store.js";
-import { type SamlSpConfig } from "./saml.js";
+import { type SamlReplayStore, type SamlSpConfig } from "./saml.js";
 /** The verified upstream identity returned by Google's OIDC id_token. */
 export interface OidcIdentity {
     /** Google's stable subject identifier. */
@@ -126,9 +126,53 @@ export interface FederatedFrontendConfig {
      * cookie is the whole session) — backward compatible. See `session-store.ts` / {@link FileSessionStore}.
      */
     sessionStore?: SessionStore;
-    /** Set true behind HTTPS so cookies carry the Secure attribute. */
+    /**
+     * Carry the Secure attribute on all cookies. Defaults to **true** (production-safe). Set false
+     * ONLY for local http development; never ship a non-Secure session cookie to production.
+     */
     cookieSecure?: boolean;
-    /** Map a verified identity to roles/permissions/orgs. Defaults to an internal-employee grant. */
+    /**
+     * SameSite for the session cookie. Defaults to `Lax` (the session is not a cross-site POST).
+     * The SAML relay cookie always uses `None` (the cross-site ACS POST needs it) and therefore
+     * requires `cookieSecure: true`.
+     */
+    sessionCookieSameSite?: "Lax" | "Strict";
+    /**
+     * Per-app audience (`aud`) stamped on minted session/access tokens and required on verify. Binds
+     * a token to this app so two apps sharing a secret/prefix cannot accept each other's tokens.
+     */
+    audience?: string;
+    /**
+     * Require a present, allowlisted Google Workspace hosted-domain (`hd`) claim. When true, an
+     * identity lacking `hd` (e.g. a consumer gmail.com account) is rejected even if its email domain
+     * is on {@link allowedDomains} — the email domain is no longer accepted as a substitute for
+     * Workspace membership. Defaults to false (back-compat).
+     */
+    requireHostedDomain?: boolean;
+    /**
+     * Allowlist of origins (e.g. `https://app.example.com`) a post-sign-in redirect may target.
+     * Absolute redirect URLs not on this list are rejected and rewritten to a same-origin relative
+     * path. When omitted, ALL absolute redirect targets are refused (same-origin relative only).
+     */
+    allowedRedirectOrigins?: string[];
+    /**
+     * Trust the IdP-asserted SAML email as verified when no explicit attribute is present. Forwarded
+     * to {@link validateSamlAcs}; defaults to false (fail closed).
+     */
+    samlTrustAssertedEmailVerified?: boolean;
+    /**
+     * Replay store for consumed SAML assertion ids (one-time-use enforcement). Defaults to an
+     * in-process {@link InMemorySamlReplayStore}; supply a shared store for multi-process SAML.
+     */
+    samlReplayStore?: SamlReplayStore;
+    /**
+     * Add security response headers (HSTS, CSP, X-Content-Type-Options, Referrer-Policy,
+     * X-Frame-Options) to every response. Defaults to true.
+     */
+    securityHeaders?: boolean;
+    /** CORS allowlist for the auth endpoints. When set, matching Origins get credentialed CORS. */
+    allowedCorsOrigins?: string[];
+    /** Map a verified identity to roles/permissions/orgs. Defaults to a least-privilege grant. */
     resolveGrants?: (identity: OidcIdentity) => ResolvedGrants;
     logger?: (level: "info" | "warn" | "error", message: string, meta?: unknown) => void;
 }

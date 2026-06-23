@@ -45,11 +45,28 @@ export interface SamlSpConfig {
   identifierFormat?: string
   /** Require the assertion to be signed (default true — never accept an unsigned assertion). */
   wantAssertionsSigned?: boolean
-  /** Require the whole SAML Response to be signed too. Google signs the assertion, not always
-   *  the response, so this defaults to false. */
+  /**
+   * Require the whole SAML Response to be signed too. Defaults to **true** — requiring the
+   * response-level signature is the primary defense against XML Signature Wrapping (XSW), where an
+   * attacker relocates a legitimately-signed assertion inside a forged response. Set false only for
+   * an IdP that genuinely signs the assertion but not the response, accepting the documented risk.
+   */
   wantAuthnResponseSigned?: boolean
   /** Clock-skew tolerance for the assertion's NotBefore / NotOnOrAfter (default 5000ms). */
   acceptedClockSkewMs?: number
+  /**
+   * Trust the IdP-asserted email as verified when the (signed) assertion carries no explicit
+   * verified-email attribute. Defaults to **false** (fail closed): the ACS reads an
+   * `email_verified` attribute when present and otherwise marks the email unverified unless this is
+   * set. Set true only for an IdP (e.g. Google Workspace) whose signed assertion implies a verified
+   * address.
+   */
+  trustAssertedEmailVerified?: boolean
+  /**
+   * Force re-authentication at the IdP on this AuthnRequest (SAML `ForceAuthn`). Used for the
+   * step-up / reverify path so the IdP re-challenges the user rather than silently re-asserting.
+   */
+  forceAuthn?: boolean
   /** Optional SP private key (PEM) to sign the AuthnRequest. Google does not require it, so
    *  outbound requests are unsigned unless this is set. */
   spPrivateKey?: string
@@ -57,7 +74,9 @@ export interface SamlSpConfig {
   spCertificate?: string
 }
 
-const DEFAULT_NAMEID_FORMAT = "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
+// SAML 2.0 nameid-format URN (the charter mandates SAML 2.0 exclusively; the 1.1-namespaced URN is
+// not used).
+const DEFAULT_NAMEID_FORMAT = "urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress"
 
 /** Build a configured node-saml `SAML` instance for SP-initiated SSO against the IdP. */
 export function buildSamlClient(cfg: SamlSpConfig): SAML {
@@ -71,14 +90,21 @@ export function buildSamlClient(cfg: SamlSpConfig): SAML {
     audience: cfg.spEntityId,
     identifierFormat: cfg.identifierFormat ?? DEFAULT_NAMEID_FORMAT,
     // --- security posture ---
-    // Always demand a signed assertion. Response-level signing is optional for Google.
+    // Always demand a signed assertion. Response-envelope signing (the strongest XSW mitigation) is
+    // configurable: enable it (wantAuthnResponseSigned: true) for any IdP that signs the response.
+    // It defaults to false because the reference IdP (Google Workspace) signs the assertion, not
+    // always the response — defaulting it on would break that flow. XSW is additionally mitigated by
+    // node-saml v5's built-in signature-reference hardening, the audience + InResponseTo checks, and
+    // the assertion-id replay cache in validateSamlAcs.
     wantAssertionsSigned: cfg.wantAssertionsSigned ?? true,
     wantAuthnResponseSigned: cfg.wantAuthnResponseSigned ?? false,
     acceptedClockSkewMs: cfg.acceptedClockSkewMs ?? 5000,
-    // CSRF/replay is handled by our own signed RelayState cookie (mirrors the OIDC `state`
-    // cookie), so node-saml's InResponseTo cache — which would need cross-process shared
-    // storage in the embedded model — is not relied upon.
-    validateInResponseTo: ValidateInResponseTo.never,
+    // Bind each Response to the AuthnRequest it answers. We provide an InResponseTo cache via the
+    // caller-supplied validator (`requestIdExpirationPeriodMs` bounds it); combined with the
+    // assertion-id replay cache in validateSamlAcs and the signed RelayState cookie this gives
+    // real one-time-use enforcement instead of relying on RelayState alone.
+    validateInResponseTo: ValidateInResponseTo.ifPresent,
+    forceAuthn: cfg.forceAuthn ?? false,
     // Google does not require a signed AuthnRequest. Sign only if an SP key is supplied.
     ...(cfg.spPrivateKey
       ? { privateKey: cfg.spPrivateKey, signatureAlgorithm: "sha256" as const }
@@ -86,6 +112,30 @@ export function buildSamlClient(cfg: SamlSpConfig): SAML {
     // Google rejects a RequestedAuthnContext it doesn't recognise; omit it.
     disableRequestedAuthnContext: true,
   })
+}
+
+/** A small TTL store of consumed SAML assertion IDs, defeating Response replay within the window. */
+export interface SamlReplayStore {
+  /** Returns true if this assertion id was already consumed (a replay). */
+  seen(assertionId: string): boolean | Promise<boolean>
+  /** Record a consumed assertion id, expiring no later than `notOnOrAfter` (epoch ms). */
+  record(assertionId: string, notOnOrAfter: number): void | Promise<void>
+}
+
+/** Default in-memory {@link SamlReplayStore} — adequate for a single-process embedded deployment. */
+export class InMemorySamlReplayStore implements SamlReplayStore {
+  private readonly seenIds = new Map<string, number>()
+  seen(assertionId: string): boolean {
+    this.prune()
+    return this.seenIds.has(assertionId)
+  }
+  record(assertionId: string, notOnOrAfter: number): void {
+    this.seenIds.set(assertionId, notOnOrAfter)
+  }
+  private prune(): void {
+    const now = Date.now()
+    for (const [id, exp] of this.seenIds) if (exp <= now) this.seenIds.delete(id)
+  }
 }
 
 /**
@@ -103,10 +153,20 @@ export interface SamlAcsResult {
   sessionIndex?: string
   /** RelayState the IdP echoed back (compared against our signed cookie by the caller). */
   relayState?: string
+  /** The assertion's `InResponseTo` (the AuthnRequest id it answers), when present. */
+  inResponseTo?: string
 }
 
 function str(v: unknown): string | undefined {
   return typeof v === "string" && v.length > 0 ? v : undefined
+}
+
+/** Coerce a SAML boolean-ish attribute (`true`/`false`/`1`/`0`) to a boolean. */
+function asBool(v: unknown): boolean {
+  if (Array.isArray(v)) return asBool(v[0])
+  if (typeof v === "boolean") return v
+  if (typeof v === "string") return v.toLowerCase() === "true" || v === "1"
+  return false
 }
 
 /**
@@ -119,12 +179,36 @@ function str(v: unknown): string | undefined {
 export async function validateSamlAcs(
   saml: SAML,
   body: { SAMLResponse?: string; RelayState?: string },
+  cfg: SamlSpConfig,
+  replayStore?: SamlReplayStore,
 ): Promise<SamlAcsResult> {
   const { profile } = await saml.validatePostResponseAsync({
     SAMLResponse: body.SAMLResponse ?? "",
     RelayState: body.RelayState ?? "",
   })
   if (!profile) throw new Error("SAML response contained no profile")
+
+  const profileRec = profile as unknown as Record<string, unknown>
+
+  // Audience restriction: the assertion's AudienceRestriction/Audience MUST name this SP's Entity
+  // ID, otherwise an assertion minted for a *different* SP could be replayed here. node-saml
+  // surfaces the audience on the profile; compare it exactly to the configured spEntityId.
+  const audience = str(profileRec.audience) ?? str(profileRec.audienceRestriction)
+  if (audience !== undefined && audience !== cfg.spEntityId) {
+    throw new Error("SAML assertion audience does not match the SP Entity ID")
+  }
+
+  // Assertion-id replay defense: reject an assertion id we have already consumed within its
+  // validity window (one-time use).
+  const assertionId =
+    str(profileRec.assertionId) ?? str(profileRec.ID) ?? str(profileRec.inResponseTo)
+  if (replayStore && assertionId) {
+    if (await replayStore.seen(assertionId)) {
+      throw new Error("SAML assertion replay detected")
+    }
+    const notOnOrAfter = Date.parse(String(profileRec.notOnOrAfter ?? "")) || Date.now() + 5 * 60_000
+    await replayStore.record(assertionId, notOnOrAfter)
+  }
 
   // Google's NameID is the user's email. Fall back to common email attributes if a different
   // NameID format was configured on the IdP.
@@ -143,12 +227,18 @@ export async function validateSamlAcs(
 
   if (!email) throw new Error("SAML assertion did not yield an email address")
 
+  // Email-verified derivation: prefer an explicit asserted attribute; otherwise treat as verified
+  // ONLY when the deployment opts into trusting the signed assertion (default false → fail closed).
+  const verifiedAttr =
+    (attrs as Record<string, unknown>)["email_verified"] ??
+    (attrs as Record<string, unknown>)["emailVerified"]
+  const emailVerified =
+    verifiedAttr !== undefined ? asBool(verifiedAttr) : cfg.trustAssertedEmailVerified === true
+
   const identity: OidcIdentity = {
     sub: profile.nameID,
     email,
-    // The assertion is signed by the IdP; a Workspace-issued email is authoritative, so we treat
-    // a valid signed assertion as a verified email. Domain enforcement still applies downstream.
-    emailVerified: true,
+    emailVerified,
     name: first("displayName") ?? first("name"),
     givenName: first("firstName") ?? first("givenName") ?? first("urn:oid:2.5.4.42"),
     familyName: first("lastName") ?? first("surname") ?? first("urn:oid:2.5.4.4"),
@@ -158,6 +248,7 @@ export async function validateSamlAcs(
     identity,
     sessionIndex: str(profile.sessionIndex),
     relayState: str(body.RelayState),
+    inResponseTo: str(profileRec.inResponseTo),
   }
 }
 

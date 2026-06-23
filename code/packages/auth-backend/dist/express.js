@@ -20,15 +20,22 @@ exports.federatedMiddleware = federatedMiddleware;
 exports.requireAuth = requireAuth;
 exports.getAuth = getAuth;
 const middleware_js_1 = require("./middleware.js");
-const SIGNED_OUT = {
-    isAuthenticated: false,
-    userId: null,
-    sessionId: null,
-    orgId: null,
-    sessionClaims: null,
-    has: () => false,
-    getToken: async () => null,
-};
+/**
+ * Build a FRESH signed-out Auth object per request. Returning a shared module-level singleton let a
+ * caller that mutates `req.auth` leak state into other requests (the spread copy was shallow too);
+ * a factory guarantees per-request isolation.
+ */
+function signedOut() {
+    return {
+        isAuthenticated: false,
+        userId: null,
+        sessionId: null,
+        orgId: null,
+        sessionClaims: null,
+        has: () => false,
+        getToken: async () => null,
+    };
+}
 /**
  * Express middleware that authenticates the request and attaches the Federated-style Auth object to
  * `req.auth`. Must run before any handler that calls {@link getAuth}. Never rejects — it only
@@ -42,7 +49,7 @@ function federatedMiddleware(options = {}) {
             next();
         })
             .catch(() => {
-            req.auth = SIGNED_OUT;
+            req.auth = signedOut();
             next();
         });
     };
@@ -70,7 +77,17 @@ function requireAuth(options = {}) {
             res.setHeader("Content-Type", "application/json; charset=utf-8");
             res.end(JSON.stringify({ error: "unauthenticated" }));
         })
-            .catch((err) => next(err));
+            // Fail closed with a clean 401 rather than forwarding the raw error to the host's default
+            // error handler (which can leak a stack trace). authenticateRequest already swallows
+            // verification failures to signed-out, so reaching here means an unexpected internal error.
+            .catch(() => {
+            req.auth = signedOut();
+            if (!res.headersSent) {
+                res.statusCode = 401;
+                res.setHeader("Content-Type", "application/json; charset=utf-8");
+                res.end(JSON.stringify({ error: "unauthenticated" }));
+            }
+        });
     };
 }
 /**
@@ -81,8 +98,8 @@ function requireAuth(options = {}) {
 function getAuth(req) {
     if (req.auth)
         return req.auth;
-    // federatedMiddleware wasn't mounted — return signed-out rather than throw, but keep the token
-    // around so callers that only check `isAuthenticated` behave predictably.
-    return (0, middleware_js_1.bearerToken)(req) ? { ...SIGNED_OUT } : SIGNED_OUT;
+    // federatedMiddleware wasn't mounted — return a fresh signed-out object rather than throw (and
+    // never a shared singleton, so a caller mutating it can't bleed into another request).
+    return signedOut();
 }
 //# sourceMappingURL=express.js.map

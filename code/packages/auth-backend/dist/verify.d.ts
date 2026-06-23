@@ -17,6 +17,12 @@ export interface VerifyTokenOptions {
     jwtKey?: string;
     /** Secret key override. Accepted for Federated parity. */
     secretKey?: string;
+    /**
+     * Signing algorithms to accept. Defaults to `['HS256']` in embedded mode and `['RS256']` on the
+     * JWKS path. Pinning the algorithm closes the classic RS/HS confusion (and any future
+     * algorithm-agility) hole: the verifier never follows the token's own `alg` header.
+     */
+    algorithms?: string[];
 }
 /**
  * Verify a short-lived JWT access token and return its claims.

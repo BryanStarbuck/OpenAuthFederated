@@ -1,0 +1,811 @@
+OpenAuthFederated
+Scope analyzed: /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code (the standalone auth library only — both packages: /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend and /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react), ignoring all callers.
+Summary: 24 security findings (5 CRITICAL, 9 HIGH, 7 MEDIUM, 3 LOW).
+
+
+TABLE OF CONTENTS
+1. Access JWT verification does not pin the signing algorithm (alg / HS-RS confusion)  [CRITICAL]
+2. SAML assertion Audience is never validated against the SP Entity ID  [CRITICAL]
+3. SAML response replay: InResponseTo disabled and no assertion-ID replay cache  [CRITICAL]
+4. Default RBAC grant is a full org-admin allow-by-default for anyone who clears domain check  [CRITICAL]
+5. Whole-SAML-Response signature not required (XML signature wrapping exposure)  [CRITICAL]
+6. Session and access tokens carry no audience; tokens are accepted cross-app  [HIGH]
+7. Embedded-mode token verification skips issuer check and trusts a fully app-controlled HS256 secret  [HIGH]
+8. Cookies default to non-Secure and SameSite=Lax (CSRF / cookie theft over HTTP)  [HIGH]
+9. SAML "email verified" is hardcoded true regardless of the assertion  [HIGH]
+10. Hosted-domain (hd) is not actually enforced; allowlisted personal Gmail passes  [HIGH]
+11. Open redirect via redirect_url / redirect_url_complete / returnTo on every sign-in path  [HIGH]
+12. SSRF on production JWKS fetch via attacker-influenced issuer URL  [HIGH]
+13. Session-store self-heal re-creates a session from a cookie, defeating revocation  [HIGH]
+14. Reverify / step-up is a no-op stamp — no real re-authentication with the IdP  [HIGH]
+15. Default session lifetime is ~10 years with inactivity timeout off  [HIGH]
+16. Frontend signs sessions with a weak/default secret on only a warning, never fails closed  [MEDIUM]
+17. No replay/uniqueness or nonce binding for SAML; CSRF cookie is the only anti-replay control  [MEDIUM]
+18. Backend client trusts secret key as a bearer with no TLS pinning and no webhook/SCIM signature verification  [MEDIUM]
+19. PII (user email) written to logs on every sign-in and warning path  [MEDIUM]
+20. No transport / security-header defaults (HSTS, CSP, CORS, HTTPS enforcement)  [MEDIUM]
+21. State, SAML-relay and session cookies are all signed with the same HS256 secret  [MEDIUM]
+22. SAML NameID identifierFormat defaults to a SAML 1.1 format URN  [MEDIUM]
+23. getAuth() fallback and signed-out object are shared mutable singletons  [LOW]
+24. Verbose / inconsistent error handling and silent body-parse failures  [LOW]
+
+
+====
+1. Access JWT verification does not pin the signing algorithm (alg / HS-RS confusion)  [CRITICAL]
+
+SITUATION / PROBLEM:
+Every call that verifies a library-minted token calls jose `jwtVerify` without an `algorithms` allowlist. The session cookie, the OAuth `state` cookie, the SAML relay cookie, the access tokens, and the public `verifyToken()`/`verifyMachineToken()` all verify with no pinned algorithm. jose will accept whatever algorithm the token header declares as long as the key type is compatible.
+
+ROOT CAUSE:
+`jwtVerify(token, key, opts)` is invoked with `opts` that never set `algorithms`. In embedded mode the key is a symmetric `Uint8Array` (HS256); in production it is a remote JWKS. With no allowlist, the verifier follows the token's own `alg` header rather than the one the issuer is supposed to use.
+
+SCENARIO:
+In production mode (`verify.ts`) tokens are expected to be RS256 verified against a JWKS. If an attacker submits a token whose header says `alg: HS256` and signs it using the PUBLIC RSA key bytes as an HMAC secret, a verifier that does not pin `algorithms: ['RS256']` can be tricked into HMAC-verifying with the public key (classic RS/HS confusion). Symmetrically, because no path pins HS256-only, a forged token presenting an unexpected algorithm header is evaluated on the attacker's terms.
+
+RISK:
+Full authentication bypass / token forgery, leading to arbitrary identity and arbitrary roles/permissions. Likelihood is high wherever a JWKS (asymmetric) path is used; even in embedded-only deployments the missing pin removes defense-in-depth against future algorithm-agility bugs.
+
+REPRO STEPS:
+1. Stand up the library in production mode (AUTH_EMBEDDED unset) with an RS256 JWKS issuer.
+2. Take the issuer's public key, craft a JWT with header `{"alg":"HS256"}` and the desired claims, HMAC-sign it with the PEM public-key bytes.
+3. Present it as a Bearer token to `verifyToken()` / `authenticateRequest()`.
+4. Observe it verifies and yields attacker-chosen claims because no `algorithms` allowlist was set.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts (lines 88-109)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 607-615, 752-775, 1212-1229, 567-587, 717-733)
+
+CALL COUNT:
+7 verification call sites: 2 in verify.ts (embedded jwtVerify and JWKS jwtVerify), 5 in frontend.ts (readSession, readState, readSamlRelay, plus the matching SignJWT mints that establish the unpinned tokens). All within the library.
+
+FIX:
+* Root cause being fixed: verification follows the token-supplied algorithm.
+* How: pin an explicit `algorithms` allowlist on every `jwtVerify` call.
+* Structure of the fix: pass `{ algorithms: ['HS256'] }` for embedded/symmetric verification and `{ algorithms: ['RS256'] }` (or the configured asymmetric set) for the JWKS path; reject anything else.
+* Files changed and how: verify.ts — add `algorithms` to both the embedded and JWKS `verifyOpts`/`jwksOpts`. frontend.ts — add `{ algorithms: ['HS256'] }` to the jwtVerify calls in readSession, readState, readSamlRelay.
+
+====
+2. SAML assertion Audience is never validated against the SP Entity ID  [CRITICAL]
+
+SITUATION / PROBLEM:
+The SAML client is built passing `audience: cfg.spEntityId` to node-saml. In node-saml v5 the `audience` option configures the value placed into outbound AuthnRequests / metadata, NOT a check that the inbound assertion's `<AudienceRestriction><Audience>` equals the SP Entity ID. There is no explicit AudienceRestriction validation in the ACS path. An assertion minted for a DIFFERENT Service Provider can therefore be replayed into this SP.
+
+ROOT CAUSE:
+`buildSamlClient()` relies on a misread of the node-saml option; `validateSamlAcs()` consumes the resulting profile without independently asserting the assertion audience matches `spEntityId`.
+
+SCENARIO:
+The same IdP (e.g. a Google Workspace tenant) fronts several SAML SPs. A user signs into a low-value SP and the attacker captures that signed assertion (or an insider operates a malicious SP). Because this SP never checks that the assertion's audience is its own Entity ID, the captured assertion validates here and establishes a session as that user.
+
+RISK:
+Cross-SP assertion reuse → authentication as another user / privilege transfer between applications. High impact, plausible in any multi-SP IdP deployment.
+
+REPRO STEPS:
+1. Configure two SPs against one IdP; capture a valid signed SAML Response issued to SP-A.
+2. POST that Response to SP-B's `/saml/acs` (this library) with a matching RelayState cookie crafted via the login route.
+3. Observe a session is established despite the audience naming SP-A.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts (lines 63-89, 119-162)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 1260-1296)
+
+CALL COUNT:
+1 ACS validation call site (frontend.ts handleSamlAcs → validateSamlAcs in saml.ts). Library-internal.
+
+FIX:
+* Root cause being fixed: missing audience-restriction enforcement on inbound assertions.
+* How: explicitly assert the validated profile's audience equals `cfg.spEntityId`.
+* Structure of the fix: after node-saml validation, read the assertion's AudienceRestriction and compare (constant-time / exact) to the configured SP Entity ID; reject on mismatch.
+* Files changed and how: saml.ts — in validateSamlAcs, verify the audience claim against the configured `spEntityId` and throw on mismatch; ensure the node-saml config actually enables audience checking rather than only setting the outbound value.
+
+====
+3. SAML response replay: InResponseTo disabled and no assertion-ID replay cache  [CRITICAL]
+
+SITUATION / PROBLEM:
+The SAML client sets `validateInResponseTo: ValidateInResponseTo.never`, so the binding between the AuthnRequest and the Response is not checked, and there is no cache of consumed assertion IDs or NotOnOrAfter-bounded one-time use. A signed SAML Response, once observed, can be replayed within its validity window (and the validity window is only loosely bounded — see clock-skew default).
+
+ROOT CAUSE:
+`buildSamlClient()` deliberately turns off InResponseTo validation ("would need cross-process shared storage"), substituting only a per-login RelayState cookie. RelayState is an unauthenticated, attacker-replayable value, not an assertion-replay defense.
+
+SCENARIO:
+An attacker who captures a victim's signed SAML Response (network logger, proxy, browser history of the POST body, or a logged ACS payload) initiates their own SAML login to obtain a fresh signed RelayState cookie, then POSTs the captured victim Response together with the matching RelayState. With no InResponseTo and no assertion-ID replay cache, the Response validates again and a session is minted for the victim.
+
+RISK:
+Session impersonation by SAML Response replay. High impact; feasible whenever a Response can be observed once.
+
+REPRO STEPS:
+1. Capture a valid SAML Response delivered to `/saml/acs`.
+2. Hit `/saml/login` to mint a fresh `*_saml_relay` cookie and read back the RelayState it expects.
+3. POST the captured SAMLResponse with that RelayState to `/saml/acs`.
+4. Observe a session cookie is issued for the victim.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts (lines 76-89, 119-162)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 1241-1296)
+
+CALL COUNT:
+2 call sites: handleSamlLogin and handleSamlAcs in frontend.ts (both route into saml.ts). Library-internal.
+
+FIX:
+* Root cause being fixed: no per-response one-time-use enforcement.
+* How: enforce InResponseTo binding and/or a replay cache of consumed assertion IDs keyed until NotOnOrAfter.
+* Structure of the fix: add a pluggable replay store (reuse the SessionStore abstraction or a small TTL cache); record each consumed assertion ID and reject duplicates; enable node-saml InResponseTo validation backed by that store, or bind the AuthnRequest ID into the signed relay cookie and require the Response's InResponseTo to equal it.
+* Files changed and how: saml.ts — set `validateInResponseTo` to a real mode and surface/return the assertion ID and InResponseTo. frontend.ts — store the AuthnRequest ID in the signed relay cookie, compare it to the Response's InResponseTo at ACS, and reject already-seen assertion IDs.
+
+====
+4. Default RBAC grant is a full org-admin allow-by-default for anyone who clears domain check  [CRITICAL]
+
+SITUATION / PROBLEM:
+When the embedding app does not supply `resolveGrants`, `defaultResolveGrants()` returns a membership with role `org:admin` and permissions `['*:read','*:write','org:sys_memberships:manage']` for EVERY authenticated identity. There is no mapping of upstream Google Workspace groups to roles — any user who passes domain enforcement becomes an admin of the "internal" org with read/write everything.
+
+ROOT CAUSE:
+The default grant function ignores the identity's groups entirely and hands out wildcard write plus membership-management to all comers; the library's permission model treats `*:write` and `org:sys_memberships:manage` as full authority.
+
+SCENARIO:
+An app is wired up with domain enforcement (good) but the developer forgets to pass `resolveGrants` (easy — it is optional). Every employee — intern, contractor, anyone with a company Google account — is now org admin with `*:write` and can manage memberships. Combined with finding 10, even some non-employee accounts can pass domain checks.
+
+RISK:
+Privilege escalation to admin for the entire user base by default. High likelihood because the insecure behavior is the zero-config default and is silent.
+
+REPRO STEPS:
+1. Call createFederatedFrontend without `resolveGrants`.
+2. Sign in any allowed-domain account.
+3. Inspect the minted token / `<Protect permission="anything:write">` — it passes; `org:sys_memberships:manage` is granted.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 379-393, 1004-1019, 528)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts (lines 15-25, 31-36)
+
+CALL COUNT:
+1 default-binding site (normalizeConfig sets resolveGrants to defaultResolveGrants at frontend.ts line 528); consumed at the finishSignIn grant resolution (line 1004). Library-internal.
+
+FIX:
+* Root cause being fixed: default-allow admin grant.
+* How: make the default deny-by-default (least privilege) and require explicit group-to-role mapping for any write/admin authority.
+* Structure of the fix: change defaultResolveGrants to grant only a minimal authenticated role with no write and no membership-management; require the embedding app to opt into elevated roles via resolveGrants; optionally fail closed (log loudly) when no resolver is provided.
+* Files changed and how: frontend.ts — rewrite defaultResolveGrants to return `roles:['employee']`, `permissions:[]` (or read-only at most) and no `org:admin` membership; document that admin requires an explicit resolver.
+
+====
+5. Whole-SAML-Response signature not required (XML signature wrapping exposure)  [CRITICAL]
+
+SITUATION / PROBLEM:
+`wantAuthnResponseSigned` defaults to false; only the assertion is required to be signed. When the enclosing Response is unsigned, the surface for XML Signature Wrapping (XSW) attacks is larger: an attacker can wrap or relocate a legitimately-signed assertion inside a crafted unsigned Response so the parser reads attacker-chosen elements while the signature still "validates" against the original assertion.
+
+ROOT CAUSE:
+The config defaults the Response-level signature requirement off ("Google signs the assertion, not always the response") and depends entirely on the underlying library's XSW hardening, which is left at defaults and not explicitly asserted by this code.
+
+SCENARIO:
+An attacker obtains one validly-signed assertion (their own or captured), then constructs a Response document containing both the signed assertion and an injected assertion/attributes positioned so the signature check passes on the original while profile extraction reads the injected NameID/email. Because the Response is not required to be signed and audience/replay checks are weak (findings 2 and 3), the forged identity is accepted.
+
+RISK:
+Identity forgery / authentication bypass via signature wrapping. High impact; exploitability depends on the parser but the missing Response-signature requirement removes a key mitigation.
+
+REPRO STEPS:
+1. Acquire one valid signed assertion from the IdP.
+2. Build a Response wrapping it with an injected assertion carrying an attacker email.
+3. POST to `/saml/acs` with a valid RelayState cookie.
+4. Observe whether the injected identity is accepted (depends on XSW robustness, which this code does not enforce).
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts (lines 48-50, 63-89, 119-162)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 1260-1296)
+
+CALL COUNT:
+1 ACS validation call site (handleSamlAcs → validateSamlAcs). Library-internal.
+
+FIX:
+* Root cause being fixed: optional Response-level signature + unverified XSW posture.
+* How: require the full Response to be signed by default and explicitly assert single-assertion / no-wrapping handling.
+* Structure of the fix: default `wantAuthnResponseSigned` to true (allow opt-out only with documented risk), and after validation assert exactly one signed assertion was consumed and that the extracted identity came from the signed subtree.
+* Files changed and how: saml.ts — flip the default at lines 48-50/76; add post-validation assertions on assertion count and signature coverage; ensure XXE-safe parsing options are explicitly set rather than relied upon.
+
+====
+6. Session and access tokens carry no audience; tokens are accepted cross-app  [HIGH]
+
+SITUATION / PROBLEM:
+Minted session JWTs and access tokens set issuer and expiry but never set an `aud`. `verifyToken()` treats `audience` as optional and does not require it. Two apps sharing the same `AUTH_SESSION_SECRET` (or the same default cookie prefix, which the code itself warns share a cookie jar) will accept each other's tokens.
+
+ROOT CAUSE:
+signSession / mintAccessToken omit `setAudience`; verifyToken only applies audience when the caller passes one and otherwise skips the check.
+
+SCENARIO:
+Two embedded apps on the same host use the default cookie prefix `oaf` and the same secret. A token minted for app A is a valid Bearer for app B's `verifyToken()` because neither audience-binds nor distinguishes the token's intended consumer.
+
+RISK:
+Token confusion / cross-app privilege bleed; tokens minted for a low-trust app are honored by a high-trust app. Medium-to-high likelihood given the documented shared-cookie-jar default.
+
+REPRO STEPS:
+1. Configure two apps with the same secret/prefix.
+2. Mint an access token in app A.
+3. Send it as Bearer to app B's protected route; observe it verifies.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 567-587, 717-733)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts (lines 88-94, 105-109)
+
+CALL COUNT:
+3 sites: 2 token mints (signSession, mintAccessToken in frontend.ts) and 1 verifier (verify.ts). Library-internal.
+
+FIX:
+* Root cause being fixed: no audience binding/enforcement.
+* How: stamp a per-app `aud` on minted tokens and require it on verify.
+* Structure of the fix: add an `audience` config to the frontend; `setAudience` on session/access tokens; default verifyToken to require the configured audience.
+* Files changed and how: frontend.ts — add audience to config and to both SignJWT chains. verify.ts — require audience when configured (do not silently skip).
+
+====
+7. Embedded-mode token verification skips issuer check and trusts a fully app-controlled HS256 secret  [HIGH]
+
+SITUATION / PROBLEM:
+In embedded mode `verifyToken()` builds `verifyOpts` from only `audience` and `clockSkew`; it never sets `issuer`, so the `iss` claim is not validated even though tokens are stamped with one. Verification rests entirely on a single symmetric secret that the same process both signs and verifies with, with no issuer/audience binding.
+
+ROOT CAUSE:
+The embedded branch omits issuer enforcement (and, per finding 1, algorithm pinning). The HS256 design means any code path or app that learns the secret can forge fully-trusted tokens.
+
+SCENARIO:
+A token whose `iss` is wrong (e.g. from a different OpenAuthFederated deployment that happens to share or leak the secret) is accepted because `iss` is not checked. Combined with finding 6 there is no audience either, so the only gate is the shared secret.
+
+RISK:
+Weakened token trust boundary; cross-deployment token acceptance; forgeability if the secret leaks (and the secret is also used for state and relay cookies — finding 21). Medium likelihood, high impact.
+
+REPRO STEPS:
+1. Embedded mode, known secret. Mint a token with `iss: "someone-else"`.
+2. Call verifyToken; observe it passes (no issuer assertion).
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts (lines 88-94)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 581-585, 729-731)
+
+CALL COUNT:
+1 embedded verification call site (verify.ts), feeding all middleware/permission helpers. Library-internal.
+
+FIX:
+* Root cause being fixed: missing issuer enforcement in embedded verification.
+* How: set and require `issuer` in the embedded verifyOpts (matching the configured `iss`).
+* Structure of the fix: thread the configured issuer into verifyToken's embedded branch and require it.
+* Files changed and how: verify.ts — add `issuer` to the embedded `verifyOpts` and require it; align defaults with the issuer stamped in frontend.ts.
+
+====
+8. Cookies default to non-Secure and SameSite=Lax (CSRF / cookie theft over HTTP)  [HIGH]
+
+SITUATION / PROBLEM:
+`cookieSecure` defaults to false and all cookies are written with `SameSite=Lax` and only conditionally `Secure`. The session cookie, OAuth state cookie, and SAML relay cookie can therefore be transmitted over plain HTTP and are not `SameSite=Strict`. The SAML ACS is a cross-site top-level POST, which `SameSite=Lax` does NOT send cookies for in modern browsers (functional break) while still leaving the relay cookie exposed if `Secure` is off.
+
+ROOT CAUSE:
+`normalizeConfig` defaults `cookieSecure` to false; `setCookie`/`clearCookie` hardcode `SameSite=Lax` and add `Secure` only when the flag is set.
+
+SCENARIO:
+The library is deployed without explicitly setting `cookieSecure: true` (the insecure default). A network attacker on the same LAN/Wi-Fi reads the session cookie over HTTP and replays it. Because cookies are not port-isolated and default to a shared prefix, a sibling app on the host can also read them.
+
+RISK:
+Session hijacking over HTTP; CSRF surface from Lax defaults. High likelihood given the unsafe default.
+
+REPRO STEPS:
+1. Deploy with defaults (no cookieSecure).
+2. Sign in over HTTP; capture the `oaf_session` cookie on the wire.
+3. Replay it to access the session.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 252-274, 527, 833-836, 1021-1024, 1070-1073, 1098-1101, 1124-1127, 1251-1254)
+
+CALL COUNT:
+7 setCookie call sites plus the default at line 527, all in frontend.ts. Library-internal.
+
+FIX:
+* Root cause being fixed: insecure cookie defaults.
+* How: default `cookieSecure` to true, make `SameSite` configurable and default the SAML relay/session cookies appropriately, and never ship a non-Secure default for production.
+* Structure of the fix: flip the default; allow per-cookie SameSite (the SAML relay cookie needs SameSite=None;Secure to survive the cross-site ACS POST, while the session cookie can be Lax/Strict).
+* Files changed and how: frontend.ts — change line 527 default to true; parameterize SameSite in setCookie and choose per cookie; document the HTTPS requirement.
+
+====
+9. SAML "email verified" is hardcoded true regardless of the assertion  [HIGH]
+
+SITUATION / PROBLEM:
+In `validateSamlAcs()` the mapped identity sets `emailVerified: true` unconditionally for every SAML sign-in. The downstream domain enforcement in `finishSignIn()` requires `identity.emailVerified` to be true — so the SAML path can never fail the verified-email gate, regardless of what the IdP actually asserted.
+
+ROOT CAUSE:
+The code assumes "a signed Workspace assertion implies a verified email" and bakes that assumption into a constant instead of reading an attribute.
+
+SCENARIO:
+A SAML IdP (not necessarily Google, or a misconfigured Google custom app) issues an assertion for an unverified or aliased address. The library treats it as verified and, if the domain matches, signs the user in. Coupled with finding 2/3 this compounds identity spoofing.
+
+RISK:
+Acceptance of unverified email identities on the SAML path; bypass of the verified-email control. High impact within the SAML flow.
+
+REPRO STEPS:
+1. Configure a SAML IdP that can assert an unverified email.
+2. Complete a SAML sign-in.
+3. Observe the user is admitted because emailVerified is forced true.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts (lines 146-155)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 982-1001)
+
+CALL COUNT:
+1 mapping site (saml.ts) consumed by 1 enforcement site (finishSignIn in frontend.ts). Library-internal.
+
+FIX:
+* Root cause being fixed: hardcoded verified flag.
+* How: derive emailVerified from an assertion attribute where available, and make the "signed assertion implies verified" assumption explicit and configurable.
+* Structure of the fix: read a verified-email attribute from the profile; default to false when absent unless an explicit config opts into trusting the assertion.
+* Files changed and how: saml.ts — map emailVerified from the assertion rather than a literal true; add config to control the trust assumption.
+
+====
+10. Hosted-domain (hd) is not actually enforced; allowlisted personal Gmail passes  [HIGH]
+
+SITUATION / PROBLEM:
+Domain enforcement in `finishSignIn()` accepts the sign-in when `(identity.hd || emailDomain(identity.email))` is on the allowlist. For a consumer Gmail account `hd` is absent, so a personal `user@gmail.com` is admitted whenever `gmail.com` (or any domain the operator lists) is allowlisted. The OIDC path also only sets the `hd` request param as a hint and never rejects a token lacking the `hd` claim, so the Workspace-membership guarantee is not enforced on the token.
+
+ROOT CAUSE:
+The check falls back from the authoritative `hd` (Workspace membership) to the email domain, conflating "email ends in X" with "is a member of Workspace X". `hd` is treated as optional and never required.
+
+SCENARIO:
+An operator allowlists their domain. A user outside the Workspace whose email merely ends in an allowlisted domain (or any account when a public domain is allowlisted) passes. The intended "must have an active company Google Workspace account" rule is not enforced by the token's `hd`.
+
+RISK:
+Out-of-org accounts gaining access; the core domain-membership guarantee is weaker than documented. High impact relative to the stated charter.
+
+REPRO STEPS:
+1. Allowlist a domain.
+2. Sign in with an account whose email domain matches but which is not a Workspace member (no `hd`).
+3. Observe admission.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 359-362, 838-849, 949-958, 982-1001)
+
+CALL COUNT:
+1 enforcement site (finishSignIn). Library-internal.
+
+FIX:
+* Root cause being fixed: hd treated as optional / email-domain fallback.
+* How: when the deployment is Workspace-gated, require a present `hd` claim that is on the allowlist; do not fall back to email domain.
+* Structure of the fix: add a config flag "require hosted domain"; when set, reject identities lacking `hd` or whose `hd` is not allowlisted.
+* Files changed and how: frontend.ts — change the presentedDomain logic in finishSignIn to require `hd` under the gated mode rather than OR-ing in the email domain.
+
+====
+11. Open redirect via redirect_url / redirect_url_complete / returnTo on every sign-in path  [HIGH]
+
+SITUATION / PROBLEM:
+`handleSsoStart`, `handleSamlLogin`, the callback, and `handleReverify` take `redirect_url` / `redirect_url_complete` straight from the query string and `backToApp()` will 302 to an absolute external URL when one is supplied. There is no allowlist of permitted redirect targets. `handleReverify` redirects to `redirect_url` with no validation at all.
+
+ROOT CAUSE:
+`backToApp()` honors any absolute `http(s)` URL; redirect targets are never validated against an allowlist or same-origin policy.
+
+SCENARIO:
+An attacker sends a victim a sign-in link with `redirect_url_complete=https://evil.example/phish`. After a real sign-in, the app 302-redirects the authenticated user to the attacker site (open redirect), enabling phishing or token/code leakage via the landing page.
+
+RISK:
+Open redirect → phishing, and potential leakage of any auth artifacts appended to the redirect. High likelihood; classic and easy to exploit.
+
+REPRO STEPS:
+1. Visit `/sign_in/sso?redirect_url_complete=https://evil.example`.
+2. Complete sign-in.
+3. Observe the 302 to the external host.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 807-852, 854-870, 872-878, 1115-1139, 1241-1257)
+
+CALL COUNT:
+4 call sites that consume unvalidated redirect targets: handleSsoStart, handleSamlLogin, handleCallback/finishSignIn (via backToApp), handleReverify. Library-internal.
+
+FIX:
+* Root cause being fixed: unvalidated redirect targets.
+* How: validate every redirect target against an allowlist (configured origins) or force same-origin relative paths.
+* Structure of the fix: add an `allowedRedirectOrigins` config; in backToApp and handleReverify, reject or rewrite any target not matching it.
+* Files changed and how: frontend.ts — gate backToApp and handleReverify on an origin allowlist; default to same-origin relative redirects.
+
+====
+12. SSRF on production JWKS fetch via attacker-influenced issuer URL  [HIGH]
+
+SITUATION / PROBLEM:
+In production mode `verifyToken()` constructs the JWKS URL from `opts.issuer ?? process.env.AUTH_JWT_ISSUER` as `${issuer}/.well-known/jwks.json` and fetches it with no scheme/host allowlist. If the issuer value is ever attacker-influenced (a caller forwarding a client-supplied issuer, or a token-driven issuer), the library will make an outbound request to an arbitrary URL.
+
+ROOT CAUSE:
+The issuer string is interpolated directly into a fetched URL via `createRemoteJWKSet` with no validation that it is an expected, https, allowlisted host.
+
+SCENARIO:
+A caller passes a per-request issuer (the option exists) sourced from untrusted input. An attacker sets issuer to an internal address (e.g. a cloud metadata endpoint or internal service), causing the server to fetch it; the response is then used as a key set.
+
+RISK:
+Server-Side Request Forgery and potential key-confusion if the attacker controls the JWKS response. Likelihood depends on caller wiring but the library provides no guard.
+
+REPRO STEPS:
+1. Call verifyToken with `{ issuer: "http://169.254.169.254/latest" }` (or any internal URL) in production mode.
+2. Observe the outbound fetch to the attacker-chosen host.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts (lines 96-109)
+
+CALL COUNT:
+1 JWKS-fetch construction site (verify.ts), reachable from every public verifier (verifyToken/verifyMachineToken/AuthClient.verifyToken). Library-internal.
+
+FIX:
+* Root cause being fixed: unvalidated issuer-to-URL.
+* How: require https and validate the issuer host against an allowlist before constructing the JWKS URL.
+* Structure of the fix: add issuer validation (scheme https, host in an allowlist) in verify.ts; reject otherwise.
+* Files changed and how: verify.ts — validate issuer before `new URL(...)`/createRemoteJWKSet.
+
+====
+13. Session-store self-heal re-creates a session from a cookie, defeating revocation  [HIGH]
+
+SITUATION / PROBLEM:
+`readSession()` has a "self-heal" path: when a valid signed cookie presents a `sid` for which the store has NO record, it re-creates the durable record from the cookie (`revoked: false`). Because `remove()` tombstones by keeping a `revoked` record, revocation survives — but if the tombstone file is ever lost, cleared, rotated, or the store is swapped/emptied, a still-valid long-lived cookie silently re-creates an active session. Given the ~10-year default cookie lifetime (finding 15), a signed-out/offboarded user's cookie can resurrect a session.
+
+ROOT CAUSE:
+The self-heal trusts the signed cookie as sufficient to mint a fresh non-revoked record whenever no record is found, conflating "no record" (which can mean "tombstone was lost") with "first request after upgrade".
+
+SCENARIO:
+An admin revokes a user (tombstone written). Later the store directory is cleaned/migrated, or a different store instance is used. The user replays their old (still in-date) session cookie; readSession finds no record and re-creates an active one. Revocation is undone.
+
+RISK:
+Revocation bypass / session resurrection, especially severe with multi-year cookie lifetimes. Medium likelihood, high impact (offboarding is a core promise).
+
+REPRO STEPS:
+1. Sign in (record created), then revoke (tombstone).
+2. Delete/clear the session store directory (simulating rotation/migration).
+3. Replay the original session cookie; observe a new active record is created and access is granted.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 638-671)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/session-store.ts (lines 135-176)
+
+CALL COUNT:
+1 self-heal site (readSession in frontend.ts). Library-internal.
+
+FIX:
+* Root cause being fixed: cookie-only resurrection of sessions.
+* How: do not auto-create an active session from a cookie when the store is authoritative; treat "no record" as signed-out (fail closed) once a store is configured, or require a positive non-tombstone marker.
+* Structure of the fix: gate self-heal behind an explicit one-time migration flag rather than steady-state behavior; otherwise return null when the store has no record.
+* Files changed and how: frontend.ts — change the self-heal branch to fail closed (return null) by default; add an opt-in migration mode.
+
+====
+14. Reverify / step-up is a no-op stamp — no real re-authentication with the IdP  [HIGH]
+
+SITUATION / PROBLEM:
+`handleReverify()` (and the React `reverify()`/`useReverification`) merely refresh `lastVerifiedAt` to "now" without forcing any IdP re-prompt (no `prompt=login`, no SAML ForceAuthn). The step-up MFA the charter and `useReverification` advertise is fake: a sensitive action "re-verifies" with no actual proof of presence.
+
+ROOT CAUSE:
+The reverify endpoint just re-signs the session with a fresh timestamp; the OIDC re-auth path with `prompt=login`/`max_age` and SAML ForceAuthn is not implemented (the SAML client even sets `disableRequestedAuthnContext`).
+
+SCENARIO:
+An attacker with a live session (e.g. an unlocked browser, or a stolen-but-valid cookie) triggers a "reverify"-gated sensitive action. The reverify silently succeeds without any MFA/re-login challenge, so the step-up control provides no additional assurance.
+
+RISK:
+Step-up authentication bypass; sensitive actions are not actually re-verified. High impact for any flow relying on `useReverification`.
+
+REPRO STEPS:
+1. Sign in.
+2. Call the reverify endpoint / useReverification action.
+3. Observe lastVerifiedAt updates with no IdP prompt; the gated action proceeds.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 1115-1139)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/core.ts (lines 463-469)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/hooks.ts (lines 147-162)
+
+CALL COUNT:
+1 backend reverify site (frontend.ts) plus 1 client driver (core.ts reverify) and 1 hook (hooks.ts). Library-internal.
+
+FIX:
+* Root cause being fixed: reverify performs no real re-authentication.
+* How: route reverify through the IdP with `prompt=login` + `max_age` (OIDC) or ForceAuthn (SAML) and only stamp lastVerifiedAt after a fresh assertion.
+* Structure of the fix: change handleReverify to start a fresh authorize redirect with re-auth params; update lastVerifiedAt only on successful fresh callback.
+* Files changed and how: frontend.ts — implement IdP re-prompt in reverify; saml.ts — support ForceAuthn for the step-up path.
+
+====
+15. Default session lifetime is ~10 years with inactivity timeout off  [HIGH]
+
+SITUATION / PROBLEM:
+`sessionTtlSeconds` defaults to ~10 years and `inactivityTimeoutSeconds` defaults to 0 (disabled). The session cookie and the signed session JWT therefore live effectively forever, and idle sessions never expire by default. Combined with non-Secure cookie defaults (finding 8) and the resurrection path (finding 13), a captured cookie is usable for years.
+
+ROOT CAUSE:
+Deliberate "stay logged in forever" defaults set the absolute and idle ceilings to never.
+
+SCENARIO:
+A cookie stolen once (over HTTP, from disk, from logs) remains a valid credential for a decade with no idle expiry, and there is no audience/issuer binding to limit its use (findings 6/7).
+
+RISK:
+Long-lived credential exposure; stolen sessions remain valid indefinitely. High impact; the default is the insecure choice.
+
+REPRO STEPS:
+1. Create a session with defaults.
+2. Inspect the session JWT `exp` (~10 years out) and cookie Max-Age.
+3. Leave idle indefinitely; observe it never times out.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 515-525, 1020-1024, 1034)
+
+CALL COUNT:
+1 default-binding site (normalizeConfig). Library-internal.
+
+FIX:
+* Root cause being fixed: unbounded session lifetimes.
+* How: default to a sane absolute lifetime (e.g. hours-to-days) and enable an idle timeout by default.
+* Structure of the fix: change the defaults; keep the long-lived behavior available only as an explicit opt-in.
+* Files changed and how: frontend.ts — set conservative defaults for sessionTtlSeconds and inactivityTimeoutSeconds.
+
+====
+16. Frontend signs sessions with a weak/default secret on only a warning, never fails closed  [MEDIUM]
+
+SITUATION / PROBLEM:
+`createFederatedFrontend()` warns (does not throw) when `sessionSecret` is empty or equals `"dev-shared-secret"`, then proceeds to sign real sessions and access tokens with that weak secret. By contrast `verify.ts` correctly throws on the same condition. The signing side is permissive while the verifying side is strict — an inconsistency that lets a deployment mint sessions under a guessable secret.
+
+ROOT CAUSE:
+The constructor only logs a warning for an unset/placeholder secret instead of refusing to operate.
+
+SCENARIO:
+An operator forgets to set `AUTH_SESSION_SECRET`. The frontend still boots and signs sessions with an empty/placeholder secret. Anyone who knows the well-known placeholder can forge session and access tokens.
+
+RISK:
+Trivial token forgery under a known secret. Medium likelihood (misconfiguration), high impact when it happens.
+
+REPRO STEPS:
+1. Construct the frontend with `sessionSecret: ""` or `"dev-shared-secret"`.
+2. Observe it only warns and proceeds; sign a forged HS256 token with the known value and present it.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 549-565)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts (lines 57-66)
+
+CALL COUNT:
+1 construction site (createFederatedFrontend). Library-internal.
+
+FIX:
+* Root cause being fixed: signing under a weak/default secret.
+* How: throw (fail closed) on empty/placeholder/short secrets in the frontend constructor, mirroring verify.ts; enforce a minimum length/entropy.
+* Structure of the fix: replace the warning with a hard error; optionally integrate loadOrCreateSecret as a documented stable-secret fallback.
+* Files changed and how: frontend.ts — change the secret check to throw and add a minimum-length check.
+
+====
+17. No replay/uniqueness or nonce binding for SAML; CSRF cookie is the only anti-replay control  [MEDIUM]
+
+SITUATION / PROBLEM:
+The SAML path's sole anti-CSRF/anti-replay mechanism is the signed RelayState cookie compared to the echoed RelayState. There is no per-attempt nonce bound into the assertion, no InResponseTo (finding 3), and the RelayState can be obtained fresh by any party that can hit `/saml/login`. This is weaker than the OIDC path which at least binds a `nonce` into the id_token.
+
+ROOT CAUSE:
+RelayState is used as the only correlation token and it is not bound to a specific assertion.
+
+SCENARIO:
+Overlaps with finding 3; documented separately because even without a captured Response, the absence of assertion-bound correlation means the CSRF protection alone does not prevent a determined replay once a Response and a self-issued RelayState are combined.
+
+RISK:
+Weak SAML CSRF/replay posture. Medium.
+
+REPRO STEPS:
+1. Issue `/saml/login` to get a valid relay cookie + RelayState.
+2. Pair it with any otherwise-valid Response.
+3. Observe acceptance (subject to findings 2/3).
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 1200-1296)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts (lines 96-106, 119-162)
+
+CALL COUNT:
+2 sites (handleSamlLogin, handleSamlAcs). Library-internal.
+
+FIX:
+* Root cause being fixed: no assertion-bound correlation.
+* How: bind the AuthnRequest ID into the signed relay cookie and require the Response InResponseTo to match (see finding 3 fix); enforce single-use.
+* Structure of the fix: shared with finding 3.
+* Files changed and how: frontend.ts / saml.ts — as in finding 3.
+
+====
+18. Backend client trusts secret key as a bearer with no TLS pinning and no webhook/SCIM signature verification  [MEDIUM]
+
+SITUATION / PROBLEM:
+`AuthClient.request()` sends the secret key as a plain Bearer to `apiUrl` (default `https://api.localhost/v1`) and trusts any JSON the endpoint returns (user/session/org records that drive provisioning/RBAC). The library exposes no webhook signature verification helper and no SCIM endpoint auth — the charter calls out SCIM webhooks (`user.created`/`deleted`, group changes) but there is no `verifyWebhook`/signature-check primitive anywhere in the library.
+
+ROOT CAUSE:
+The client is a thin fetch wrapper with no response authentication beyond TLS-by-URL, and the provisioning/webhook trust boundary is entirely the embedding app's problem with no library support to do it safely.
+
+SCENARIO:
+A compromised or spoofed Backend API (or a misconfigured plaintext apiUrl) returns crafted membership/role records; the client forwards them into the app's RBAC. Separately, an app receiving SCIM/webhook calls has no library primitive to verify their signatures, so a forged `user.deleted`/`user.created` or membership-change webhook can be accepted.
+
+RISK:
+Provisioning/RBAC tampering and unauthenticated deprovision/escalation via forged webhooks. Medium.
+
+REPRO STEPS:
+1. Point AuthClient at a controlled endpoint (or intercept).
+2. Return crafted membership records; observe they are trusted.
+3. Note the library offers no webhook-signature verifier for inbound provisioning events.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts (lines 408-475, 100-301)
+
+CALL COUNT:
+All resource methods funnel through 2 request sites (request, requestList in client.ts). Library-internal. 0 webhook-verification sites exist (the gap).
+
+FIX:
+* Root cause being fixed: no inbound provisioning/webhook authentication primitive.
+* How: add a webhook signature verification helper (HMAC/ed25519 over the raw body with timestamp tolerance and constant-time compare) and require https for apiUrl.
+* Structure of the fix: new exported `verifyWebhook(rawBody, headers, secret)`; validate apiUrl scheme in the client constructor.
+* Files changed and how: client.ts — enforce https apiUrl; new module/export for webhook verification used by SCIM/webhook handlers.
+
+====
+19. PII (user email) written to logs on every sign-in and warning path  [MEDIUM]
+
+SITUATION / PROBLEM:
+The default logger and several call sites write the user email and presented domain into logs: the sign-in success line logs `Sign-in established for <email>`, and rejection/warn lines log the presented domain. The default logger sends warn/error to console. Emails are PII; routine logging of them at info on every sign-in is excessive and risks leakage.
+
+ROOT CAUSE:
+Log statements interpolate raw identity values; there is no redaction layer.
+
+SCENARIO:
+Logs are shipped to a third-party aggregator or are world-readable; they now contain a record of every user's email and sign-in times.
+
+RISK:
+PII disclosure / privacy-compliance exposure. Medium likelihood, low-to-medium impact.
+
+REPRO STEPS:
+1. Sign in.
+2. Inspect logs; observe the email in the success line.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 529-535, 992-993, 1041)
+
+CALL COUNT:
+3 logging sites that emit identity values (finishSignIn success, domain-reject warn, default logger). Library-internal.
+
+FIX:
+* Root cause being fixed: unredacted PII in logs.
+* How: redact/hash emails in log lines; drop the per-sign-in info log or gate it behind an audit channel.
+* Structure of the fix: centralize a redaction helper; use a user id / hashed email instead of the raw address.
+* Files changed and how: frontend.ts — redact identity values at the log sites.
+
+====
+20. No transport / security-header defaults (HSTS, CSP, CORS, HTTPS enforcement)  [MEDIUM]
+
+SITUATION / PROBLEM:
+The frontend middleware sets `Cache-Control: no-store` and content types but never sets HSTS, CSP, X-Content-Type-Options, or any CORS policy, and it does not refuse to run over plain HTTP. The charter requires HTTPS-only, HSTS, CSP, and controlled CORS; the library ships none of these defaults.
+
+ROOT CAUSE:
+Response helpers emit only functional headers; there is no security-header layer and no HTTPS guard.
+
+SCENARIO:
+An app mounts the middleware expecting the auth layer to harden transport. It does not, so the auth endpoints are reachable over HTTP and serve responses without HSTS/CSP, widening MITM and injection surfaces.
+
+RISK:
+Missing defense-in-depth on the auth endpoints. Medium.
+
+REPRO STEPS:
+1. Mount the middleware; curl an endpoint over HTTP.
+2. Observe no HSTS/CSP and a served response.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 245-289, 1300-1374)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/express.ts (lines 59-97)
+
+CALL COUNT:
+All responses pass through the router and the 2 response helpers (sendJson, redirect) in frontend.ts. Library-internal.
+
+FIX:
+* Root cause being fixed: no security-header / transport defaults.
+* How: add HSTS, CSP, X-Content-Type-Options, and a configurable CORS allowlist; optionally refuse non-HTTPS in production.
+* Structure of the fix: a shared header-setting helper applied to every response; CORS config on the frontend.
+* Files changed and how: frontend.ts — add the headers in sendJson/redirect and a CORS handler; document HTTPS expectation.
+
+====
+21. State, SAML-relay and session cookies are all signed with the same HS256 secret  [MEDIUM]
+
+SITUATION / PROBLEM:
+`signSession`, `signState`, `signSamlRelay`, and `mintAccessToken` all sign with the single `secretKey` derived from `sessionSecret`. The same key authenticates the long-lived session, the short-lived CSRF state, the SAML relay, and the access tokens. A leak of any one (e.g. via the lower-value state/relay flow) compromises all.
+
+ROOT CAUSE:
+No key separation by purpose; one secret signs every token type.
+
+SCENARIO:
+The secret is exposed through any single token-handling path or a shared-config mistake; the attacker can now forge sessions and access tokens, not just state.
+
+RISK:
+Single point of failure for all signed material. Medium.
+
+REPRO STEPS:
+1. Obtain the session secret.
+2. Forge a session JWT and an access JWT with it (no audience/issuer/alg pin to stop you — findings 1/6/7).
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 550, 567-587, 717-733, 737-750, 1200-1210)
+
+CALL COUNT:
+4 signing sites sharing one key (signSession, mintAccessToken, signState, signSamlRelay). Library-internal.
+
+FIX:
+* Root cause being fixed: no key separation.
+* How: derive per-purpose subkeys (HKDF with distinct info labels) from the master secret for session vs access vs state vs relay.
+* Structure of the fix: a small key-derivation helper producing labeled keys; each signer/verifier uses its own.
+* Files changed and how: frontend.ts — derive and use distinct keys per token type.
+
+====
+22. SAML NameID identifierFormat defaults to a SAML 1.1 format URN  [MEDIUM]
+
+SITUATION / PROBLEM:
+`DEFAULT_NAMEID_FORMAT` is `urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress`. The charter mandates SAML 2.0 exclusively and rejecting SAML 1.x. While the email-address NameID format URN is technically reused under 2.0, hardcoding the 1.1-namespaced URN is at odds with the "SAML 2.0 only" requirement and signals the protocol-version posture is not asserted. There is no explicit check that the Response/assertion is SAML 2.0 (the code does not reject 1.x protocol versions).
+
+ROOT CAUSE:
+The default format constant carries the 1.1 URN and the ACS path never asserts the SAML version.
+
+SCENARIO:
+A misconfigured or hostile IdP responds with non-2.0 protocol semantics; the library does not explicitly reject it, contrary to the stated mandatory requirement.
+
+RISK:
+Protocol-version posture not enforced as required. Medium (mostly compliance/hardening).
+
+REPRO STEPS:
+1. Inspect the default format constant.
+2. Note no SAML-version assertion exists in validateSamlAcs.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts (lines 60, 67-89, 119-173)
+
+CALL COUNT:
+2 sites use the default (buildSamlClient, samlSpMetadata). Library-internal.
+
+FIX:
+* Root cause being fixed: 1.1-namespaced default and no version assertion.
+* How: use the SAML 2.0 nameid-format URN and explicitly assert SAML 2.0 on inbound Responses.
+* Structure of the fix: change the default constant; add a version check that rejects non-2.0.
+* Files changed and how: saml.ts — update DEFAULT_NAMEID_FORMAT and add a 2.0-only assertion in validateSamlAcs.
+
+====
+23. getAuth() fallback and signed-out object are shared mutable singletons  [LOW]
+
+SITUATION / PROBLEM:
+`SIGNED_OUT` is a module-level object; `getAuth()` returns it directly (or a shallow spread) and `federatedMiddleware`/`requireAuth` assign it on error. A consumer that mutates the returned auth object could affect other requests, and the spread copy is shallow (nested fields shared).
+
+ROOT CAUSE:
+A shared constant is handed out as the per-request signed-out auth object.
+
+SCENARIO:
+App code mutates `req.auth` fields expecting per-request isolation; mutations bleed across requests via the shared singleton.
+
+RISK:
+Cross-request state bleed / subtle auth confusion. Low likelihood (depends on caller mutation).
+
+REPRO STEPS:
+1. From two requests, mutate the returned signed-out auth object.
+2. Observe shared state.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/express.ts (lines 44-52, 59-71, 104-108)
+
+CALL COUNT:
+3 sites reference SIGNED_OUT (federatedMiddleware catch, requireAuth, getAuth). Library-internal.
+
+FIX:
+* Root cause being fixed: shared mutable auth object.
+* How: construct a fresh signed-out object per request (or deep-freeze).
+* Structure of the fix: a factory that returns a new object each call.
+* Files changed and how: express.ts — replace the shared constant with a factory.
+
+====
+24. Verbose / inconsistent error handling and silent body-parse failures  [LOW]
+
+SITUATION / PROBLEM:
+`requireAuth` forwards verification errors to `next(err)` (potentially leaking stack traces through the host's default error handler), while `federatedMiddleware` swallows them to signed-out — inconsistent fail behavior. Body parsers (`readJsonBody`/`readFormBody`) swallow all parse/stream errors and resolve to `{}`, masking malformed-input conditions, and `parseCookies` URL-decodes values without bound. Token-exchange error bodies are logged (sliced to 500 chars) which may contain sensitive provider detail.
+
+ROOT CAUSE:
+Error paths are not uniform; failures are silently coerced or forwarded raw.
+
+SCENARIO:
+A verification error in requireAuth surfaces as a 500 with a stack trace via the host's default handler (info leak), while the same error elsewhere is treated as signed-out. Malformed bodies are indistinguishable from empty ones.
+
+RISK:
+Information leakage and inconsistent fail-open/closed behavior. Low.
+
+REPRO STEPS:
+1. Trigger a verification throw under requireAuth without a custom error handler.
+2. Observe the forwarded error vs the swallowed behavior in federatedMiddleware.
+
+SOURCE FILES INVOLVED:
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/express.ts (lines 79-97)
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 227-243, 291-357, 917-919)
+
+CALL COUNT:
+4 sites: requireAuth (express.ts), readJsonBody, readFormBody, token-exchange error log (frontend.ts). Library-internal.
+
+FIX:
+* Root cause being fixed: inconsistent/leaky error handling.
+* How: standardize on fail-closed responses without stack traces; distinguish malformed input from empty; avoid logging raw provider error bodies.
+* Structure of the fix: a shared error responder; explicit malformed-body rejection.
+* Files changed and how: express.ts — return a clean 401/500 instead of next(err) leaking; frontend.ts — reject malformed bodies explicitly and stop logging raw provider detail.
+
+====
+END OF REPORT

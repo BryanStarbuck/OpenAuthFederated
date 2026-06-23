@@ -104,7 +104,7 @@ async function testGuard() {
   const mw = createAuthFrontend({
     google: { redirectUri: "http://localhost:9111/api/v1/oauth_callback" },
     allowedDomains: ["act3ai.com"],
-    sessionSecret: "test-secret",
+    sessionSecret: "test-secret-0123456789-abcdefghij-strong",
     logger: () => {}, // silence expected warn/error
   })
 
@@ -137,7 +137,7 @@ async function testGuard() {
       redirectUri: "http://localhost:9111/api/v1/oauth_callback",
     },
     allowedDomains: ["act3ai.com"],
-    sessionSecret: "test-secret",
+    sessionSecret: "test-secret-0123456789-abcdefghij-strong",
     logger: () => {},
   })
   const server2 = http.createServer((req, res) => mw2(req, res))
@@ -169,7 +169,7 @@ async function testGuard() {
       },
     ],
     allowedDomains: ["act3ai.com"],
-    sessionSecret: "test-secret",
+    sessionSecret: "test-secret-0123456789-abcdefghij-strong",
     logger: () => {},
   })
   const server3 = http.createServer((req, res) => mw3(req, res))

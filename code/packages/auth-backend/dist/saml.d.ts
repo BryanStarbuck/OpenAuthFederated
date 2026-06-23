@@ -39,11 +39,28 @@ export interface SamlSpConfig {
     identifierFormat?: string;
     /** Require the assertion to be signed (default true — never accept an unsigned assertion). */
     wantAssertionsSigned?: boolean;
-    /** Require the whole SAML Response to be signed too. Google signs the assertion, not always
-     *  the response, so this defaults to false. */
+    /**
+     * Require the whole SAML Response to be signed too. Defaults to **true** — requiring the
+     * response-level signature is the primary defense against XML Signature Wrapping (XSW), where an
+     * attacker relocates a legitimately-signed assertion inside a forged response. Set false only for
+     * an IdP that genuinely signs the assertion but not the response, accepting the documented risk.
+     */
     wantAuthnResponseSigned?: boolean;
     /** Clock-skew tolerance for the assertion's NotBefore / NotOnOrAfter (default 5000ms). */
     acceptedClockSkewMs?: number;
+    /**
+     * Trust the IdP-asserted email as verified when the (signed) assertion carries no explicit
+     * verified-email attribute. Defaults to **false** (fail closed): the ACS reads an
+     * `email_verified` attribute when present and otherwise marks the email unverified unless this is
+     * set. Set true only for an IdP (e.g. Google Workspace) whose signed assertion implies a verified
+     * address.
+     */
+    trustAssertedEmailVerified?: boolean;
+    /**
+     * Force re-authentication at the IdP on this AuthnRequest (SAML `ForceAuthn`). Used for the
+     * step-up / reverify path so the IdP re-challenges the user rather than silently re-asserting.
+     */
+    forceAuthn?: boolean;
     /** Optional SP private key (PEM) to sign the AuthnRequest. Google does not require it, so
      *  outbound requests are unsigned unless this is set. */
     spPrivateKey?: string;
@@ -52,6 +69,20 @@ export interface SamlSpConfig {
 }
 /** Build a configured node-saml `SAML` instance for SP-initiated SSO against the IdP. */
 export declare function buildSamlClient(cfg: SamlSpConfig): SAML;
+/** A small TTL store of consumed SAML assertion IDs, defeating Response replay within the window. */
+export interface SamlReplayStore {
+    /** Returns true if this assertion id was already consumed (a replay). */
+    seen(assertionId: string): boolean | Promise<boolean>;
+    /** Record a consumed assertion id, expiring no later than `notOnOrAfter` (epoch ms). */
+    record(assertionId: string, notOnOrAfter: number): void | Promise<void>;
+}
+/** Default in-memory {@link SamlReplayStore} — adequate for a single-process embedded deployment. */
+export declare class InMemorySamlReplayStore implements SamlReplayStore {
+    private readonly seenIds;
+    seen(assertionId: string): boolean;
+    record(assertionId: string, notOnOrAfter: number): void;
+    private prune;
+}
 /**
  * Build the SP-initiated login redirect URL (HTTP-Redirect binding). `relayState` is our own
  * random CSRF token; the IdP echoes it back unchanged to the ACS, where we compare it to the
@@ -64,6 +95,8 @@ export interface SamlAcsResult {
     sessionIndex?: string;
     /** RelayState the IdP echoed back (compared against our signed cookie by the caller). */
     relayState?: string;
+    /** The assertion's `InResponseTo` (the AuthnRequest id it answers), when present. */
+    inResponseTo?: string;
 }
 /**
  * Validate an incoming SAML Response (POST binding) and map the verified SAML profile onto the
@@ -75,6 +108,6 @@ export interface SamlAcsResult {
 export declare function validateSamlAcs(saml: SAML, body: {
     SAMLResponse?: string;
     RelayState?: string;
-}): Promise<SamlAcsResult>;
+}, cfg: SamlSpConfig, replayStore?: SamlReplayStore): Promise<SamlAcsResult>;
 /** SP metadata XML to hand to the IdP operator (register its ACS URL + Entity ID with Google). */
 export declare function samlSpMetadata(cfg: SamlSpConfig): string;

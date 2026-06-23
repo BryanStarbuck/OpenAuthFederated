@@ -1,6 +1,51 @@
+import { createHmac, timingSafeEqual } from "node:crypto"
+
 import type { CreateFederatedClientOptions, MachineClaims, TokenClaims } from "./types.js"
 import { requirePermission, requireRole } from "./permissions.js"
 import { verifyMachineToken, verifyToken } from "./verify.js"
+
+/**
+ * Verify an inbound webhook / SCIM event signature (HMAC-SHA256 over `${timestamp}.${rawBody}`).
+ * Provisioning events (`user.created` / `user.deleted`, group/membership changes) drive RBAC, so
+ * they must be authenticated before the host app trusts them.
+ *
+ * `rawBody` MUST be the exact bytes received (capture them with an express.json `verify` hook) — a
+ * re-serialized JSON object will not match the producer's signed bytes.
+ *
+ * The signature header is compared in constant time; a timestamp outside `toleranceSeconds`
+ * (default 300s) is rejected to bound replay.
+ */
+export function verifyWebhook(
+  rawBody: string | Buffer,
+  headers: Record<string, string | string[] | undefined>,
+  secret: string,
+  opts: { toleranceSeconds?: number; signatureHeader?: string; timestampHeader?: string } = {},
+): boolean {
+  if (!secret) return false
+  const sigHeader = (opts.signatureHeader ?? "x-auth-signature").toLowerCase()
+  const tsHeader = (opts.timestampHeader ?? "x-auth-timestamp").toLowerCase()
+  const lower: Record<string, string> = {}
+  for (const [k, v] of Object.entries(headers)) {
+    lower[k.toLowerCase()] = Array.isArray(v) ? (v[0] ?? "") : (v ?? "")
+  }
+  const provided = lower[sigHeader]
+  const timestamp = lower[tsHeader]
+  if (!provided || !timestamp) return false
+
+  const ts = Number(timestamp)
+  if (!Number.isFinite(ts)) return false
+  const tolerance = opts.toleranceSeconds ?? 300
+  if (Math.abs(Math.floor(Date.now() / 1000) - ts) > tolerance) return false
+
+  const body = typeof rawBody === "string" ? rawBody : rawBody.toString("utf8")
+  const expected = createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")
+  // Strip an optional `sha256=` prefix the producer may add.
+  const got = provided.startsWith("sha256=") ? provided.slice("sha256=".length) : provided
+  const a = Buffer.from(expected)
+  const b = Buffer.from(got)
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
+}
 
 /**
  * Paginated list envelope `PaginatedResourceResponse<T>`. The generic
@@ -408,6 +453,22 @@ export class AuthClient {
   constructor(opts: CreateFederatedClientOptions = {}) {
     this.secretKey = opts.secretKey ?? process.env.AUTH_SECRET_KEY ?? ""
     this.apiUrl = opts.apiUrl ?? process.env.AUTH_BACKEND_API ?? "https://api.localhost/v1"
+    // The secret key is sent as a Bearer to apiUrl, so the transport must be TLS. Reject a
+    // plaintext apiUrl up front rather than leaking the credential over http. (Loopback http is
+    // allowed for local development only.)
+    try {
+      const u = new URL(this.apiUrl)
+      const isLoopback =
+        u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "::1"
+      if (u.protocol !== "https:" && !isLoopback) {
+        throw new Error(
+          "@auth/backend: apiUrl must use https (the secret key is sent as a Bearer token).",
+        )
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("@auth/backend:")) throw err
+      throw new Error("@auth/backend: apiUrl is not a valid URL")
+    }
     this.issuer = opts.issuer ?? process.env.AUTH_JWT_ISSUER
     this.jwtKey = opts.jwtKey
     this.audience = opts.audience

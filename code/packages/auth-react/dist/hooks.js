@@ -2,10 +2,26 @@ import { useCallback } from "react";
 import { useAuthContext } from "./context.js";
 /** Auth state + tokens without hydrating the full profile. Mirrors Federated's `useAuth()`. */
 export function useAuth() {
-    const { core, snapshot, isLoaded } = useAuthContext();
+    const { core, snapshot, isLoaded, loadState } = useAuthContext();
     const activeMembership = snapshot.memberships.find((m) => m.organization.id === snapshot.orgId) ?? null;
     return {
         isLoaded,
+        /**
+         * Raw load state: "loading" | "loaded" | "degraded" | "failed". A route guard should treat
+         * "failed"/"degraded" as "backend unreachable, keep waiting" — NOT as "signed out" — so a
+         * server restart never bounces an already-signed-in user to the sign-in page.
+         */
+        loadState,
+        /**
+         * Re-fetch the Client from the Frontend API (rehydrate the session from the still-valid
+         * session cookie) and report whether a session is now active. Non-destructive — unlike
+         * signOut() it never revokes the server session. Use it to recover from a transient 401
+         * before deciding the user is really signed out.
+         */
+        reloadSession: async () => {
+            await core.load();
+            return core.getSnapshot().isSignedIn;
+        },
         isSignedIn: snapshot.isSignedIn,
         userId: snapshot.userId,
         sessionId: snapshot.sessionId,

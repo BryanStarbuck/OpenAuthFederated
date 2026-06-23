@@ -53,7 +53,9 @@ export declare class RealAuthCore extends BaseCore {
     private base;
     private headers;
     connections(): Connection[];
+    private static readonly LOAD_BACKOFF_MS;
     load(): Promise<void>;
+    private loadWithRetry;
     private parseMemberships;
     private applyClient;
     authenticateWithRedirect(params: AuthenticateWithRedirectParams): Promise<void>;

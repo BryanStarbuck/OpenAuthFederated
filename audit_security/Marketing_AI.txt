@@ -1,0 +1,1016 @@
+Marketing AI
+Scope: /Users/bryan/BGit/all/marketing/ai/code (and /Users/bryan/BGit/all/marketing/ai/cli) as the consuming app; /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend and /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react as the embedded library.
+Summary: 22 security findings (how the Marketing AI app uses the OpenAuthFederated library, plus the app's own auth-adjacent code).
+
+TABLE OF CONTENTS
+1. Almost the entire /v1 data plane is mounted with no auth middleware  [CRITICAL]
+2. Data export and account-deletion endpoints are unauthenticated with client-supplied tenantId (cross-tenant export/delete)  [CRITICAL]
+3. Settings tenant-write defaults to allow when no auth user is present (default-allow admin)  [CRITICAL]
+4. Settings user/tenant IDOR via ?operatorId= / ?tenantId= query overrides  [CRITICAL]
+5. CORS reflects any Origin with credentials:true (cross-site authenticated requests)  [CRITICAL]
+6. Degraded no-DB mode trusts the token's own sub/email to synthesize an admin identity  [HIGH]
+7. Session/auth cookies are not Secure in localhost mode and SameSite=Lax allows top-level CSRF on auth routes  [HIGH]
+8. Access tokens accepted from the session cookie -> CSRF on every requireAuth route (no CSRF token / double-submit)  [HIGH]
+9. HMAC ingest verifies over re-serialized JSON because no rawBody is captured (signature bypass / canonicalization gap)  [HIGH]
+10. 10-year session lifetime + inactivity timeout disabled = effectively non-expiring sessions  [HIGH]
+11. AUTH_SESSION_SECRET falls back to the legacy weak JWT_SECRET constant; forgeable tokens  [HIGH]
+12. /v1/auth/login and /v1/auth/refresh re-bless an expiring token as a fresh long-lived credential, defeating short access-token TTL  [HIGH]
+13. Admin grant is driven by a hardcoded email allowlist that overrides the DB on every login  [HIGH]
+14. /v1/metrics (and health) leak internal operational detail without auth  [MEDIUM]
+15. SAML InResponseTo replay protection is disabled in the library and the app relies on it  [MEDIUM]
+16. Library default RBAC grant gives every signed-in identity org admin with *:write  [MEDIUM]
+17. SAML treats any signed assertion's email as verified; app maps it straight to admin  [MEDIUM]
+18. resolveUser identity cache is keyed only by email and never bounded/evicted  [MEDIUM]
+19. Open-redirect surface on returnTo / redirect_url propagated to the library callback  [MEDIUM]
+20. No audit logging of successful privileged actions; only failures are recorded  [MEDIUM]
+21. Token verification ignores issuer/audience in embedded mode (cross-app token reuse on shared secret)  [MEDIUM]
+22. local-api-key bootstrap trusts loopback remoteAddress and any home-dir file with a matching hash  [LOW]
+
+================================================================================
+1. Almost the entire /v1 data plane is mounted with no auth middleware  [CRITICAL]
+
+SITUATION / PROBLEM:
+The app builds a real auth layer (requireAuth / requireAdmin / optionalAuth) but
+wires it into only a small set of routes. 67 of 76 route files under
+src/routes register their handlers with NO auth middleware and never read
+req.user / req.claims. There is no app-level app.use(requireAuth) and no router
+that blanket-guards /v1. Entity CRUD, the AI engine, publish, knowledge,
+content store, assets, destinations, create-post / create-reply, read-data,
+sync, and more are reachable by any anonymous caller who can hit the port.
+
+ROOT CAUSE:
+Auth was implemented as opt-in per-route middleware, and the 8-agent
+parallel-build pattern (registerAgent1..8 plus dozens of feature routers) added
+hundreds of handlers without attaching the guard. server.ts mounts the library
+Frontend API and the compat auth routes but never installs a default guard for
+the rest of /v1.
+
+SCENARIO:
+An attacker (or any unauthenticated browser/script) reaches the server on
+:7700 (or the deployed origin) and calls POST /v1/publish/:postId,
+POST /v1/ai/proposals/post, GET /v1/knowledge, POST /v1/create-post/draft,
+the entity CRUD endpoints, etc. None of them check identity, so the attacker
+reads and mutates all marketing data and triggers AI spend and cross-network
+publishing.
+
+RISK:
+Full read/write of application data and side-effecting actions (publish, AI
+generation, data export, deletion) with zero authentication. This is the single
+largest exposure in the app.
+
+REPRO STEPS:
+1. Start the app (DEPLOY_MODE=localhost) with no credentials presented.
+2. curl http://localhost:7700/v1/knowledge  -> 200 with data, no 401.
+3. curl -X POST http://localhost:7700/v1/create-post/draft -d '{...}' -> handled.
+4. Observe no Authorization header / cookie was required.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/server.ts (lines ~285-309, route registration; no global guard)
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/index.ts (whole file; ~50 register() calls, none wrapped in a guard)
+- /Users/bryan/BGit/all/marketing/ai/code/src/middleware/auth.ts (lines 206-274; guards exist but are imported by only ~9 files)
+- The 67 unguarded route files, e.g.:
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/entities.ts
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/ai.ts
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/publish.ts
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/knowledge.ts
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/content_store.ts
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/assets.ts
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/create_post.ts
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/create_reply.ts
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/destinations.ts
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/read_data.ts
+  /Users/bryan/BGit/all/marketing/ai/code/src/routes/sync.ts
+  (and the agent_1..agent_8 stub files)
+
+CALL COUNT:
+67 route files register unguarded handlers; the guard is applied in only ~9
+files (src/routes/admin.ts, audit.ts, rate_limits.ts, tooling.ts, auth_extra.ts
+and the features/page_admin_* routers). Registration is centralized in
+src/routes/index.ts and src/server.ts.
+
+FIX:
+- Root cause being fixed: missing default-deny on the data plane.
+- How: install a single authentication boundary instead of relying on per-route
+  opt-in.
+- Structure of the fix: in server.ts, after cookie/body parsing and after the
+  library mount + public routes (/health, /v1/config, /v1/auth/*), add
+  app.use('/v1', requireAuth) so every /v1 route is authenticated by default;
+  carve explicit public exceptions (config, auth, manifest) above the guard.
+  Keep requireAdmin on the admin subtree.
+- Files changed and how:
+  * src/server.ts: insert app.use('/v1', requireAuth) at the correct position;
+    register genuinely-public routes before it.
+  * src/middleware/auth.ts: no change to logic (already correct), but it becomes
+    the single boundary.
+  * Library side: no change required; the app simply must call the existing
+    verifyToken-backed guard for all protected routes.
+
+================================================================================
+2. Data export and account-deletion endpoints are unauthenticated with client-supplied tenantId (cross-tenant export/delete)  [CRITICAL]
+
+SITUATION / PROBLEM:
+The GDPR-grade data export and account-deletion endpoints take tenantId from the
+request body/query and perform the action for that tenant, with no auth
+middleware and no binding to the caller's verified identity. The code comments
+even call its tenantId check an "IDOR guard," but the tenantId is supplied by
+the attacker.
+
+ROOT CAUSE:
+The route trusts req.body.tenantId / req.query.tenantId as authorization rather
+than deriving the tenant from a verified session, and the file is in the
+unguarded majority (no requireAuth).
+
+SCENARIO:
+An attacker enumerates or guesses tenant ids ("act3", a customer slug) and:
+- POST /v1/data/export {tenantId} to dump another tenant's entire dataset, then
+- GET /v1/data/export/:job_id/archive?tenantId=... to download it, or
+- POST /v1/data/delete-account {tenantId, requestedBy} to schedule destruction
+  of another tenant's data.
+
+RISK:
+Mass data exfiltration of any tenant and destructive deletion of any tenant.
+Critical confidentiality and availability impact.
+
+REPRO STEPS:
+1. curl -X POST http://localhost:7700/v1/data/export -H 'Content-Type: application/json' -d '{"tenantId":"act3"}'
+2. Note the returned job id.
+3. curl 'http://localhost:7700/v1/data/export/<job>/archive?tenantId=act3' -> archive.
+4. curl -X POST .../v1/data/delete-account -d '{"tenantId":"act3","requestedBy":"x"}'.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/data_export.ts (lines 42-160; tenantId from body/query, no requireAuth)
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/index.ts (registerDataExport, no guard)
+- /Users/bryan/BGit/all/marketing/ai/code/src/middleware/auth.ts (the unused guard)
+
+CALL COUNT:
+6+ unauthenticated handlers in one file (export start/list/status/archive,
+delete-account start/list/cancel), all in src/routes/data_export.ts.
+
+FIX:
+- Root cause being fixed: authorization based on attacker-supplied tenantId.
+- How: require authentication and derive tenant strictly from req.user.tenant_id;
+  reject any body/query tenantId that does not equal the verified tenant.
+- Structure of the fix: add requireAuth (and requireAdmin for delete-account) to
+  every data_export route; replace tenantFromBody/query with req.user.tenant_id.
+- Files changed and how:
+  * src/routes/data_export.ts: add guards; source tenantId from req.user; drop
+    the body/query tenantId path or use it only to 403 on mismatch.
+  * src/server.ts: covered by the global /v1 guard from finding 1.
+
+================================================================================
+3. Settings tenant-write defaults to allow when no auth user is present (default-allow admin)  [CRITICAL]
+
+SITUATION / PROBLEM:
+PUT /v1/settings/tenant is protected by an isAdminReq() that returns true when
+there is no req.user at all (its comment: "when there is no auth user ... we
+allow tenant writes"). Because the settings routes are mounted without
+requireAuth (finding 1), req.user is never populated, so isAdminReq() always
+returns true and ANY anonymous caller can write tenant-wide settings.
+
+ROOT CAUSE:
+Fail-open authorization: absence of an identity is treated as "trusted local
+operator" instead of "deny." Combined with the missing guard, the "localhost
+convenience" branch is the live production branch.
+
+SCENARIO:
+An unauthenticated attacker calls PUT /v1/settings/tenant?tenantId=act3 with a
+malicious settings patch and changes tenant-level configuration for everyone.
+
+RISK:
+Unauthenticated tenant-wide configuration tampering. Critical integrity impact;
+can be used to pivot (e.g. flip flags, change limits).
+
+REPRO STEPS:
+1. curl -X PUT 'http://localhost:7700/v1/settings/tenant?tenantId=act3' -H 'Content-Type: application/json' -d '{"someSetting":"attacker"}'
+2. Observe 200 (not 403) and the tenant settings change.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/settings.ts (lines 69-78 isAdminReq default-true; lines 141-155 PUT tenant)
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/index.ts (registerSettings, no guard)
+
+CALL COUNT:
+1 default-allow authorization function gating 1 tenant-write route (plus the
+user routes in the same file). All in src/routes/settings.ts.
+
+FIX:
+- Root cause being fixed: fail-open admin check.
+- How: deny by default; require a verified admin identity.
+- Structure of the fix: mount requireAuth/requireAdmin on the settings routes and
+  make isAdminReq() return false (not true) when req.user is absent.
+- Files changed and how:
+  * src/routes/settings.ts: invert the missing-user branch to deny; require
+    req.user.is_admin === true for tenant writes.
+  * src/server.ts / index.ts: apply the global /v1 guard.
+
+================================================================================
+4. Settings user/tenant IDOR via ?operatorId= / ?tenantId= query overrides  [CRITICAL]
+
+SITUATION / PROBLEM:
+operatorFromReq() and tenantFromReq() accept ?operatorId= and ?tenantId= query
+parameters as a "test/admin hook" and fall back to defaults. With no auth on the
+route, any caller picks the operator and tenant whose settings they read or
+write.
+
+ROOT CAUSE:
+The identity used for the operation is taken from request-controlled input rather
+than the verified session.
+
+SCENARIO:
+Attacker calls GET /v1/settings/user?operatorId=<victim>&tenantId=<victim> to read
+another operator's settings, or PUT to overwrite them.
+
+RISK:
+Cross-operator and cross-tenant settings read/write (IDOR). High-to-critical
+confidentiality and integrity impact.
+
+REPRO STEPS:
+1. curl 'http://localhost:7700/v1/settings/user?operatorId=victim&tenantId=act3'
+2. curl -X PUT '.../v1/settings/user?operatorId=victim&tenantId=act3' -d '{...}'
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/settings.ts (lines 44-67 operator/tenant resolution; lines 105-127 user routes)
+
+CALL COUNT:
+2 resolver functions feeding 4 route handlers in src/routes/settings.ts.
+
+FIX:
+- Root cause being fixed: identity sourced from query params.
+- How: require auth; always derive operatorId/tenantId from req.user; ignore the
+  query overrides in non-test builds.
+- Structure of the fix: remove the ?operatorId=/?tenantId= fallbacks; gate the
+  routes with requireAuth.
+- Files changed and how:
+  * src/routes/settings.ts: tenantFromReq/operatorFromReq read only req.user;
+    delete the query-override branches.
+
+================================================================================
+5. CORS reflects any Origin with credentials:true (cross-site authenticated requests)  [CRITICAL]
+
+SITUATION / PROBLEM:
+server.ts uses cors({ origin: true, credentials: true }). origin:true echoes the
+caller's Origin into Access-Control-Allow-Origin and allows credentials, so any
+website the victim visits can make credentialed cross-site requests (the
+oaf_mai_session cookie rides along) and read the responses.
+
+ROOT CAUSE:
+Reflecting the request Origin instead of an allowlist, while also allowing
+credentials, is the canonical CORS misconfiguration.
+
+SCENARIO:
+A signed-in operator visits evil.com. evil.com's JavaScript does
+fetch('http://localhost:7700/v1/...', { credentials:'include' }); the browser
+sends the session cookie, CORS reflects evil.com, and the script reads the
+response. Combined with findings 1-4 this means full cross-origin data theft.
+
+RISK:
+Cross-site read of authenticated responses and (with the session cookie) any
+state-changing call that does not require a custom header. Critical.
+
+REPRO STEPS:
+1. From a page on a different origin, fetch a /v1 endpoint with credentials:'include'.
+2. Observe Access-Control-Allow-Origin echoes the page's origin and the response
+   is readable.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/server.ts (line 228, cors config)
+
+CALL COUNT:
+1 CORS configuration call in src/server.ts (line 228) affecting every route.
+
+FIX:
+- Root cause being fixed: Origin reflection with credentials.
+- How: restrict origin to an explicit allowlist (PUBLIC_ORIGIN + known app
+  origins); keep credentials only for those origins.
+- Structure of the fix: replace origin:true with a function/array allowlist.
+- Files changed and how:
+  * src/server.ts: cors({ origin: [PUBLIC_ORIGIN, ...allowed], credentials: true }).
+
+================================================================================
+6. Degraded no-DB mode trusts the token's own sub/email to synthesize an admin identity  [HIGH]
+
+SITUATION / PROBLEM:
+resolveUser(), when upsertFromGoogle() throws (e.g. no Postgres), synthesizes a
+UserRow purely from the token claims, setting is_admin from the hardcoded email
+allowlist. The id/email/google_sub all come from the (valid) token, but the
+identity is no longer backed by any server-side record — admin status hinges only
+on the email claim matching the allowlist.
+
+ROOT CAUSE:
+A fail-open degraded path that mints a working (and possibly admin) identity from
+claims when the database is unavailable, instead of failing closed.
+
+SCENARIO:
+If the DB is down (or made to appear down) and an attacker holds any valid
+allowlisted-domain token, the degraded branch grants them a session; if the email
+is one of the three hardcoded admin emails, full admin — with no DB row, audit, or
+revocation backing it.
+
+RISK:
+Authentication/authorization that survives loss of the source-of-truth store, and
+admin elevation tied solely to an email-claim allowlist. High.
+
+REPRO STEPS:
+1. Stop Postgres (or induce upsertFromGoogle to throw).
+2. Present a valid allowed-domain token to any guarded route.
+3. Observe the request is accepted; with an allowlisted email, is_admin=true.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/middleware/auth.ts (lines 161-189 degraded synthesis; line 175 admin from allowlist)
+- /Users/bryan/BGit/all/marketing/ai/code/src/lib/admin_allowlist.ts (lines 13-22)
+
+CALL COUNT:
+1 degraded-mode branch in src/middleware/auth.ts, reached by every resolveUser
+call (requireAuth/requireAdmin/optionalAuth/whoami/login).
+
+FIX:
+- Root cause being fixed: fail-open on DB failure.
+- How: in server mode, fail closed (503) when the user store is unavailable rather
+  than synthesizing an admin identity; restrict the synthesize path to localhost.
+- Structure of the fix: branch on IS_SERVER; only allow degraded identity on
+  localhost and never grant admin without a persisted record.
+- Files changed and how:
+  * src/middleware/auth.ts: gate the degraded synthesis on IS_LOCALHOST; in server
+    mode return null so the guard 401/503s.
+
+================================================================================
+7. Session/auth cookies are not Secure in localhost mode and SameSite=Lax allows top-level CSRF on auth routes  [HIGH]
+
+SITUATION / PROBLEM:
+The library sets the session, OAuth state, and SAML relay cookies with
+cookieSecure driven by IS_SERVER, so in localhost/dev they lack Secure. All
+cookies are SameSite=Lax (library default), which still sends them on top-level
+GET navigations — and the app exposes state-changing GETs like
+GET /v1/auth/logout. The app also passes cookieSecure: IS_SERVER, so any non-https
+deployment (or a proxy that terminates TLS upstream without setting IS_SERVER)
+ships non-Secure session cookies.
+
+ROOT CAUSE:
+Secure flag is tied to a deploy-mode boolean rather than the actual transport, and
+SameSite=Lax combined with GET side effects leaves a CSRF window.
+
+SCENARIO:
+On a mixed/non-https path the session cookie can leak over plaintext; and a
+cross-site <img src=".../v1/auth/logout"> or top-level link logs the victim out
+(and other Lax-sendable GET side effects fire).
+
+RISK:
+Session cookie disclosure on non-TLS transport and CSRF on GET-side-effect auth
+routes. High.
+
+REPRO STEPS:
+1. Run with DEPLOY_MODE=localhost behind any non-localhost reachable interface.
+2. Inspect Set-Cookie for oaf_mai_session — no Secure attribute.
+3. From another origin, navigate to GET /v1/auth/logout and observe logout.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/lib/auth_frontend.ts (line 85 cookieSecure: IS_SERVER)
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/auth.ts (lines 197-208 GET/POST logout; clearCookie)
+- /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 252-274 cookie attributes; SameSite=Lax default)
+
+CALL COUNT:
+1 cookieSecure setting (auth_frontend.ts line 85) plus the library cookie helpers;
+1 GET logout route (auth.ts line 204).
+
+FIX:
+- Root cause being fixed: Secure flag not bound to real transport; CSRF-able GETs.
+- How: set cookieSecure from the actual scheme (PUBLIC_ORIGIN https / X-Forwarded-Proto),
+  make logout POST-only, and consider SameSite=Strict for the session cookie.
+- Files changed and how:
+  * src/lib/auth_frontend.ts: derive cookieSecure from PUBLIC_ORIGIN.startsWith('https').
+  * src/routes/auth.ts: remove the GET logout side effect (or require a CSRF token).
+  * Library: allow a sameSite option per cookie (frontend.ts) so the app can pin Strict.
+
+================================================================================
+8. Access tokens accepted from the session cookie -> CSRF on every requireAuth route (no CSRF token / double-submit)  [HIGH]
+
+SITUATION / PROBLEM:
+extractToken() accepts a token from EITHER the Authorization: Bearer header OR
+the oaf_mai_session cookie. Cookie-based authentication is ambient, so any
+guarded state-changing route (once finding 1 is fixed) is still vulnerable to CSRF
+because there is no CSRF token, no double-submit, and no Origin/Referer check.
+
+ROOT CAUSE:
+The app authenticates from a cookie without any CSRF defense, relying only on
+SameSite=Lax (which is insufficient for top-level navigations and some
+sub-request shapes, and is non-Secure in dev per finding 7).
+
+SCENARIO:
+A logged-in operator visits a malicious page that auto-submits a form / fetch to a
+POST /v1/... route; the browser attaches the session cookie and the action runs
+under the victim's identity.
+
+RISK:
+Cross-site request forgery on all cookie-authenticated mutating endpoints. High.
+
+REPRO STEPS:
+1. Sign in (session cookie set).
+2. From another origin, submit a POST to a guarded mutating route with
+   credentials included and no Authorization header.
+3. Observe the request authenticates via the cookie.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/middleware/auth.ts (lines 92-101 cookie token acceptance)
+- /Users/bryan/BGit/all/marketing/ai/code/src/server.ts (no CSRF middleware installed)
+
+CALL COUNT:
+1 token extractor (auth.ts lines 92-101) feeding every guard call site (24+
+requireAuth/requireAdmin usages per the file header).
+
+FIX:
+- Root cause being fixed: ambient cookie auth with no CSRF defense.
+- How: add a CSRF token (double-submit cookie or per-session token in a custom
+  header) verified on all state-changing requests, and/or require the Bearer
+  header for non-GET API calls; check Origin/Referer.
+- Files changed and how:
+  * src/middleware/auth.ts: add an Origin/Referer or CSRF-token check for
+    cookie-authenticated mutating requests.
+  * src/server.ts: install CSRF middleware for /v1 mutations.
+
+================================================================================
+9. HMAC ingest verifies over re-serialized JSON because no rawBody is captured (signature bypass / canonicalization gap)  [HIGH]
+
+SITUATION / PROBLEM:
+The cloud ingest endpoint authenticates with HMAC-SHA256 over
+`${timestamp}\n${rawBody}`. rawBodyFor() reads req.rawBody, but server.ts mounts
+express.json() WITHOUT a verify hook, so req.rawBody is never populated. The code
+falls into its "degraded" branch and HMACs JSON.stringify(req.body) — a
+re-serialized form that does not equal the producer's signed bytes (key order,
+whitespace, unicode escaping differ), so either legitimate requests fail or, if
+the producer also signs re-serialized output, the canonicalization is attacker-
+influenceable.
+
+ROOT CAUSE:
+The raw request bytes the signature is computed over are not preserved end to end;
+the verifier reconstructs them instead of using the exact signed bytes.
+
+SCENARIO:
+An attacker exploits the canonicalization gap (e.g. duplicate/reordered keys,
+differing escaping) so a body that re-serializes to the signed string is accepted
+while carrying different effective content, or downgrades verification to the weak
+JSON.stringify path.
+
+RISK:
+HMAC authentication that does not bind to the actual transmitted bytes —
+signature confusion / potential bypass on the ingest channel. High (ingest writes
+into the knowledge base consumed by the AI engine).
+
+REPRO STEPS:
+1. Send POST /v1/ingest/extension with valid headers.
+2. Observe req.rawBody is undefined (no verify hook) and the verifier HMACs the
+   re-serialized body, not the raw bytes.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/ingest.ts (lines 84-95 rawBodyFor; lines 173-189 HMAC)
+- /Users/bryan/BGit/all/marketing/ai/code/src/server.ts (line 235 express.json with no verify hook)
+
+CALL COUNT:
+1 HMAC verification path in src/routes/ingest.ts; depends on the single
+express.json() config in src/server.ts line 235.
+
+FIX:
+- Root cause being fixed: signature not bound to raw bytes.
+- How: capture the raw body via an express.json({ verify }) hook and HMAC exactly
+  those bytes; remove the JSON.stringify fallback (fail closed if rawBody absent).
+- Files changed and how:
+  * src/server.ts: add verify:(req,_res,buf)=>{req.rawBody=buf} to express.json.
+  * src/routes/ingest.ts: if rawBody is missing, reject instead of re-serializing.
+
+================================================================================
+10. 10-year session lifetime + inactivity timeout disabled = effectively non-expiring sessions  [HIGH]
+
+SITUATION / PROBLEM:
+SESSION_TTL_SECONDS defaults to 10 years and AUTH_INACTIVITY_TIMEOUT_SECONDS to 0
+(off). The session cookie is re-issued (sliding) on every token mint, so a stolen
+session cookie is usable for a decade and a stolen, idle session never times out.
+
+ROOT CAUSE:
+Deliberate "stay signed in forever" defaults with no idle ceiling; revocation
+depends entirely on explicit sign-out or store tombstoning.
+
+SCENARIO:
+A session cookie captured via XSS, the non-Secure transport (finding 7), or a
+shared machine remains valid effectively forever; the operator has no automatic
+idle logout.
+
+RISK:
+Long-lived credential theft window and no idle-timeout backstop. High.
+
+REPRO STEPS:
+1. Sign in; capture the oaf_mai_session cookie.
+2. Replay it weeks later without any activity -> still authenticated.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/lib/config.ts (lines 282-289 TTL + inactivity defaults)
+- /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 515-525 library defaults; lines 1065-1073 sliding re-issue)
+
+CALL COUNT:
+2 config constants (config.ts lines 282-289) passed into one createFederatedFrontend
+call (auth_frontend.ts lines 78-80).
+
+FIX:
+- Root cause being fixed: no practical session expiry.
+- How: set a realistic max lifetime and a non-zero inactivity timeout (the
+  FileSessionStore already enforces inactivity when set).
+- Files changed and how:
+  * src/lib/config.ts: lower SESSION_TTL_SECONDS and set
+    AUTH_INACTIVITY_TIMEOUT_SECONDS to a sane value (e.g. hours/days).
+
+================================================================================
+11. AUTH_SESSION_SECRET falls back to the legacy weak JWT_SECRET constant; forgeable tokens  [HIGH]
+
+SITUATION / PROBLEM:
+AUTH_SESSION_SECRET resolves to AUTH_SESSION_SECRET env, then JWT_SECRET env,
+then (localhost) a disk-persisted random secret, then (server) the JWT_SECRET
+constant 'dev-only-change-me-mai-localhost-secret'. In server mode validateConfig
+fatals only if BOTH AUTH_SESSION_SECRET and JWT_SECRET env are unset; if an
+operator set JWT_SECRET to the well-known dev string (or a weak value), the
+HS256 signing key for session cookies and access tokens is weak/known.
+
+ROOT CAUSE:
+The session-signing key chains onto a legacy, possibly-weak JWT_SECRET and a
+hardcoded dev constant; strength is not validated, only presence.
+
+SCENARIO:
+An attacker who knows or guesses the secret (the dev constant is in the repo)
+forges a session/access JWT with arbitrary email/sub/permissions and an
+allowlisted admin email, bypassing Google entirely (verifyToken in embedded mode
+only checks the HS256 signature + exp).
+
+RISK:
+Full authentication bypass and admin impersonation via token forgery if the
+secret is weak/known. High.
+
+REPRO STEPS:
+1. Deploy with JWT_SECRET left at the dev constant (or any weak value).
+2. Mint an HS256 JWT with that secret carrying
+   {email:"bryan@act3ai.com", sub:"user_x", hd:"act3ai.com", permissions:[...]}.
+3. Present it as a Bearer token -> resolveUser accepts it, is_admin from allowlist.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/lib/config.ts (lines 208-234 JWT_SECRET / AUTH_SESSION_SECRET chain; lines 564-567 server validation only checks presence)
+- /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts (lines 57-66 secret check rejects only empty/'dev-shared-secret')
+
+CALL COUNT:
+1 secret-resolution chain (config.ts lines 231-234) used by both signing
+(auth_frontend.ts) and verifying (verify.ts) paths.
+
+FIX:
+- Root cause being fixed: weak/known signing key acceptance.
+- How: require a strong AUTH_SESSION_SECRET in server mode (min length / entropy
+  check), and never fall back to JWT_SECRET or the dev constant in server mode.
+- Files changed and how:
+  * src/lib/config.ts: in server mode require AUTH_SESSION_SECRET explicitly and
+    validate its length/entropy; remove the JWT_SECRET/dev-constant fallback for
+    the signing key.
+
+================================================================================
+12. /v1/auth/login and /v1/auth/refresh re-bless an expiring token as a fresh long-lived credential  [HIGH]
+
+SITUATION / PROBLEM:
+POST /v1/auth/login and POST /v1/auth/refresh take whatever token the caller
+presents, re-verify it, and hand the SAME token back as access_token with
+expires_in = AUTH_ACCESS_TOKEN_TTL_SECONDS (15 min advertised). They do not mint a
+new short-lived token bound to a server session; they simply re-bless a presented
+credential. A long-lived session cookie presented here is returned as a "Bearer"
+the caller can keep using, and refresh accepts ANY still-valid token as its
+"refresh_token" with no rotation or refresh-token store.
+
+ROOT CAUSE:
+Embedded mode has no real refresh-token store, so these endpoints echo the
+presented token; the advertised TTL is cosmetic and there is no rotation or
+revocation of the echoed credential.
+
+SCENARIO:
+A caller posts the long-lived session cookie value to /v1/auth/login and obtains a
+"Bearer" that is actually the long-lived session JWT; it remains valid for the full
+session TTL (finding 10), defeating the short access-token model.
+
+RISK:
+Short-token security model is bypassed; long-lived bearer credentials proliferate
+with no rotation. High.
+
+REPRO STEPS:
+1. Sign in; read the oaf_mai_session cookie value.
+2. POST /v1/auth/login with that value as Bearer -> response access_token equals
+   the long-lived session JWT.
+3. Use it as a Bearer indefinitely (until session TTL).
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/auth_extra.ts (lines 60-85 login echoes token; lines 110-142 refresh echoes token)
+- /Users/bryan/BGit/all/marketing/ai/code/src/middleware/auth.ts (resolveUser used to re-verify)
+
+CALL COUNT:
+3 endpoints (login, refresh, token/refresh) in src/routes/auth_extra.ts that
+re-emit the presented token.
+
+FIX:
+- Root cause being fixed: re-blessing a long-lived credential as a bearer.
+- How: mint a NEW short-lived access token bound to the session (via the library's
+  token-mint path) instead of echoing the presented one; implement real refresh-
+  token rotation or remove the refresh surface.
+- Files changed and how:
+  * src/routes/auth_extra.ts: replace token echo with a freshly minted short-lived
+    token; reject the session cookie as a refresh_token.
+
+================================================================================
+13. Admin grant is driven by a hardcoded email allowlist that overrides the DB on every login  [HIGH]
+
+SITUATION / PROBLEM:
+is_admin is set true on every login for any of three hardcoded emails, and the
+comment states this OVERRIDES the DB (demoting in the DB is undone on next login).
+Admin authority is therefore baked into source, not managed, and in degraded mode
+(finding 6) it is the only admin signal.
+
+ROOT CAUSE:
+Authorization-as-code: a static allowlist that always re-grants admin, bypassing
+any DB-side role management or revocation.
+
+SCENARIO:
+If any allowlisted account is compromised (token forgery per finding 11, OAuth
+account takeover, etc.) the attacker is permanently admin and cannot be demoted
+via the DB. The list also can't be rotated without a code deploy.
+
+RISK:
+Unrevocable, code-pinned admin grants and a single point of catastrophic
+compromise. High.
+
+REPRO STEPS:
+1. Inspect src/lib/admin_allowlist.ts — three emails hardcoded.
+2. Demote one in the DB; sign in again -> is_admin flips back to true.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/lib/admin_allowlist.ts (lines 13-22)
+- /Users/bryan/BGit/all/marketing/ai/code/src/middleware/auth.ts (line 175 degraded admin; upsertFromGoogle applies allowlist)
+
+CALL COUNT:
+1 allowlist consulted on every login/resolveUser (auth.ts) and at boot
+(server.ts line 547 logs it).
+
+FIX:
+- Root cause being fixed: code-pinned, DB-overriding admin grants.
+- How: move admin role to the DB / IdP group mapping; treat the allowlist only as
+  an initial bootstrap seed, not an every-login override; make it env-configurable.
+- Files changed and how:
+  * src/middleware/auth.ts / users_repo: apply allowlist only when creating a new
+    row; respect DB is_admin thereafter.
+  * src/lib/admin_allowlist.ts: source from env, not a hardcoded Set.
+
+================================================================================
+14. /v1/metrics (and health) leak internal operational detail without auth  [MEDIUM]
+
+SITUATION / PROBLEM:
+GET /v1/metrics (Prometheus exposition) is registered without a guard (only the
+sibling /v1/audit has requireAdmin). /health and the manifest also expose runtime
+detail (db status/error string, redirect URI, deploy mode, admin allowlist at
+boot). Anonymous callers can read internal counters and configuration.
+
+ROOT CAUSE:
+Observability and health endpoints are public by default; metrics was not gated
+like audit.
+
+SCENARIO:
+An attacker scrapes /v1/metrics to learn traffic, error rates, and internals, and
+reads /health for db error strings and the OAuth redirect URI to aid further
+attacks.
+
+RISK:
+Information disclosure aiding reconnaissance. Medium.
+
+REPRO STEPS:
+1. curl http://localhost:7700/v1/metrics -> Prometheus metrics, no auth.
+2. curl http://localhost:7700/health -> db status/error, redirectUri, mode.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/audit.ts (line 65 /v1/metrics, no guard)
+- /Users/bryan/BGit/all/marketing/ai/code/src/server.ts (lines 243-256 /health detail)
+
+CALL COUNT:
+1 unguarded metrics handler (audit.ts line 65) and 1 detailed health handler
+(server.ts line 243).
+
+FIX:
+- Root cause being fixed: public observability endpoints.
+- How: gate /v1/metrics behind requireAdmin (or a network ACL); trim /health to a
+  minimal liveness payload.
+- Files changed and how:
+  * src/routes/audit.ts: add requireAdmin to /v1/metrics.
+  * src/server.ts: remove db error strings / sensitive fields from /health.
+
+================================================================================
+15. SAML InResponseTo replay protection is disabled in the library and the app relies on it  [MEDIUM]
+
+SITUATION / PROBLEM:
+The library builds node-saml with validateInResponseTo: ValidateInResponseTo.never,
+so the SAML layer does not bind a Response to the AuthnRequest it answers or guard
+against assertion replay. The app's only protection is the signed RelayState
+cookie. node-saml's NotOnOrAfter window still applies, but within that window a
+captured SAMLResponse can be replayed if the RelayState match is satisfied.
+
+ROOT CAUSE:
+InResponseTo validation is turned off (to avoid cross-process cache) and replay
+defense is delegated to a single RelayState cookie comparison.
+
+SCENARIO:
+An attacker who captures a valid SAMLResponse (and the matching relay cookie, or
+on a path where the cookie check is weak) replays it inside the assertion validity
+window to establish a session.
+
+RISK:
+SAML assertion replay within the validity window. Medium (only if SAML is enabled
+for this app; today it ships Google OIDC, but the SAML path is wired in the
+library and selectable).
+
+REPRO STEPS:
+1. Enable SAML; capture a valid SAMLResponse at the ACS.
+2. Replay it with a matching relay state within NotOnOrAfter -> session created.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts (lines 78-81 validateInResponseTo.never)
+- /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 1260-1296 ACS RelayState-only check)
+
+CALL COUNT:
+1 library SAML client config (saml.ts) consumed by the app's single
+createFederatedFrontend call (auth_frontend.ts) when SAML is enabled.
+
+FIX:
+- Root cause being fixed: no InResponseTo/replay binding.
+- How: enable InResponseTo with a shared request-id store, and/or track consumed
+  assertion IDs for one-time use within the validity window.
+- Files changed and how:
+  * Library saml.ts/frontend.ts: enable InResponseTo with a pluggable cache; add
+    assertion-id replay cache.
+  * App: provide the shared store when enabling SAML.
+
+================================================================================
+16. Library default RBAC grant gives every signed-in identity org admin with *:write  [MEDIUM]
+
+SITUATION / PROBLEM:
+The app calls createFederatedFrontend without resolveGrants, so the library's
+defaultResolveGrants applies: every verified identity becomes role employee plus an
+org:admin membership with permissions ["*:read","*:write","org:sys_memberships:manage"].
+Any signed-in company user is effectively an org admin with write-everything, so
+the <Protect> / has() checks are no-ops.
+
+ROOT CAUSE:
+The app does not supply a group-to-role mapping, and the library's default is
+maximally permissive.
+
+SCENARIO:
+Any non-admin employee (or anyone with a forged/issued token) passes every
+permission check the UI or backend performs, because their grant is *:write.
+
+RISK:
+No effective least-privilege; RBAC checks always pass for signed-in users.
+Medium.
+
+REPRO STEPS:
+1. Sign in as a non-admin company account.
+2. Observe the minted token carries permissions including *:write and role
+   org:admin; any has({permission}) returns true.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/lib/auth_frontend.ts (lines 60-106 createFederatedFrontend call; no resolveGrants)
+- /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 379-393 defaultResolveGrants)
+
+CALL COUNT:
+1 createFederatedFrontend call (auth_frontend.ts) relying on the library default.
+
+FIX:
+- Root cause being fixed: permissive default grant.
+- How: pass an explicit resolveGrants mapping Google Workspace groups (or the admin
+  allowlist) to least-privilege roles/permissions.
+- Files changed and how:
+  * src/lib/auth_frontend.ts: add resolveGrants that emits narrow permissions.
+  * Library: optionally make defaultResolveGrants read-only by default.
+
+================================================================================
+17. SAML treats any signed assertion's email as verified; app maps it straight to admin  [MEDIUM]
+
+SITUATION / PROBLEM:
+validateSamlAcs sets emailVerified:true for any signed assertion, and the app's
+resolveUser then enforces only the domain allowlist and consults the email-based
+admin allowlist. If a SAML IdP (or a misconfigured/compromised one on an allowed
+domain) asserts an allowlisted admin email, the app grants admin. There is no
+email_verified signal independent of the assertion signature.
+
+ROOT CAUSE:
+Email verification is inferred from "the assertion is signed" rather than a
+distinct verified-email claim, and admin is keyed on the email string.
+
+SCENARIO:
+A SAML IdP under the allowed domain (or able to mint assertions for it) emits an
+allowlisted admin email; the app issues an admin session.
+
+RISK:
+Admin elevation contingent on IdP-asserted email equaling a hardcoded admin
+address. Medium (SAML path).
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts (lines 146-155 emailVerified:true)
+- /Users/bryan/BGit/all/marketing/ai/code/src/middleware/auth.ts (lines 130-148 domain check; line 175 admin allowlist)
+- /Users/bryan/BGit/all/marketing/ai/code/src/lib/admin_allowlist.ts
+
+CALL COUNT:
+1 SAML identity mapping (saml.ts) feeding resolveUser (auth.ts).
+
+FIX:
+- Root cause being fixed: admin keyed on an asserted email without independent
+  verification.
+- How: drive admin from IdP group membership, not the email string; keep the
+  allowlist as bootstrap only (finding 13).
+- Files changed and how:
+  * src/middleware/auth.ts / users_repo: source admin from groups/roles.
+
+================================================================================
+18. resolveUser identity cache is keyed only by email and never bounded/evicted  [MEDIUM]
+
+SITUATION / PROBLEM:
+A module-level Map caches {user, claims} by lowercased email for 30s and is never
+size-bounded or pruned (entries are overwritten on re-resolve but stale keys for
+inactive users remain). It also caches the resolved UserRow including is_admin, so
+an admin demotion takes up to 30s to take effect, and the map grows with the number
+of distinct emails seen.
+
+ROOT CAUSE:
+An unbounded in-process cache keyed solely on email with no eviction.
+
+SCENARIO:
+A high-cardinality stream of distinct (even invalid-but-domain-valid) emails grows
+the map; and a just-revoked admin retains privileges for the cache window.
+
+RISK:
+Unbounded memory growth (DoS) and a 30s window where revocation/role changes are
+not honored. Medium.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/middleware/auth.ts (lines 57-58 cache; lines 150-203 read/write, no eviction)
+
+CALL COUNT:
+1 cache used by every resolveUser call (all guard paths).
+
+FIX:
+- Root cause being fixed: unbounded, slow-to-revoke cache.
+- How: bound the cache (LRU with max size) and shorten/disable it for privilege
+  fields; check the session store's revoked flag on each request.
+- Files changed and how:
+  * src/middleware/auth.ts: replace the Map with a size-capped LRU; exclude
+    is_admin from the cached decision or shorten TTL.
+
+================================================================================
+19. Open-redirect surface on returnTo / redirect_url propagated to the library callback  [MEDIUM]
+
+SITUATION / PROBLEM:
+The app's /google/start sanitizes return_to with sanitizeLocalPath (good), but the
+value is passed as redirect_url_complete into the library, whose backToApp() will
+honor absolute http(s) targets if a redirect_url is absolute. The app's own
+sso-callback re-sanitizes redirect_url_complete, but the library's generic
+redirect handling (backToApp) accepts absolute URLs from redirect_url, so any
+caller invoking the library routes directly (/v1/auth/sign_in/sso?redirect_url=...)
+can drive an absolute redirect.
+
+ROOT CAUSE:
+Redirect-target validation is enforced in the app compat layer but not uniformly
+in the underlying library callback, which can emit absolute redirects.
+
+SCENARIO:
+An attacker crafts a link to the library's sign-in/callback with an absolute
+redirect_url to evil.com; on certain branches the browser is redirected off-site
+(phishing / token-leak vector via the URL).
+
+RISK:
+Open redirect usable for phishing and to leak callback parameters. Medium.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/auth.ts (lines 47-51 sanitizeLocalPath; lines 122-130 start; lines 160-163 callback)
+- /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts (lines 854-870 backToApp absolute-URL handling)
+
+CALL COUNT:
+1 app start route + 1 callback (auth.ts) plus the library backToApp helper.
+
+FIX:
+- Root cause being fixed: absolute redirect targets honored at the library layer.
+- How: constrain library redirect targets to a configured allowlist / relative
+  paths; keep the app's sanitizeLocalPath and also validate at the library.
+- Files changed and how:
+  * Library frontend.ts: reject absolute redirect_url not on an allowlist.
+  * src/routes/auth.ts: keep sanitization (already present).
+
+================================================================================
+20. No audit logging of successful privileged actions; only failures are recorded  [MEDIUM]
+
+SITUATION / PROBLEM:
+The app logs auth failures (logError to error-out) and INFO breadcrumbs, but there
+is no security audit trail of SUCCESSFUL sign-ins, admin actions, settings/tenant
+writes, data export/delete, or permission grants in a tamper-resistant store. The
+spec requires auditing sign-in/out/refresh/permission-denied/admin actions.
+
+ROOT CAUSE:
+Auditing is implemented as best-effort application logging of errors, not a
+structured audit of privileged successful operations.
+
+SCENARIO:
+After a compromise (e.g. token forgery, finding 11, or unauthenticated tenant write,
+finding 3), there is no reliable record of who exported data, changed tenant
+settings, or escalated, hampering detection and forensics.
+
+RISK:
+Inadequate detection/forensics for privileged operations. Medium.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/middleware/auth.ts (success path logs only INFO breadcrumbs)
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/settings.ts, data_export.ts (no audit of successful writes/exports)
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/audit.ts (read surface exists; write coverage is thin)
+
+CALL COUNT:
+Many privileged handlers across settings/data_export/admin with no success-side
+audit emission.
+
+FIX:
+- Root cause being fixed: missing audit of privileged successes.
+- How: emit structured audit records (actor, action, target, tenant, outcome) for
+  sign-in/out, admin actions, settings/tenant writes, export/delete.
+- Files changed and how:
+  * src/middleware/auth.ts: audit successful resolveUser with actor + outcome.
+  * src/routes/settings.ts, data_export.ts, admin.ts: audit each privileged op.
+
+================================================================================
+21. Token verification ignores issuer/audience in embedded mode (cross-app token reuse on shared secret)  [MEDIUM]
+
+SITUATION / PROBLEM:
+In embedded mode verifyToken() validates only the HS256 signature (and exp if a
+clock-skew is passed) and does NOT check iss or aud, even though the app sets
+issuer 'mai-web'. If two apps on the machine share an AUTH_SESSION_SECRET (e.g. via
+the operator-global ~/.env JWT_SECRET, which this app explicitly chains onto), a
+token minted for one app is accepted by the other. The app calls verifyToken(token)
+with no options, so even an issuer check would not be applied.
+
+ROOT CAUSE:
+Embedded verification omits issuer/audience binding, and the app does not pass
+expected issuer/audience to verifyToken.
+
+SCENARIO:
+The internal hub app and Marketing AI both fall back to the same shared
+JWT_SECRET; a session/access token from the hub is presented to Marketing AI and
+accepted as a valid identity.
+
+RISK:
+Cross-application token reuse when a signing secret is shared. Medium.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts (lines 88-94 embedded path: no iss/aud check)
+- /Users/bryan/BGit/all/marketing/ai/code/src/middleware/auth.ts (line 113 verifyToken(token) with no options)
+- /Users/bryan/BGit/all/marketing/ai/code/src/lib/config.ts (lines 231-234 secret chains onto shared JWT_SECRET)
+
+CALL COUNT:
+1 verifyToken call site (auth.ts line 113); library embedded path applies to it.
+
+FIX:
+- Root cause being fixed: no issuer/audience binding in embedded verification.
+- How: have the app pass { issuer: 'mai-web', audience: 'mai-web' } to verifyToken
+  and enforce them; use a per-app secret rather than chaining onto a shared one.
+- Files changed and how:
+  * Library verify.ts: enforce issuer/audience in embedded mode when provided.
+  * src/middleware/auth.ts: pass expected issuer/audience.
+  * src/lib/config.ts: use a dedicated per-app AUTH_SESSION_SECRET, not JWT_SECRET.
+
+================================================================================
+22. local-api-key bootstrap trusts loopback remoteAddress and any home-dir file with a matching hash  [LOW]
+
+SITUATION / PROBLEM:
+POST /v1/local-api-key registers a CLI API key for the default tenant/operator
+with no Bearer auth, gated only by socket.remoteAddress being loopback and a
+SHA-256 hash of an operator-named credentials file anywhere under the home dir.
+remoteAddress is spoofable behind a misconfigured reverse proxy (which may forward
+with a loopback source), and any local process that can write a file under the home
+directory can register a key — there is no binding to the authenticated operator.
+
+ROOT CAUSE:
+Authorization for key issuance relies on transport source address plus a file-hash
+proof rather than an authenticated identity; trusts any home-dir path.
+
+SCENARIO:
+On a multi-user host or behind a proxy that presents a loopback source, an
+unauthenticated/lower-privileged actor writes a credentials file and registers a
+working API key for the default operator/tenant.
+
+RISK:
+Local privilege/credential issuance without authenticated identity. Low (requires
+local file write or proxy misconfig).
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/all/marketing/ai/code/src/routes/local_api_key.ts (lines 39-42 loopback check; lines 79-107 home-dir + hash proof; lines 118-121 importKey for default operator)
+
+CALL COUNT:
+1 endpoint in src/routes/local_api_key.ts.
+
+FIX:
+- Root cause being fixed: identity-less local key issuance trusting remoteAddress.
+- How: bind issuance to an authenticated operator session, or restrict to a Unix
+  socket / a one-time boot nonce; never trust X-Forwarded source; in server mode
+  disable the route.
+- Files changed and how:
+  * src/routes/local_api_key.ts: require an authenticated session to name the
+    operator/tenant; disable when IS_SERVER; ignore proxy-forwarded source.
+
+================================================================================
+END OF REPORT

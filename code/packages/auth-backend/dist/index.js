@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.authClient = exports.federatedClient = exports.createAuthClient = exports.OAuthCredentialsError = exports.credentialsRemediation = exports.assertGoogleCredentials = exports.loadGoogleCredentials = exports.validateSamlAcs = exports.samlSpMetadata = exports.samlLoginRedirectUrl = exports.buildSamlClient = exports.loadOrCreateSecret = exports.InMemorySessionStore = exports.FileSessionStore = exports.createAuthFrontend = exports.createFederatedFrontend = exports.getAuth = exports.requireAuth = exports.federatedMiddleware = exports.AuthError = exports.bearerToken = exports.authenticateRequest = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.FederatedClient = exports.AuthClient = void 0;
+exports.authClient = exports.federatedClient = exports.createAuthClient = exports.OAuthCredentialsError = exports.credentialsRemediation = exports.assertGoogleCredentials = exports.loadGoogleCredentials = exports.InMemorySamlReplayStore = exports.validateSamlAcs = exports.samlSpMetadata = exports.samlLoginRedirectUrl = exports.buildSamlClient = exports.loadOrCreateSecret = exports.InMemorySessionStore = exports.FileSessionStore = exports.createAuthFrontend = exports.createFederatedFrontend = exports.getAuth = exports.requireAuth = exports.federatedMiddleware = exports.AuthError = exports.bearerToken = exports.authenticateRequest = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.verifyWebhook = exports.FederatedClient = exports.AuthClient = void 0;
 exports.createFederatedClient = createFederatedClient;
 const client_js_1 = require("./client.js");
 // The backend client. `FederatedClient` is the primary name; `AuthClient` is kept as an alias so
@@ -8,6 +8,7 @@ const client_js_1 = require("./client.js");
 var client_js_2 = require("./client.js");
 Object.defineProperty(exports, "AuthClient", { enumerable: true, get: function () { return client_js_2.AuthClient; } });
 Object.defineProperty(exports, "FederatedClient", { enumerable: true, get: function () { return client_js_2.AuthClient; } });
+Object.defineProperty(exports, "verifyWebhook", { enumerable: true, get: function () { return client_js_2.verifyWebhook; } });
 var verify_js_1 = require("./verify.js");
 Object.defineProperty(exports, "verifyToken", { enumerable: true, get: function () { return verify_js_1.verifyToken; } });
 Object.defineProperty(exports, "verifyMachineToken", { enumerable: true, get: function () { return verify_js_1.verifyMachineToken; } });
@@ -47,6 +48,7 @@ Object.defineProperty(exports, "buildSamlClient", { enumerable: true, get: funct
 Object.defineProperty(exports, "samlLoginRedirectUrl", { enumerable: true, get: function () { return saml_js_1.samlLoginRedirectUrl; } });
 Object.defineProperty(exports, "samlSpMetadata", { enumerable: true, get: function () { return saml_js_1.samlSpMetadata; } });
 Object.defineProperty(exports, "validateSamlAcs", { enumerable: true, get: function () { return saml_js_1.validateSamlAcs; } });
+Object.defineProperty(exports, "InMemorySamlReplayStore", { enumerable: true, get: function () { return saml_js_1.InMemorySamlReplayStore; } });
 var credentials_js_1 = require("./credentials.js");
 Object.defineProperty(exports, "loadGoogleCredentials", { enumerable: true, get: function () { return credentials_js_1.loadGoogleCredentials; } });
 Object.defineProperty(exports, "assertGoogleCredentials", { enumerable: true, get: function () { return credentials_js_1.assertGoogleCredentials; } });

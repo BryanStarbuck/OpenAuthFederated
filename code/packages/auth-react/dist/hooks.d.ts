@@ -2,6 +2,19 @@ import type { AuthenticateWithRedirectParams, PermissionCheck, SdkMembership, Sd
 /** Auth state + tokens without hydrating the full profile. Mirrors Federated's `useAuth()`. */
 export declare function useAuth(): {
     isLoaded: boolean;
+    /**
+     * Raw load state: "loading" | "loaded" | "degraded" | "failed". A route guard should treat
+     * "failed"/"degraded" as "backend unreachable, keep waiting" — NOT as "signed out" — so a
+     * server restart never bounces an already-signed-in user to the sign-in page.
+     */
+    loadState: import("./types.js").LoadState;
+    /**
+     * Re-fetch the Client from the Frontend API (rehydrate the session from the still-valid
+     * session cookie) and report whether a session is now active. Non-destructive — unlike
+     * signOut() it never revokes the server session. Use it to recover from a transient 401
+     * before deciding the user is really signed out.
+     */
+    reloadSession: () => Promise<boolean>;
     isSignedIn: boolean;
     userId: string | null;
     sessionId: string | null;

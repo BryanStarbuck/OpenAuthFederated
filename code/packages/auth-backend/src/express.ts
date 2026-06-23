@@ -15,7 +15,7 @@
  * (NestJS' underlying express, etc.).
  */
 
-import { authenticateRequest, bearerToken, type AuthObject, type AuthRequestLike } from "./middleware.js"
+import { authenticateRequest, type AuthObject, type AuthRequestLike } from "./middleware.js"
 import type { VerifyTokenOptions } from "./verify.js"
 
 /** The minimal Express-like request these helpers read from / write `auth` onto. */
@@ -27,6 +27,7 @@ export interface ExpressLikeRequest extends AuthRequestLike {
 /** The minimal Express-like response these helpers write to when rejecting a request. */
 export interface ExpressLikeResponse {
   statusCode?: number
+  headersSent?: boolean
   setHeader(name: string, value: string): void
   status?(code: number): ExpressLikeResponse
   json?(body: unknown): unknown
@@ -41,14 +42,21 @@ export interface FederatedMiddlewareOptions extends VerifyTokenOptions {
   signInUrl?: string
 }
 
-const SIGNED_OUT: AuthObject = {
-  isAuthenticated: false,
-  userId: null,
-  sessionId: null,
-  orgId: null,
-  sessionClaims: null,
-  has: () => false,
-  getToken: async () => null,
+/**
+ * Build a FRESH signed-out Auth object per request. Returning a shared module-level singleton let a
+ * caller that mutates `req.auth` leak state into other requests (the spread copy was shallow too);
+ * a factory guarantees per-request isolation.
+ */
+function signedOut(): AuthObject {
+  return {
+    isAuthenticated: false,
+    userId: null,
+    sessionId: null,
+    orgId: null,
+    sessionClaims: null,
+    has: () => false,
+    getToken: async () => null,
+  }
 }
 
 /**
@@ -64,7 +72,7 @@ export function federatedMiddleware(options: FederatedMiddlewareOptions = {}) {
         next()
       })
       .catch(() => {
-        req.auth = SIGNED_OUT
+        req.auth = signedOut()
         next()
       })
   }
@@ -92,7 +100,17 @@ export function requireAuth(options: FederatedMiddlewareOptions = {}) {
         res.setHeader("Content-Type", "application/json; charset=utf-8")
         res.end(JSON.stringify({ error: "unauthenticated" }))
       })
-      .catch((err) => next(err))
+      // Fail closed with a clean 401 rather than forwarding the raw error to the host's default
+      // error handler (which can leak a stack trace). authenticateRequest already swallows
+      // verification failures to signed-out, so reaching here means an unexpected internal error.
+      .catch(() => {
+        req.auth = signedOut()
+        if (!res.headersSent) {
+          res.statusCode = 401
+          res.setHeader("Content-Type", "application/json; charset=utf-8")
+          res.end(JSON.stringify({ error: "unauthenticated" }))
+        }
+      })
   }
 }
 
@@ -103,7 +121,7 @@ export function requireAuth(options: FederatedMiddlewareOptions = {}) {
  */
 export function getAuth(req: ExpressLikeRequest): AuthObject {
   if (req.auth) return req.auth
-  // federatedMiddleware wasn't mounted — return signed-out rather than throw, but keep the token
-  // around so callers that only check `isAuthenticated` behave predictably.
-  return bearerToken(req) ? { ...SIGNED_OUT } : SIGNED_OUT
+  // federatedMiddleware wasn't mounted — return a fresh signed-out object rather than throw (and
+  // never a shared singleton, so a caller mutating it can't bleed into another request).
+  return signedOut()
 }

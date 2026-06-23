@@ -2,6 +2,10 @@ import { domainSlug, EMPTY_SNAPSHOT, hasPermission, hasRole, } from "./types.js"
 // Active-org is per-tab (sessionStorage), so two tabs can hold different active orgs — the
 // "tab-aware active organization context" the spec calls out (§14).
 const SS_ACTIVE_ORG = "openauthfed_active_org_v1";
+/** Small promise delay used by the load() retry backoff. */
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 /**
  * Shared subscribe/emit plumbing for the external store. Exported so a consuming app can build its
  * OWN {@link AuthCore} (e.g. a localhost-only dev core) on top of it and inject it via
@@ -204,22 +208,46 @@ export class RealAuthCore extends BaseCore {
             label: domain,
         }));
     }
+    // Backoff schedule (ms) for retrying a transient /client failure. Tuned so a page load that
+    // races a backend RESTART keeps trying for ~15s instead of giving up on the first miss and
+    // bouncing the user to /sign-in. A clean 200 (signed in OR signed out) is authoritative and
+    // never retried — only "couldn't reach the API" / 5xx is.
+    static LOAD_BACKOFF_MS = [400, 800, 1500, 2500, 4000, 5000];
     async load() {
+        await this.loadWithRetry(0);
+    }
+    async loadWithRetry(attempt) {
+        const schedule = RealAuthCore.LOAD_BACKOFF_MS;
         try {
             const res = await fetch(`${this.base()}/client`, {
                 headers: this.headers(),
                 credentials: "include",
             });
-            if (!res.ok) {
-                // Reachable but not OK (e.g. 5xx) → degraded; signed-out but the API is up.
-                this.setState(res.status >= 500 ? "degraded" : "loaded");
+            if (res.ok) {
+                // Authoritative answer (the body says signed-in or signed-out). Trust it; never retry.
+                this.applyClient(await res.json());
+                this.setState("loaded");
                 return;
             }
-            this.applyClient(await res.json());
-            this.setState("loaded");
+            // 5xx = API up but erroring → transient, keep retrying. 4xx = authoritative (e.g. bad
+            // publishable key) → stop. A signed-OUT user gets 200 + empty sessions, never a 4xx here.
+            if (res.status >= 500 && attempt < schedule.length) {
+                this.setState("degraded");
+                await delay(schedule[attempt] ?? 5000);
+                return this.loadWithRetry(attempt + 1);
+            }
+            this.setState(res.status >= 500 ? "degraded" : "loaded");
         }
         catch {
-            // Frontend API unreachable — auth cannot initialize at all.
+            // Frontend API unreachable (server restarting / briefly offline). Do NOT conclude
+            // "signed out" — that is what forces a needless re-login. Retry on a backoff so a reload
+            // during a backend restart rehydrates from the still-valid session cookie. The route guard
+            // shows a "reconnecting" state (not the sign-in page) while loadState is "failed".
+            if (attempt < schedule.length) {
+                this.setState("failed");
+                await delay(schedule[attempt] ?? 5000);
+                return this.loadWithRetry(attempt + 1);
+            }
             this.setState("failed");
         }
     }

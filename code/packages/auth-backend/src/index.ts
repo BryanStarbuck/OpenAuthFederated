@@ -3,7 +3,7 @@ import type { CreateFederatedClientOptions } from "./types.js"
 
 // The backend client. `FederatedClient` is the primary name; `AuthClient` is kept as an alias so
 // existing imports keep resolving.
-export { AuthClient, AuthClient as FederatedClient } from "./client.js"
+export { AuthClient, AuthClient as FederatedClient, verifyWebhook } from "./client.js"
 export type {
   User,
   Session,
@@ -87,8 +87,9 @@ export {
   samlLoginRedirectUrl,
   samlSpMetadata,
   validateSamlAcs,
+  InMemorySamlReplayStore,
 } from "./saml.js"
-export type { SamlSpConfig, SamlAcsResult } from "./saml.js"
+export type { SamlSpConfig, SamlAcsResult, SamlReplayStore } from "./saml.js"
 export {
   loadGoogleCredentials,
   assertGoogleCredentials,

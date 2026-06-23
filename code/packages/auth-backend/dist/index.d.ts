@@ -1,6 +1,6 @@
 import { AuthClient } from "./client.js";
 import type { CreateFederatedClientOptions } from "./types.js";
-export { AuthClient, AuthClient as FederatedClient } from "./client.js";
+export { AuthClient, AuthClient as FederatedClient, verifyWebhook } from "./client.js";
 export type { User, Session, Organization, OrganizationMembership, Invitation, JwtTemplate, PaginatedResourceResponse, AuthUser, AuthSession, AuthOrganization, AuthMembership, AuthInvitation, AuthJwtTemplate, ListResponse, } from "./client.js";
 export type { TokenClaims, MachineClaims, PermissionCheck, CreateFederatedClientOptions, CreateAuthClientOptions, } from "./types.js";
 export { verifyToken, verifyMachineToken, hasScope } from "./verify.js";
@@ -14,8 +14,8 @@ export { createFederatedFrontend, createAuthFrontend } from "./frontend.js";
 export type { FederatedFrontendConfig, FederatedConnectionConfig, GoogleConnectionConfig, SamlConnectionConfig, LegacyGoogleConfig, AuthFrontendConfig, OidcIdentity, OrgMembership, ResolvedGrants, } from "./frontend.js";
 export { FileSessionStore, InMemorySessionStore, loadOrCreateSecret, } from "./session-store.js";
 export type { SessionStore, StoredSession, SessionMembership } from "./session-store.js";
-export { buildSamlClient, samlLoginRedirectUrl, samlSpMetadata, validateSamlAcs, } from "./saml.js";
-export type { SamlSpConfig, SamlAcsResult } from "./saml.js";
+export { buildSamlClient, samlLoginRedirectUrl, samlSpMetadata, validateSamlAcs, InMemorySamlReplayStore, } from "./saml.js";
+export type { SamlSpConfig, SamlAcsResult, SamlReplayStore } from "./saml.js";
 export { loadGoogleCredentials, assertGoogleCredentials, credentialsRemediation, OAuthCredentialsError, } from "./credentials.js";
 export type { GoogleCredentials, CredentialResolution, CredentialSource, LoadGoogleCredentialsOptions, } from "./credentials.js";
 /**

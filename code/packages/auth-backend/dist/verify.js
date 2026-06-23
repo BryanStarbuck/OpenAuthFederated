@@ -28,6 +28,31 @@ function isEmbedded() {
     return process.env.AUTH_EMBEDDED === "true";
 }
 /**
+ * Validate that an issuer string is safe to turn into an outbound JWKS fetch (SSRF guard): it must
+ * be an absolute `https:` URL whose host is on the optional `AUTH_JWKS_ALLOWED_HOSTS` allowlist
+ * (comma-separated). Without an allowlist we still require https + a real host, rejecting internal
+ * IPs / metadata endpoints presented as bare hostnames. Returns the normalized origin host.
+ */
+function assertSafeIssuer(issuer) {
+    let url;
+    try {
+        url = new URL(issuer);
+    }
+    catch {
+        throw new Error("verifyToken: AUTH_JWT_ISSUER must be an absolute URL");
+    }
+    if (url.protocol !== "https:") {
+        throw new Error("verifyToken: issuer must use https");
+    }
+    const allow = (process.env.AUTH_JWKS_ALLOWED_HOSTS ?? "")
+        .split(",")
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean);
+    if (allow.length > 0 && !allow.includes(url.hostname.toLowerCase())) {
+        throw new Error("verifyToken: issuer host is not on AUTH_JWKS_ALLOWED_HOSTS allowlist");
+    }
+}
+/**
  * The shared HS256 secret for embedded-mode verification. Requires a strong, operator-supplied
  * `AUTH_SESSION_SECRET`. There is intentionally **no** dev/default secret: OpenAuthFederated will
  * not fall back to a well-known value (which would let anyone forge a session), so an unset or
@@ -59,7 +84,15 @@ async function verifyToken(token, opts = {}) {
     if (!token)
         throw new Error("verifyToken: empty token");
     if (isEmbedded()) {
-        const verifyOpts = {};
+        // Pin HS256 for the embedded symmetric path (no algorithm agility), and enforce the issuer
+        // when one is configured so a token from a different deployment is not accepted on a shared
+        // secret. Audience is enforced when the caller supplies one.
+        const issuer = opts.issuer ?? process.env.AUTH_JWT_ISSUER;
+        const verifyOpts = {
+            algorithms: opts.algorithms ?? ["HS256"],
+        };
+        if (issuer)
+            verifyOpts.issuer = issuer;
         if (opts.audience !== undefined)
             verifyOpts.audience = opts.audience;
         if (opts.clockSkewInMs !== undefined)
@@ -70,13 +103,19 @@ async function verifyToken(token, opts = {}) {
     const issuer = opts.issuer ?? process.env.AUTH_JWT_ISSUER;
     if (!issuer)
         throw new Error("verifyToken: AUTH_JWT_ISSUER is not set");
+    // SSRF guard: the issuer becomes an outbound JWKS fetch URL, so validate it (https + host
+    // allowlist) before constructing the remote key set.
+    assertSafeIssuer(issuer);
     let jwks = jwksCache.get(issuer);
     if (!jwks) {
         const url = new URL(`${issuer.replace(/\/+$/, "")}/.well-known/jwks.json`);
         jwks = (0, jose_1.createRemoteJWKSet)(url);
         jwksCache.set(issuer, jwks);
     }
-    const jwksOpts = { issuer };
+    const jwksOpts = {
+        issuer,
+        algorithms: opts.algorithms ?? ["RS256"],
+    };
     if (opts.audience !== undefined)
         jwksOpts.audience = opts.audience;
     if (opts.clockSkewInMs !== undefined)

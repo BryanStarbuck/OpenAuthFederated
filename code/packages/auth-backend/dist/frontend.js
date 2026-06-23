@@ -111,8 +111,25 @@ function setCookie(res, name, value, opts = {}) {
         parts.push("Secure");
     appendSetCookie(res, parts.join("; "));
 }
-function clearCookie(res, name, secure) {
-    appendSetCookie(res, `${name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${secure ? "; Secure" : ""}`);
+function clearCookie(res, name, secure, sameSite = "Lax") {
+    appendSetCookie(res, `${name}=; Path=/; HttpOnly; SameSite=${sameSite}; Max-Age=0${secure ? "; Secure" : ""}`);
+}
+/** Security response headers applied to every auth-endpoint response (defense-in-depth). */
+function setSecurityHeaders(res) {
+    res.setHeader("Strict-Transport-Security", "max-age=63072000; includeSubDomains");
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
+}
+/** Hash an email to a short, non-reversible token so logs carry no raw PII. */
+function redactEmail(email) {
+    if (!email)
+        return "<none>";
+    const at = email.lastIndexOf("@");
+    const domain = at >= 0 ? email.slice(at + 1) : "";
+    const digest = (0, node_crypto_1.createHash)("sha256").update(email.toLowerCase()).digest("hex").slice(0, 12);
+    return `user_${digest}${domain ? `@${domain}` : ""}`;
 }
 function sendJson(res, status, body) {
     const payload = JSON.stringify(body);
@@ -212,22 +229,23 @@ function constantTimeEqual(a, b) {
 }
 // --- default RBAC mapping ------------------------------------------------------------------
 /**
- * Default grant: an internal employee who is an admin of the single "internal" org. Read
- * everything, write everything within the org — a sensible default so the app's
- * `<Protect …:write>` controls keep working. Replace via `config.resolveGrants` to map
- * Google Workspace groups to finer-grained roles.
+ * Default grant: a least-privilege authenticated employee — NO write, NO membership-management, NO
+ * admin role. Any elevated authority (`*:write`, `org:admin`, `org:sys_memberships:manage`) MUST be
+ * granted explicitly by the embedding app via `config.resolveGrants`, mapping Google Workspace
+ * groups to roles. This fails closed: forgetting to wire `resolveGrants` yields a read-only user,
+ * not an org admin.
  */
 function defaultResolveGrants(identity) {
     const domain = identity.hd || emailDomain(identity.email) || "company";
     const membership = {
         id: "orgmem_internal",
         organization: { id: "org_internal", name: `${domain} (Internal)`, slug: "internal" },
-        role: "org:admin",
-        permissions: ["*:read", "*:write", "org:sys_memberships:manage"],
+        role: "employee",
+        permissions: [],
     };
     return {
         roles: ["employee"],
-        permissions: ["*:read"],
+        permissions: [],
         orgId: "org_internal",
         memberships: [membership],
     };
@@ -293,17 +311,26 @@ function normalizeConfig(config) {
         sessionCookieName: config.sessionCookieName ?? `${(config.cookiePrefix ?? "oaf").trim() || "oaf"}_session`,
         stateCookieName: `${(config.cookiePrefix ?? "oaf").trim() || "oaf"}_oauth_state`,
         samlRelayCookieName: `${(config.cookiePrefix ?? "oaf").trim() || "oaf"}_saml_relay`,
-        // ~4-month default maximum lifetime (Clerk's "Maximum lifetime", but long): a signed-in user
-        // stays signed in across months, not hours. The session is a sliding window (re-issued on every
-        // token mint), so active use rolls this forward; this is the idle/absolute ceiling. Consumers
-        // can shorten it via sessionTtlSeconds. NEVER default this to a short-term value.
-        sessionTtlSeconds: config.sessionTtlSeconds ?? 120 * 24 * 60 * 60,
+        // Conservative default maximum lifetime: ~7 days. A captured session must not remain a valid
+        // credential indefinitely. The session is a sliding window (re-issued on every token mint), so
+        // active use rolls this forward; this is the absolute ceiling. Apps that genuinely want longer
+        // sessions opt in explicitly via sessionTtlSeconds.
+        sessionTtlSeconds: config.sessionTtlSeconds ?? 7 * 24 * 60 * 60,
         accessTokenTtlSeconds: config.accessTokenTtlSeconds ?? 60,
-        // Inactivity timeout OFF by default (Clerk's default) → "logged in forever" as long as the user
-        // returns within the maximum lifetime. Only enforced when a sessionStore tracks lastActiveAt.
-        inactivityTimeoutSeconds: config.inactivityTimeoutSeconds ?? 0,
+        // Idle timeout ON by default (~12h): an idle/stolen session ages out instead of living for the
+        // full maximum lifetime. Only enforced when a sessionStore tracks lastActiveAt; 0 disables it.
+        inactivityTimeoutSeconds: config.inactivityTimeoutSeconds ?? 12 * 60 * 60,
         sessionStore: config.sessionStore,
-        cookieSecure: config.cookieSecure ?? false,
+        // Secure by default — never ship a non-Secure session cookie to production.
+        cookieSecure: config.cookieSecure ?? true,
+        sessionCookieSameSite: config.sessionCookieSameSite ?? "Lax",
+        audience: config.audience,
+        requireHostedDomain: config.requireHostedDomain ?? false,
+        allowedRedirectOrigins: (config.allowedRedirectOrigins ?? []).map((o) => o.trim()).filter(Boolean),
+        samlTrustAssertedEmailVerified: config.samlTrustAssertedEmailVerified ?? false,
+        samlReplayStore: config.samlReplayStore ?? new saml_js_1.InMemorySamlReplayStore(),
+        securityHeaders: config.securityHeaders ?? true,
+        allowedCorsOrigins: (config.allowedCorsOrigins ?? []).map((o) => o.trim()).filter(Boolean),
         resolveGrants: config.resolveGrants ?? defaultResolveGrants,
         log: config.logger ??
             ((level, message, meta) => {
@@ -323,7 +350,27 @@ function normalizeConfig(config) {
  */
 function createFederatedFrontend(config) {
     const cfg = normalizeConfig(config);
-    const secretKey = new TextEncoder().encode(cfg.sessionSecret);
+    // Fail closed on a weak/placeholder/short secret (mirrors verify.ts, which throws). Signing real
+    // sessions under a guessable secret is trivial token forgery, so refuse to construct.
+    const PLACEHOLDER_SECRETS = new Set(["dev-shared-secret", "dev-only-change-me", "changeme", "secret"]);
+    if (!cfg.sessionSecret ||
+        cfg.sessionSecret.length < 32 ||
+        PLACEHOLDER_SECRETS.has(cfg.sessionSecret)) {
+        throw new Error("createFederatedFrontend: sessionSecret must be a strong, non-default value of at least 32 " +
+            "characters. Set AUTH_SESSION_SECRET (e.g. via loadOrCreateSecret) — no default is provided.");
+    }
+    // Derive a distinct per-purpose subkey (HKDF-SHA256, distinct info labels) for each cookie-signing
+    // context that stays INSIDE this module — the session cookie, the OAuth state cookie, and the SAML
+    // relay cookie. A leak of the low-value state/relay flow then cannot forge a session. The access
+    // token is the one credential consumed OUTSIDE this module (by verifyToken() in embedded mode,
+    // which keys off the raw AUTH_SESSION_SECRET), so it is signed with the master secret to stay
+    // verifiable — its short TTL and per-app audience bound it.
+    const master = new TextEncoder().encode(cfg.sessionSecret);
+    const subkey = (label) => new Uint8Array((0, node_crypto_1.hkdfSync)("sha256", master, new Uint8Array(0), `oaf:${label}`, 32));
+    const sessionKey = subkey("session");
+    const accessKey = master;
+    const stateKey = subkey("state");
+    const relayKey = subkey("relay");
     if (!cfg.googleConfigured) {
         // Loud at construction, but non-fatal: SAML still works, and the OIDC routes fail closed with
         // a clear 503 (see guardGoogleConfigured) instead of redirecting to Google with an empty
@@ -332,11 +379,8 @@ function createFederatedFrontend(config) {
         cfg.log("warn", "Google OAuth client is not configured; Google sign-in routes will return 503 until it is.\n" +
             cfg.googleRemediation);
     }
-    if (!cfg.sessionSecret || cfg.sessionSecret === "dev-shared-secret") {
-        cfg.log("warn", "AUTH_SESSION_SECRET is unset or default — set a strong secret before production.");
-    }
     async function signSession(record) {
-        return await new jose_1.SignJWT({
+        let jwt = new jose_1.SignJWT({
             email: record.email,
             name: record.name,
             first_name: record.firstName,
@@ -353,8 +397,10 @@ function createFederatedFrontend(config) {
             .setSubject(record.userId)
             .setIssuedAt()
             .setIssuer(cfg.issuer ?? "openauthfederated")
-            .setExpirationTime(`${cfg.sessionTtlSeconds}s`)
-            .sign(secretKey);
+            .setExpirationTime(`${cfg.sessionTtlSeconds}s`);
+        if (cfg.audience)
+            jwt = jwt.setAudience(cfg.audience);
+        return await jwt.sign(sessionKey);
     }
     /** Build the in-memory SessionRecord from a durable StoredSession. */
     function recordFromStored(s) {
@@ -380,7 +426,10 @@ function createFederatedFrontend(config) {
         let payload;
         try {
             ;
-            ({ payload } = (await (0, jose_1.jwtVerify)(raw, secretKey)));
+            ({ payload } = (await (0, jose_1.jwtVerify)(raw, sessionKey, {
+                algorithms: ["HS256"],
+                ...(cfg.audience ? { audience: cfg.audience } : {}),
+            })));
         }
         catch {
             return null;
@@ -420,20 +469,23 @@ function createFederatedFrontend(config) {
                 }
                 return recordFromStored(stored);
             }
-            // Self-heal: a valid cookie with no record yet (first request after upgrading to the store,
-            // or after the store was cleared). Recreate the record from the cookie so the user is NOT
-            // logged out by the upgrade or a restart. Carry the cookie's own iat/exp so the maximum
-            // lifetime ceiling is preserved rather than extended.
-            const createdAt = typeof payload.iat === "number" ? payload.iat : now;
-            const expireAt = typeof payload.exp === "number" ? payload.exp : now + cfg.sessionTtlSeconds;
-            await cfg.sessionStore.create({
-                ...cookieRec,
-                createdAt,
-                lastActiveAt: now,
-                expireAt,
-                revoked: false,
-            });
-            return cookieRec;
+            // No durable record for this sid. When a store is configured it is authoritative, so "no
+            // record" means signed-out / revoked (a lost tombstone must NOT resurrect access). Fail
+            // closed. A one-time migration that re-creates records from valid cookies can be done with an
+            // explicit AUTH_SESSION_STORE_MIGRATE=true opt-in.
+            if (process.env.AUTH_SESSION_STORE_MIGRATE === "true") {
+                const createdAt = typeof payload.iat === "number" ? payload.iat : now;
+                const expireAt = typeof payload.exp === "number" ? payload.exp : now + cfg.sessionTtlSeconds;
+                await cfg.sessionStore.create({
+                    ...cookieRec,
+                    createdAt,
+                    lastActiveAt: now,
+                    expireAt,
+                    revoked: false,
+                });
+                return cookieRec;
+            }
+            return null;
         }
         catch (err) {
             // A transient filesystem error must not lock the user out: fall back to the signed cookie.
@@ -481,7 +533,7 @@ function createFederatedFrontend(config) {
     }
     async function mintAccessToken(session, orgId) {
         const g = grantsForOrg(session, orgId);
-        return await new jose_1.SignJWT({
+        let jwt = new jose_1.SignJWT({
             email: session.email,
             sid: session.sid,
             org_id: g.orgId,
@@ -493,8 +545,10 @@ function createFederatedFrontend(config) {
             .setSubject(session.userId)
             .setIssuedAt()
             .setIssuer(cfg.issuer ?? "openauthfederated")
-            .setExpirationTime(`${cfg.accessTokenTtlSeconds}s`)
-            .sign(secretKey);
+            .setExpirationTime(`${cfg.accessTokenTtlSeconds}s`);
+        if (cfg.audience)
+            jwt = jwt.setAudience(cfg.audience);
+        return await jwt.sign(accessKey);
     }
     // --- OAuth state (CSRF + PKCE + return targets) carried in a short-lived signed cookie ----
     async function signState(state) {
@@ -502,14 +556,14 @@ function createFederatedFrontend(config) {
             .setProtectedHeader({ alg: "HS256" })
             .setIssuedAt()
             .setExpirationTime(`${STATE_TTL_SECONDS}s`)
-            .sign(secretKey);
+            .sign(stateKey);
     }
     async function readState(req) {
         const raw = parseCookies(req)[cfg.stateCookieName];
         if (!raw)
             return null;
         try {
-            const { payload } = await (0, jose_1.jwtVerify)(raw, secretKey);
+            const { payload } = await (0, jose_1.jwtVerify)(raw, stateKey, { algorithms: ["HS256"] });
             return payload;
         }
         catch {
@@ -545,6 +599,8 @@ function createFederatedFrontend(config) {
         const q = queryOf(req);
         const redirectUrl = q.get("redirect_url") || "/sso-callback";
         const redirectUrlComplete = q.get("redirect_url_complete") || "/";
+        // Step-up reverify: the user already has a session but must prove fresh presence at the IdP.
+        const reverify = q.get("reverify") === "1";
         // The SDK passes connection=conn_<domain_slug>; the explicit hostedDomain config wins.
         const connection = q.get("connection") ?? "";
         const domainFromConn = connection.startsWith("conn_")
@@ -563,6 +619,7 @@ function createFederatedFrontend(config) {
             redirectUrl,
             redirectUrlComplete,
             domain: hostedDomain,
+            reverify,
         });
         setCookie(res, cfg.stateCookieName, stateJwt, {
             maxAgeSeconds: STATE_TTL_SECONDS,
@@ -577,25 +634,60 @@ function createFederatedFrontend(config) {
         authUrl.searchParams.set("nonce", nonce);
         authUrl.searchParams.set("code_challenge", codeChallenge);
         authUrl.searchParams.set("code_challenge_method", "S256");
-        authUrl.searchParams.set("prompt", "select_account");
+        // Step-up: force a fresh IdP authentication (prompt=login + max_age=0) so reverify is real
+        // re-authentication, not a silent re-assertion. Normal sign-in just lets the user pick account.
+        if (reverify) {
+            authUrl.searchParams.set("prompt", "login");
+            authUrl.searchParams.set("max_age", "0");
+        }
+        else {
+            authUrl.searchParams.set("prompt", "select_account");
+        }
         authUrl.searchParams.set("access_type", "online");
         if (hostedDomain)
             authUrl.searchParams.set("hd", hostedDomain);
         redirect(res, authUrl.toString());
     }
-    /** Bounce back to the SPA callback page, carrying either success or a rejection. */
-    function backToApp(res, redirectUrl, params) {
-        let url;
+    /**
+     * Normalize a caller-supplied redirect target to a SAFE value (open-redirect defense). An
+     * absolute http(s) URL is allowed only when its origin is on `allowedRedirectOrigins`; otherwise
+     * it is rewritten to a same-origin relative path (path + query only, dropping the foreign
+     * origin). A relative target passes through unchanged. Defaults to `/` when unusable.
+     */
+    function safeRedirectTarget(redirectUrl) {
+        if (!redirectUrl)
+            return "/";
+        const isAbsolute = /^https?:\/\//i.test(redirectUrl);
+        if (!isAbsolute) {
+            // Reject protocol-relative (`//evil.com`) and other schemes; force a leading slash.
+            if (redirectUrl.startsWith("//"))
+                return "/";
+            return redirectUrl.startsWith("/") ? redirectUrl : `/${redirectUrl}`;
+        }
         try {
-            url = new URL(redirectUrl);
+            const u = new URL(redirectUrl);
+            if (cfg.allowedRedirectOrigins.includes(u.origin))
+                return redirectUrl;
+            cfg.log("warn", `Rejected non-allowlisted redirect target origin: ${u.origin}`);
+            return `${u.pathname}${u.search}` || "/";
         }
         catch {
-            url = new URL(redirectUrl, "http://localhost");
+            return "/";
+        }
+    }
+    /** Bounce back to the SPA callback page, carrying either success or a rejection. */
+    function backToApp(res, redirectUrl, params) {
+        const safe = safeRedirectTarget(redirectUrl);
+        let url;
+        const isAbsolute = /^https?:\/\//i.test(safe);
+        try {
+            url = new URL(safe);
+        }
+        catch {
+            url = new URL(safe, "http://localhost");
         }
         for (const [k, v] of Object.entries(params))
             url.searchParams.set(k, v);
-        // Preserve a relative target if the SDK passed one.
-        const isAbsolute = /^https?:\/\//i.test(redirectUrl);
         redirect(res, isAbsolute ? url.toString() : `${url.pathname}${url.search}`);
     }
     async function handleCallback(req, res) {
@@ -640,8 +732,9 @@ function createFederatedFrontend(config) {
                 }),
             });
             if (!tokenRes.ok) {
-                const detail = await tokenRes.text();
-                cfg.log("error", `Google token exchange failed (${tokenRes.status})`, detail.slice(0, 500));
+                // Do NOT log the raw provider error body — it can carry sensitive request detail. The
+                // status code alone is enough to diagnose.
+                cfg.log("error", `Google token exchange failed (${tokenRes.status})`);
                 return backToApp(res, fallbackRedirect, {
                     error: "sign_in_not_completed",
                     error_message: "Could not complete sign-in with Google.",
@@ -691,6 +784,32 @@ function createFederatedFrontend(config) {
                 redirect_url_complete: redirectUrlComplete,
             });
         }
+        // Step-up reverify: the user proved fresh presence at the IdP. Re-stamp the EXISTING session's
+        // lastVerifiedAt only — do not mint a new session — and bounce back to where they were.
+        if (saved.reverify) {
+            const session = await readSession(req);
+            if (session?.sid) {
+                session.lastVerifiedAt = Math.floor(Date.now() / 1000);
+                const sessionJwt = await signSession(session);
+                setCookie(res, cfg.sessionCookieName, sessionJwt, {
+                    maxAgeSeconds: cfg.sessionTtlSeconds,
+                    secure: cfg.cookieSecure,
+                    sameSite: cfg.sessionCookieSameSite,
+                });
+                if (cfg.sessionStore) {
+                    try {
+                        await cfg.sessionStore.touch(session.email, session.sid, {
+                            lastVerifiedAt: session.lastVerifiedAt,
+                            lastActiveAt: session.lastVerifiedAt,
+                        });
+                    }
+                    catch (err) {
+                        cfg.log("warn", "session store touch failed on reverify callback", err);
+                    }
+                }
+            }
+            return backToApp(res, redirectUrlComplete, {});
+        }
         return finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete);
     }
     /**
@@ -700,15 +819,29 @@ function createFederatedFrontend(config) {
      */
     async function finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete) {
         // Domain enforcement (authentication.mdx §3): require a verified email on an allowed domain.
-        const presentedDomain = (identity.hd || emailDomain(identity.email)).toLowerCase();
         if (!identity.email || !identity.emailVerified) {
             return backToApp(res, fallbackRedirect, {
                 error: "identity_domain_not_allowed",
                 error_message: "A verified company email is required.",
-                presented_domain: presentedDomain,
+                presented_domain: "",
                 redirect_url_complete: redirectUrlComplete,
             });
         }
+        // When the deployment is Workspace-gated (requireHostedDomain), the authoritative signal is the
+        // `hd` (Workspace-membership) claim — NOT the email domain. An identity that merely ends in an
+        // allowlisted domain but is not a Workspace member (no hd) is rejected. When not gated, fall
+        // back to the email domain for back-compat.
+        const hd = identity.hd?.toLowerCase();
+        if (cfg.requireHostedDomain && !hd) {
+            cfg.log("warn", "Rejecting sign-in: hosted-domain (hd) claim required but absent");
+            return backToApp(res, fallbackRedirect, {
+                error: "identity_domain_not_allowed",
+                error_message: "This app requires a Google Workspace account (hosted domain).",
+                presented_domain: "",
+                redirect_url_complete: redirectUrlComplete,
+            });
+        }
+        const presentedDomain = (cfg.requireHostedDomain ? hd : hd || emailDomain(identity.email)) ?? "";
         if (!presentedDomain || !cfg.allowedDomains.includes(presentedDomain)) {
             cfg.log("warn", `Rejecting sign-in from non-allowed domain: ${presentedDomain || "unknown"}`);
             return backToApp(res, fallbackRedirect, {
@@ -739,6 +872,7 @@ function createFederatedFrontend(config) {
         setCookie(res, cfg.sessionCookieName, sessionJwt, {
             maxAgeSeconds: cfg.sessionTtlSeconds,
             secure: cfg.cookieSecure,
+            sameSite: cfg.sessionCookieSameSite,
         });
         // Persist the durable server-side record (Clerk's stateful half) so the session survives app
         // restarts, can be listed, and can be revoked. Best-effort: a store failure must not block a
@@ -757,7 +891,8 @@ function createFederatedFrontend(config) {
                 cfg.log("warn", "session store create failed at sign-in", err);
             }
         }
-        cfg.log("info", `Sign-in established for ${identity.email}`);
+        // Redact PII: log a hashed identifier, not the raw email, on the routine per-sign-in line.
+        cfg.log("info", `Sign-in established for ${redactEmail(identity.email)}`);
         backToApp(res, fallbackRedirect, { redirect_url_complete: redirectUrlComplete });
     }
     async function handleClient(req, res) {
@@ -787,6 +922,7 @@ function createFederatedFrontend(config) {
         setCookie(res, cfg.sessionCookieName, sessionJwt, {
             maxAgeSeconds: cfg.sessionTtlSeconds,
             secure: cfg.cookieSecure,
+            sameSite: cfg.sessionCookieSameSite,
         });
         // Record activity so the inactivity-timeout clock (when enabled) tracks real use, and so the
         // durable record's lastActiveAt stays current across restarts.
@@ -816,6 +952,7 @@ function createFederatedFrontend(config) {
         setCookie(res, cfg.sessionCookieName, sessionJwt, {
             maxAgeSeconds: cfg.sessionTtlSeconds,
             secure: cfg.cookieSecure,
+            sameSite: cfg.sessionCookieSameSite,
         });
         if (cfg.sessionStore) {
             try {
@@ -833,29 +970,39 @@ function createFederatedFrontend(config) {
     async function handleReverify(req, res) {
         const session = await readSession(req);
         const q = queryOf(req);
-        const back = q.get("redirect_url") || "/";
+        const back = safeRedirectTarget(q.get("redirect_url") || "/");
         if (!session)
             return redirect(res, back);
-        // Step-up in embedded mode: refresh the verified-at stamp and return. (A full IdP
-        // re-prompt would route back through /sign_in/sso with prompt=login.)
-        session.lastVerifiedAt = Math.floor(Date.now() / 1000);
-        const sessionJwt = await signSession(session);
-        setCookie(res, cfg.sessionCookieName, sessionJwt, {
-            maxAgeSeconds: cfg.sessionTtlSeconds,
-            secure: cfg.cookieSecure,
-        });
-        if (cfg.sessionStore) {
-            try {
-                await cfg.sessionStore.touch(session.email, session.sid, {
-                    lastVerifiedAt: session.lastVerifiedAt,
-                    lastActiveAt: session.lastVerifiedAt,
-                });
-            }
-            catch (err) {
-                cfg.log("warn", "session store touch failed on reverify", err);
-            }
+        // REAL step-up: route through the IdP with a forced fresh authentication. lastVerifiedAt is
+        // stamped ONLY after the IdP returns a fresh assertion (see the reverify branch in
+        // handleCallback / handleSamlAcs), never by this endpoint alone. This closes the no-op-stamp
+        // gap where a live (or stolen-but-valid) session could "reverify" with no proof of presence.
+        if (cfg.saml) {
+            // SAML step-up uses ForceAuthn; build a one-off client with forceAuthn set.
+            const stepUpClient = (0, saml_js_1.buildSamlClient)({ ...cfg.saml, forceAuthn: true });
+            const relayState = base64url((0, node_crypto_1.randomBytes)(24));
+            const url = await (0, saml_js_1.samlLoginRedirectUrl)(stepUpClient, relayState);
+            const relayJwt = await signSamlRelay({
+                relayState,
+                redirectUrl: back,
+                redirectUrlComplete: back,
+                reverify: true,
+            });
+            setCookie(res, cfg.samlRelayCookieName, relayJwt, {
+                maxAgeSeconds: STATE_TTL_SECONDS,
+                secure: true,
+                sameSite: "None",
+            });
+            return redirect(res, url);
         }
-        redirect(res, back);
+        // OIDC step-up: bounce through /sign_in/sso with reverify=1 (prompt=login + max_age=0).
+        if (!guardGoogleConfigured(res)) {
+            const start = new URL("http://internal/sign_in/sso");
+            start.searchParams.set("reverify", "1");
+            start.searchParams.set("redirect_url_complete", back);
+            req.url = `${start.pathname}${start.search}`;
+            await handleSsoStart(req, res);
+        }
     }
     async function handleRemove(req, res) {
         // Revoke the durable record (tombstone) so the session can't be reused, then clear the cookie.
@@ -922,14 +1069,14 @@ function createFederatedFrontend(config) {
             .setProtectedHeader({ alg: "HS256" })
             .setIssuedAt()
             .setExpirationTime(`${STATE_TTL_SECONDS}s`)
-            .sign(secretKey);
+            .sign(relayKey);
     }
     async function readSamlRelay(req) {
         const raw = parseCookies(req)[cfg.samlRelayCookieName];
         if (!raw)
             return null;
         try {
-            const { payload } = await (0, jose_1.jwtVerify)(raw, secretKey);
+            const { payload } = await (0, jose_1.jwtVerify)(raw, relayKey, { algorithms: ["HS256"] });
             return payload;
         }
         catch {
@@ -955,12 +1102,18 @@ function createFederatedFrontend(config) {
         const redirectUrl = q.get("redirect_url") || "/sso-callback";
         const redirectUrlComplete = q.get("redirect_url_complete") || "/";
         const relayState = base64url((0, node_crypto_1.randomBytes)(24));
+        const url = await (0, saml_js_1.samlLoginRedirectUrl)(saml, relayState);
+        // node-saml caches the AuthnRequest ID it generated (its default cacheProvider) and enforces
+        // InResponseTo at the ACS via validateInResponseTo: ifPresent, binding the Response to the
+        // request in-process. We additionally carry our signed RelayState cookie as defense-in-depth.
         const relayJwt = await signSamlRelay({ relayState, redirectUrl, redirectUrlComplete });
+        // The ACS is a cross-site top-level POST from the IdP, so the relay cookie MUST be
+        // SameSite=None to be sent — which requires Secure. Lax/Strict would drop it and break SAML.
         setCookie(res, cfg.samlRelayCookieName, relayJwt, {
             maxAgeSeconds: STATE_TTL_SECONDS,
-            secure: cfg.cookieSecure,
+            secure: true,
+            sameSite: "None",
         });
-        const url = await (0, saml_js_1.samlLoginRedirectUrl)(saml, relayState);
         redirect(res, url);
     }
     /** ACS: validate the signed SAML Response, enforce domain, establish the shared session. */
@@ -969,7 +1122,7 @@ function createFederatedFrontend(config) {
         if (!saml)
             return sendJson(res, 404, { error: "saml_not_configured" });
         const saved = await readSamlRelay(req);
-        clearCookie(res, cfg.samlRelayCookieName, cfg.cookieSecure);
+        clearCookie(res, cfg.samlRelayCookieName, true, "None");
         const fallbackRedirect = saved?.redirectUrl ?? "/sso-callback";
         const redirectUrlComplete = saved?.redirectUrlComplete ?? "/";
         const body = await readFormBody(req);
@@ -984,10 +1137,9 @@ function createFederatedFrontend(config) {
         }
         let identity;
         try {
-            const result = await (0, saml_js_1.validateSamlAcs)(saml, {
-                SAMLResponse: body.SAMLResponse,
-                RelayState: body.RelayState,
-            });
+            // node-saml enforces audience + InResponseTo (ifPresent) + signature internally; we add an
+            // assertion-id replay cache (one-time use) and the emailVerified/audience defense-in-depth.
+            const result = await (0, saml_js_1.validateSamlAcs)(saml, { SAMLResponse: body.SAMLResponse, RelayState: body.RelayState }, cfg.saml, cfg.samlReplayStore);
             identity = result.identity;
         }
         catch (err) {
@@ -998,12 +1150,59 @@ function createFederatedFrontend(config) {
                 redirect_url_complete: redirectUrlComplete,
             });
         }
+        // SAML step-up reverify: fresh ForceAuthn assertion proved presence — re-stamp the existing
+        // session's lastVerifiedAt only, do not re-establish.
+        if (saved.reverify) {
+            const session = await readSession(req);
+            if (session?.sid) {
+                session.lastVerifiedAt = Math.floor(Date.now() / 1000);
+                const sessionJwt = await signSession(session);
+                setCookie(res, cfg.sessionCookieName, sessionJwt, {
+                    maxAgeSeconds: cfg.sessionTtlSeconds,
+                    secure: cfg.cookieSecure,
+                    sameSite: cfg.sessionCookieSameSite,
+                });
+                if (cfg.sessionStore) {
+                    try {
+                        await cfg.sessionStore.touch(session.email, session.sid, {
+                            lastVerifiedAt: session.lastVerifiedAt,
+                            lastActiveAt: session.lastVerifiedAt,
+                        });
+                    }
+                    catch (err) {
+                        cfg.log("warn", "session store touch failed on SAML reverify", err);
+                    }
+                }
+            }
+            return backToApp(res, redirectUrlComplete, {});
+        }
         return finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete);
     }
     // --- router --------------------------------------------------------------------------------
     return (req, res, next) => {
         const path = pathOf(req);
         const method = (req.method ?? "GET").toUpperCase();
+        // Security headers + CORS on every auth-endpoint response (defense-in-depth).
+        if (cfg.securityHeaders)
+            setSecurityHeaders(res);
+        if (cfg.allowedCorsOrigins.length > 0) {
+            const origin = (() => {
+                const o = req.headers?.origin;
+                return Array.isArray(o) ? o[0] : o;
+            })();
+            if (origin && cfg.allowedCorsOrigins.includes(origin)) {
+                res.setHeader("Access-Control-Allow-Origin", origin);
+                res.setHeader("Access-Control-Allow-Credentials", "true");
+                res.setHeader("Vary", "Origin");
+                res.setHeader("Access-Control-Allow-Headers", "Authorization, Content-Type");
+                res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+            }
+            if (method === "OPTIONS") {
+                res.statusCode = 204;
+                res.end();
+                return;
+            }
+        }
         const route = async () => {
             if (method === "GET" && path === "/sign_in/sso") {
                 // Unified sign-in entry point: strategy=saml routes to the SAML SP path (when

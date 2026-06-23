@@ -1,5 +1,21 @@
 import type { CreateFederatedClientOptions, MachineClaims, TokenClaims } from "./types.js";
 /**
+ * Verify an inbound webhook / SCIM event signature (HMAC-SHA256 over `${timestamp}.${rawBody}`).
+ * Provisioning events (`user.created` / `user.deleted`, group/membership changes) drive RBAC, so
+ * they must be authenticated before the host app trusts them.
+ *
+ * `rawBody` MUST be the exact bytes received (capture them with an express.json `verify` hook) — a
+ * re-serialized JSON object will not match the producer's signed bytes.
+ *
+ * The signature header is compared in constant time; a timestamp outside `toleranceSeconds`
+ * (default 300s) is rejected to bound replay.
+ */
+export declare function verifyWebhook(rawBody: string | Buffer, headers: Record<string, string | string[] | undefined>, secret: string, opts?: {
+    toleranceSeconds?: number;
+    signatureHeader?: string;
+    timestampHeader?: string;
+}): boolean;
+/**
  * Paginated list envelope `PaginatedResourceResponse<T>`. The generic
  * `T` is the *array* type — list methods are typed `PaginatedResourceResponse<User[]>` — and the
  * count field is camelCase `totalCount`.
