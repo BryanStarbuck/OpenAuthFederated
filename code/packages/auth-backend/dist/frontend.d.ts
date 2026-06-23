@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { SessionMembership, SessionStore } from "./session-store.js";
 import { type SamlSpConfig } from "./saml.js";
 /** The verified upstream identity returned by Google's OIDC id_token. */
 export interface OidcIdentity {
@@ -13,16 +14,11 @@ export interface OidcIdentity {
     familyName?: string;
     picture?: string;
 }
-export interface OrgMembership {
-    id: string;
-    organization: {
-        id: string;
-        name: string;
-        slug?: string;
-    };
-    role: string;
-    permissions: string[];
-}
+/**
+ * One organization membership. Aliased to {@link SessionMembership} (same shape) so the session
+ * store and the session model share a single type and can never drift apart.
+ */
+export type OrgMembership = SessionMembership;
 /** RBAC + organization context resolved for a verified identity. */
 export interface ResolvedGrants {
     roles: string[];
@@ -94,9 +90,42 @@ export interface FederatedFrontendConfig {
     sessionSecret: string;
     /** `iss` stamped on minted access tokens (informational in embedded mode). */
     issuer?: string;
+    /**
+     * Namespace for ALL cookies this middleware sets — the session cookie, the OAuth `state`
+     * cookie, and the SAML relay cookie. Defaults to `"oaf"`, giving the historical names
+     * `oaf_session` / `oaf_oauth_state` / `oaf_saml_relay`.
+     *
+     * Browsers do NOT isolate cookies by port, so two apps served from different ports on the
+     * same host (e.g. two localhost dev servers) share one cookie jar. If both use the default
+     * prefix, each app's `oaf_session` overwrites the other's and switching tabs logs you out of
+     * the first. Give each app a DISTINCT prefix (e.g. `"oaf_app1"`, `"oaf_app2"`) so their
+     * cookies coexist. `sessionCookieName`, if set, still wins for the session cookie specifically.
+     */
+    cookiePrefix?: string;
     sessionCookieName?: string;
+    /**
+     * Session **maximum lifetime** in seconds — Clerk's "Maximum lifetime" knob. The absolute ceiling
+     * after which the user must sign in again, regardless of activity. Defaults to ~4 months. The
+     * session is a sliding window (re-issued on each token mint), so active use rolls the cookie
+     * forward up to this ceiling. (Name kept as `sessionTtlSeconds` for back-compat.)
+     */
     sessionTtlSeconds?: number;
     accessTokenTtlSeconds?: number;
+    /**
+     * Session **inactivity timeout** in seconds — Clerk's "Inactivity timeout" knob. If a session
+     * goes this long without a token refresh / touch, it is treated as signed out. `0` (the default)
+     * disables it: combined with the long maximum lifetime, a user stays signed in "forever" as long
+     * as they return within the maximum lifetime. Only enforced when a {@link sessionStore} is set
+     * (the store is where `lastActiveAt` is durably tracked).
+     */
+    inactivityTimeoutSeconds?: number;
+    /**
+     * Durable server-side session store (the stateful half of the Clerk model). When provided, each
+     * sign-in writes a {@link StoredSession}; reads validate it (revocation, max-lifetime, inactivity)
+     * and the record survives app restarts. When omitted, the library is purely stateless (the signed
+     * cookie is the whole session) — backward compatible. See `session-store.ts` / {@link FileSessionStore}.
+     */
+    sessionStore?: SessionStore;
     /** Set true behind HTTPS so cookies carry the Secure attribute. */
     cookieSecure?: boolean;
     /** Map a verified identity to roles/permissions/orgs. Defaults to an internal-employee grant. */

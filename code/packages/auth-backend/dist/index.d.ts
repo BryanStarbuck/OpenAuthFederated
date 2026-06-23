@@ -12,6 +12,8 @@ export { federatedMiddleware, requireAuth, getAuth } from "./express.js";
 export type { FederatedMiddlewareOptions, ExpressLikeRequest, ExpressLikeResponse, } from "./express.js";
 export { createFederatedFrontend, createAuthFrontend } from "./frontend.js";
 export type { FederatedFrontendConfig, FederatedConnectionConfig, GoogleConnectionConfig, SamlConnectionConfig, LegacyGoogleConfig, AuthFrontendConfig, OidcIdentity, OrgMembership, ResolvedGrants, } from "./frontend.js";
+export { FileSessionStore, InMemorySessionStore, loadOrCreateSecret, } from "./session-store.js";
+export type { SessionStore, StoredSession, SessionMembership } from "./session-store.js";
 export { buildSamlClient, samlLoginRedirectUrl, samlSpMetadata, validateSamlAcs, } from "./saml.js";
 export type { SamlSpConfig, SamlAcsResult } from "./saml.js";
 export { loadGoogleCredentials, assertGoogleCredentials, credentialsRemediation, OAuthCredentialsError, } from "./credentials.js";

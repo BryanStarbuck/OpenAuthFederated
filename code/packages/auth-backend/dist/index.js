@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.authClient = exports.federatedClient = exports.createAuthClient = exports.OAuthCredentialsError = exports.credentialsRemediation = exports.assertGoogleCredentials = exports.loadGoogleCredentials = exports.validateSamlAcs = exports.samlSpMetadata = exports.samlLoginRedirectUrl = exports.buildSamlClient = exports.createAuthFrontend = exports.createFederatedFrontend = exports.getAuth = exports.requireAuth = exports.federatedMiddleware = exports.AuthError = exports.bearerToken = exports.authenticateRequest = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.FederatedClient = exports.AuthClient = void 0;
+exports.authClient = exports.federatedClient = exports.createAuthClient = exports.OAuthCredentialsError = exports.credentialsRemediation = exports.assertGoogleCredentials = exports.loadGoogleCredentials = exports.validateSamlAcs = exports.samlSpMetadata = exports.samlLoginRedirectUrl = exports.buildSamlClient = exports.loadOrCreateSecret = exports.InMemorySessionStore = exports.FileSessionStore = exports.createAuthFrontend = exports.createFederatedFrontend = exports.getAuth = exports.requireAuth = exports.federatedMiddleware = exports.AuthError = exports.bearerToken = exports.authenticateRequest = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.FederatedClient = exports.AuthClient = void 0;
 exports.createFederatedClient = createFederatedClient;
 const client_js_1 = require("./client.js");
 // The backend client. `FederatedClient` is the primary name; `AuthClient` is kept as an alias so
@@ -35,6 +35,13 @@ Object.defineProperty(exports, "getAuth", { enumerable: true, get: function () {
 var frontend_js_1 = require("./frontend.js");
 Object.defineProperty(exports, "createFederatedFrontend", { enumerable: true, get: function () { return frontend_js_1.createFederatedFrontend; } });
 Object.defineProperty(exports, "createAuthFrontend", { enumerable: true, get: function () { return frontend_js_1.createAuthFrontend; } });
+// Persistent, server-side session store (the stateful half of the Clerk-style session model).
+// Pass a store to createFederatedFrontend({ sessionStore }) to make sessions survive app restarts
+// and support revocation / listing / inactivity timeout.
+var session_store_js_1 = require("./session-store.js");
+Object.defineProperty(exports, "FileSessionStore", { enumerable: true, get: function () { return session_store_js_1.FileSessionStore; } });
+Object.defineProperty(exports, "InMemorySessionStore", { enumerable: true, get: function () { return session_store_js_1.InMemorySessionStore; } });
+Object.defineProperty(exports, "loadOrCreateSecret", { enumerable: true, get: function () { return session_store_js_1.loadOrCreateSecret; } });
 var saml_js_1 = require("./saml.js");
 Object.defineProperty(exports, "buildSamlClient", { enumerable: true, get: function () { return saml_js_1.buildSamlClient; } });
 Object.defineProperty(exports, "samlLoginRedirectUrl", { enumerable: true, get: function () { return saml_js_1.samlLoginRedirectUrl; } });

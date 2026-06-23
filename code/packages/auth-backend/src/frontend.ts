@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http"
 import { createRemoteJWKSet, jwtVerify, SignJWT } from "jose"
 
 import { credentialsRemediation, loadGoogleCredentials } from "./credentials.js"
+import type { SessionMembership, SessionStore, StoredSession } from "./session-store.js"
 import {
   buildSamlClient,
   samlLoginRedirectUrl,
@@ -69,12 +70,11 @@ export interface OidcIdentity {
   picture?: string
 }
 
-export interface OrgMembership {
-  id: string
-  organization: { id: string; name: string; slug?: string }
-  role: string
-  permissions: string[]
-}
+/**
+ * One organization membership. Aliased to {@link SessionMembership} (same shape) so the session
+ * store and the session model share a single type and can never drift apart.
+ */
+export type OrgMembership = SessionMembership
 
 /** RBAC + organization context resolved for a verified identity. */
 export interface ResolvedGrants {
@@ -150,9 +150,42 @@ export interface FederatedFrontendConfig {
   sessionSecret: string
   /** `iss` stamped on minted access tokens (informational in embedded mode). */
   issuer?: string
+  /**
+   * Namespace for ALL cookies this middleware sets — the session cookie, the OAuth `state`
+   * cookie, and the SAML relay cookie. Defaults to `"oaf"`, giving the historical names
+   * `oaf_session` / `oaf_oauth_state` / `oaf_saml_relay`.
+   *
+   * Browsers do NOT isolate cookies by port, so two apps served from different ports on the
+   * same host (e.g. two localhost dev servers) share one cookie jar. If both use the default
+   * prefix, each app's `oaf_session` overwrites the other's and switching tabs logs you out of
+   * the first. Give each app a DISTINCT prefix (e.g. `"oaf_app1"`, `"oaf_app2"`) so their
+   * cookies coexist. `sessionCookieName`, if set, still wins for the session cookie specifically.
+   */
+  cookiePrefix?: string
   sessionCookieName?: string
+  /**
+   * Session **maximum lifetime** in seconds — Clerk's "Maximum lifetime" knob. The absolute ceiling
+   * after which the user must sign in again, regardless of activity. Defaults to ~4 months. The
+   * session is a sliding window (re-issued on each token mint), so active use rolls the cookie
+   * forward up to this ceiling. (Name kept as `sessionTtlSeconds` for back-compat.)
+   */
   sessionTtlSeconds?: number
   accessTokenTtlSeconds?: number
+  /**
+   * Session **inactivity timeout** in seconds — Clerk's "Inactivity timeout" knob. If a session
+   * goes this long without a token refresh / touch, it is treated as signed out. `0` (the default)
+   * disables it: combined with the long maximum lifetime, a user stays signed in "forever" as long
+   * as they return within the maximum lifetime. Only enforced when a {@link sessionStore} is set
+   * (the store is where `lastActiveAt` is durably tracked).
+   */
+  inactivityTimeoutSeconds?: number
+  /**
+   * Durable server-side session store (the stateful half of the Clerk model). When provided, each
+   * sign-in writes a {@link StoredSession}; reads validate it (revocation, max-lifetime, inactivity)
+   * and the record survives app restarts. When omitted, the library is purely stateless (the signed
+   * cookie is the whole session) — backward compatible. See `session-store.ts` / {@link FileSessionStore}.
+   */
+  sessionStore?: SessionStore
   /** Set true behind HTTPS so cookies carry the Secure attribute. */
   cookieSecure?: boolean
   /** Map a verified identity to roles/permissions/orgs. Defaults to an internal-employee grant. */
@@ -165,8 +198,6 @@ export interface FederatedFrontendConfig {
  */
 export type AuthFrontendConfig = FederatedFrontendConfig
 
-const STATE_COOKIE = "oaf_oauth_state"
-const SAML_RELAY_COOKIE = "oaf_saml_relay"
 const STATE_TTL_SECONDS = 600
 
 // --- small Node http helpers (no express dependency) ---------------------------------------
@@ -392,8 +423,14 @@ interface InternalConfig {
   allowedDomains: string[]
   sessionSecret: string
   sessionCookieName: string
+  /** `${cookiePrefix}_oauth_state` — the short-lived OAuth CSRF/PKCE state cookie. */
+  stateCookieName: string
+  /** `${cookiePrefix}_saml_relay` — the short-lived SAML RelayState/CSRF cookie. */
+  samlRelayCookieName: string
   sessionTtlSeconds: number
   accessTokenTtlSeconds: number
+  inactivityTimeoutSeconds: number
+  sessionStore?: SessionStore
   cookieSecure: boolean
   issuer?: string
   resolveGrants: (identity: OidcIdentity) => ResolvedGrants
@@ -469,9 +506,22 @@ function normalizeConfig(config: FederatedFrontendConfig): InternalConfig {
     allowedDomains: config.allowedDomains.map((d) => d.trim().toLowerCase()).filter(Boolean),
     sessionSecret: config.sessionSecret,
     issuer: config.issuer,
-    sessionCookieName: config.sessionCookieName ?? "oaf_session",
-    sessionTtlSeconds: config.sessionTtlSeconds ?? 8 * 60 * 60,
+    // All cookies share one prefix so two apps on the same host (cookies aren't port-scoped)
+    // can be isolated by giving each a distinct cookiePrefix. Default "oaf" keeps the historical
+    // names. An explicit sessionCookieName still overrides just the session cookie.
+    sessionCookieName: config.sessionCookieName ?? `${(config.cookiePrefix ?? "oaf").trim() || "oaf"}_session`,
+    stateCookieName: `${(config.cookiePrefix ?? "oaf").trim() || "oaf"}_oauth_state`,
+    samlRelayCookieName: `${(config.cookiePrefix ?? "oaf").trim() || "oaf"}_saml_relay`,
+    // ~4-month default maximum lifetime (Clerk's "Maximum lifetime", but long): a signed-in user
+    // stays signed in across months, not hours. The session is a sliding window (re-issued on every
+    // token mint), so active use rolls this forward; this is the idle/absolute ceiling. Consumers
+    // can shorten it via sessionTtlSeconds. NEVER default this to a short-term value.
+    sessionTtlSeconds: config.sessionTtlSeconds ?? 120 * 24 * 60 * 60,
     accessTokenTtlSeconds: config.accessTokenTtlSeconds ?? 60,
+    // Inactivity timeout OFF by default (Clerk's default) → "logged in forever" as long as the user
+    // returns within the maximum lifetime. Only enforced when a sessionStore tracks lastActiveAt.
+    inactivityTimeoutSeconds: config.inactivityTimeoutSeconds ?? 0,
+    sessionStore: config.sessionStore,
     cookieSecure: config.cookieSecure ?? false,
     resolveGrants: config.resolveGrants ?? defaultResolveGrants,
     log:
@@ -534,28 +584,88 @@ export function createFederatedFrontend(
       .sign(secretKey)
   }
 
+  /** Build the in-memory SessionRecord from a durable StoredSession. */
+  function recordFromStored(s: StoredSession): SessionRecord {
+    return {
+      sid: s.sid,
+      userId: s.userId,
+      email: s.email,
+      name: s.name,
+      firstName: s.firstName,
+      lastName: s.lastName,
+      hd: s.hd,
+      roles: s.roles ?? [],
+      permissions: s.permissions ?? [],
+      orgId: s.orgId ?? null,
+      memberships: Array.isArray(s.memberships) ? s.memberships : [],
+      lastVerifiedAt: s.lastVerifiedAt ?? Math.floor(Date.now() / 1000),
+    }
+  }
+
   async function readSession(req: IncomingMessage): Promise<SessionRecord | null> {
     const raw = parseCookies(req)[cfg.sessionCookieName]
     if (!raw) return null
+    let payload: Record<string, unknown>
     try {
-      const { payload } = await jwtVerify(raw, secretKey)
-      const m = (payload.memberships as OrgMembership[] | undefined) ?? []
-      return {
-        sid: (payload.sid as string) ?? "",
-        userId: (payload.sub as string) ?? "",
-        email: (payload.email as string) ?? "",
-        name: payload.name as string | undefined,
-        firstName: payload.first_name as string | undefined,
-        lastName: payload.last_name as string | undefined,
-        hd: payload.hd as string | undefined,
-        roles: Array.isArray(payload.roles) ? (payload.roles as string[]) : [],
-        permissions: Array.isArray(payload.permissions) ? (payload.permissions as string[]) : [],
-        orgId: (payload.org_id as string | null) ?? null,
-        memberships: Array.isArray(m) ? m : [],
-        lastVerifiedAt: (payload.lvc as number) ?? Math.floor(Date.now() / 1000),
-      }
+      ;({ payload } = (await jwtVerify(raw, secretKey)) as { payload: Record<string, unknown> })
     } catch {
       return null
+    }
+    const m = (payload.memberships as OrgMembership[] | undefined) ?? []
+    const cookieRec: SessionRecord = {
+      sid: (payload.sid as string) ?? "",
+      userId: (payload.sub as string) ?? "",
+      email: (payload.email as string) ?? "",
+      name: payload.name as string | undefined,
+      firstName: payload.first_name as string | undefined,
+      lastName: payload.last_name as string | undefined,
+      hd: payload.hd as string | undefined,
+      roles: Array.isArray(payload.roles) ? (payload.roles as string[]) : [],
+      permissions: Array.isArray(payload.permissions) ? (payload.permissions as string[]) : [],
+      orgId: (payload.org_id as string | null) ?? null,
+      memberships: Array.isArray(m) ? m : [],
+      lastVerifiedAt: (payload.lvc as number) ?? Math.floor(Date.now() / 1000),
+    }
+
+    // Stateless mode (no store): the signed cookie IS the whole session — return it as before.
+    if (!cfg.sessionStore || !cookieRec.sid) return cookieRec
+
+    // Stateful (Clerk-style) mode: the durable record is the source of truth. This is what makes
+    // sessions survive restarts and supports revocation + inactivity timeout.
+    const now = Math.floor(Date.now() / 1000)
+    try {
+      const stored = await cfg.sessionStore.get(cookieRec.email, cookieRec.sid)
+      if (stored) {
+        if (stored.revoked) return null // signed out / revoked everywhere
+        if (stored.expireAt && now > stored.expireAt) return null // past maximum lifetime
+        if (
+          cfg.inactivityTimeoutSeconds > 0 &&
+          stored.lastActiveAt &&
+          now - stored.lastActiveAt > cfg.inactivityTimeoutSeconds
+        ) {
+          return null // inactive too long
+        }
+        return recordFromStored(stored)
+      }
+      // Self-heal: a valid cookie with no record yet (first request after upgrading to the store,
+      // or after the store was cleared). Recreate the record from the cookie so the user is NOT
+      // logged out by the upgrade or a restart. Carry the cookie's own iat/exp so the maximum
+      // lifetime ceiling is preserved rather than extended.
+      const createdAt = typeof payload.iat === "number" ? (payload.iat as number) : now
+      const expireAt =
+        typeof payload.exp === "number" ? (payload.exp as number) : now + cfg.sessionTtlSeconds
+      await cfg.sessionStore.create({
+        ...cookieRec,
+        createdAt,
+        lastActiveAt: now,
+        expireAt,
+        revoked: false,
+      })
+      return cookieRec
+    } catch (err) {
+      // A transient filesystem error must not lock the user out: fall back to the signed cookie.
+      cfg.log("warn", "session store read failed; falling back to signed cookie", err)
+      return cookieRec
     }
   }
 
@@ -645,7 +755,7 @@ export function createFederatedFrontend(
     redirectUrlComplete: string
     domain?: string
   } | null> {
-    const raw = parseCookies(req)[STATE_COOKIE]
+    const raw = parseCookies(req)[cfg.stateCookieName]
     if (!raw) return null
     try {
       const { payload } = await jwtVerify(raw, secretKey)
@@ -718,7 +828,7 @@ export function createFederatedFrontend(
       redirectUrlComplete,
       domain: hostedDomain,
     })
-    setCookie(res, STATE_COOKIE, stateJwt, {
+    setCookie(res, cfg.stateCookieName, stateJwt, {
       maxAgeSeconds: STATE_TTL_SECONDS,
       secure: cfg.cookieSecure,
     })
@@ -760,7 +870,7 @@ export function createFederatedFrontend(
   async function handleCallback(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const q = queryOf(req)
     const saved = await readState(req)
-    clearCookie(res, STATE_COOKIE, cfg.cookieSecure)
+    clearCookie(res, cfg.stateCookieName, cfg.cookieSecure)
 
     const fallbackRedirect = saved?.redirectUrl ?? "/sso-callback"
     const redirectUrlComplete = saved?.redirectUrlComplete ?? "/"
@@ -910,6 +1020,22 @@ export function createFederatedFrontend(
       maxAgeSeconds: cfg.sessionTtlSeconds,
       secure: cfg.cookieSecure,
     })
+    // Persist the durable server-side record (Clerk's stateful half) so the session survives app
+    // restarts, can be listed, and can be revoked. Best-effort: a store failure must not block a
+    // successful sign-in (the signed cookie still works on its own).
+    if (cfg.sessionStore) {
+      try {
+        await cfg.sessionStore.create({
+          ...session,
+          createdAt: now,
+          lastActiveAt: now,
+          expireAt: now + cfg.sessionTtlSeconds,
+          revoked: false,
+        })
+      } catch (err) {
+        cfg.log("warn", "session store create failed at sign-in", err)
+      }
+    }
     cfg.log("info", `Sign-in established for ${identity.email}`)
 
     backToApp(res, fallbackRedirect, { redirect_url_complete: redirectUrlComplete })
@@ -943,6 +1069,17 @@ export function createFederatedFrontend(
       maxAgeSeconds: cfg.sessionTtlSeconds,
       secure: cfg.cookieSecure,
     })
+    // Record activity so the inactivity-timeout clock (when enabled) tracks real use, and so the
+    // durable record's lastActiveAt stays current across restarts.
+    if (cfg.sessionStore) {
+      try {
+        await cfg.sessionStore.touch(session.email, session.sid, {
+          lastActiveAt: Math.floor(Date.now() / 1000),
+        })
+      } catch (err) {
+        cfg.log("warn", "session store touch failed on token mint", err)
+      }
+    }
     sendJson(res, 200, { jwt, object: "token" })
   }
 
@@ -960,6 +1097,16 @@ export function createFederatedFrontend(
       maxAgeSeconds: cfg.sessionTtlSeconds,
       secure: cfg.cookieSecure,
     })
+    if (cfg.sessionStore) {
+      try {
+        await cfg.sessionStore.touch(session.email, session.sid, {
+          orgId: session.orgId,
+          lastActiveAt: Math.floor(Date.now() / 1000),
+        })
+      } catch (err) {
+        cfg.log("warn", "session store touch failed on org switch", err)
+      }
+    }
     sendJson(res, 200, { object: "session", id: session.sid, org_id: session.orgId })
   }
 
@@ -976,12 +1123,63 @@ export function createFederatedFrontend(
       maxAgeSeconds: cfg.sessionTtlSeconds,
       secure: cfg.cookieSecure,
     })
+    if (cfg.sessionStore) {
+      try {
+        await cfg.sessionStore.touch(session.email, session.sid, {
+          lastVerifiedAt: session.lastVerifiedAt,
+          lastActiveAt: session.lastVerifiedAt,
+        })
+      } catch (err) {
+        cfg.log("warn", "session store touch failed on reverify", err)
+      }
+    }
     redirect(res, back)
   }
 
-  async function handleRemove(_req: IncomingMessage, res: ServerResponse): Promise<void> {
+  async function handleRemove(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // Revoke the durable record (tombstone) so the session can't be reused, then clear the cookie.
+    if (cfg.sessionStore) {
+      try {
+        const session = await readSession(req)
+        if (session?.sid) await cfg.sessionStore.remove(session.email, session.sid)
+      } catch (err) {
+        cfg.log("warn", "session store remove failed at sign-out", err)
+      }
+    }
     clearCookie(res, cfg.sessionCookieName, cfg.cookieSecure)
     sendJson(res, 200, { object: "session", deleted: true })
+  }
+
+  /**
+   * GET /client/sessions/active — list the signed-in user's active (non-revoked, unexpired)
+   * sessions. Mirrors Clerk's session-listing surface so an app can build a "sign out other
+   * devices" view. Returns an empty list when signed out or when no store is configured.
+   */
+  async function handleListSessions(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const session = await readSession(req)
+    if (!session || !session.sid || !cfg.sessionStore) {
+      return sendJson(res, 200, { object: "list", data: [] })
+    }
+    try {
+      const now = Math.floor(Date.now() / 1000)
+      const all = await cfg.sessionStore.list(session.email)
+      const active = all.filter((s) => !s.revoked && (!s.expireAt || s.expireAt > now))
+      return sendJson(res, 200, {
+        object: "list",
+        data: active.map((s) => ({
+          id: s.sid,
+          status: "active",
+          user_id: s.userId,
+          created_at: s.createdAt * 1000,
+          last_active_at: s.lastActiveAt * 1000,
+          expire_at: s.expireAt * 1000,
+          is_current: s.sid === session.sid,
+        })),
+      })
+    } catch (err) {
+      cfg.log("warn", "session store list failed", err)
+      return sendJson(res, 200, { object: "list", data: [] })
+    }
   }
 
   // --- SAML 2.0 SP path ----------------------------------------------------------------------
@@ -1014,7 +1212,7 @@ export function createFederatedFrontend(
     redirectUrl: string
     redirectUrlComplete: string
   } | null> {
-    const raw = parseCookies(req)[SAML_RELAY_COOKIE]
+    const raw = parseCookies(req)[cfg.samlRelayCookieName]
     if (!raw) return null
     try {
       const { payload } = await jwtVerify(raw, secretKey)
@@ -1048,7 +1246,7 @@ export function createFederatedFrontend(
     const relayState = base64url(randomBytes(24))
 
     const relayJwt = await signSamlRelay({ relayState, redirectUrl, redirectUrlComplete })
-    setCookie(res, SAML_RELAY_COOKIE, relayJwt, {
+    setCookie(res, cfg.samlRelayCookieName, relayJwt, {
       maxAgeSeconds: STATE_TTL_SECONDS,
       secure: cfg.cookieSecure,
     })
@@ -1061,7 +1259,7 @@ export function createFederatedFrontend(
     const saml = getSamlClient()
     if (!saml) return sendJson(res, 404, { error: "saml_not_configured" })
     const saved = await readSamlRelay(req)
-    clearCookie(res, SAML_RELAY_COOKIE, cfg.cookieSecure)
+    clearCookie(res, cfg.samlRelayCookieName, cfg.cookieSecure)
     const fallbackRedirect = saved?.redirectUrl ?? "/sso-callback"
     const redirectUrlComplete = saved?.redirectUrlComplete ?? "/"
 
@@ -1129,6 +1327,11 @@ export function createFederatedFrontend(
       }
       if (method === "GET" && path === "/client") {
         await handleClient(req, res)
+        return true
+      }
+      // List the user's active sessions (Clerk-style). Declared before the :id pattern below.
+      if (method === "GET" && path === "/client/sessions/active") {
+        await handleListSessions(req, res)
         return true
       }
       // /client/sessions/:id/...

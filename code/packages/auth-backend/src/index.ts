@@ -73,6 +73,15 @@ export type {
   OrgMembership,
   ResolvedGrants,
 } from "./frontend.js"
+// Persistent, server-side session store (the stateful half of the Clerk-style session model).
+// Pass a store to createFederatedFrontend({ sessionStore }) to make sessions survive app restarts
+// and support revocation / listing / inactivity timeout.
+export {
+  FileSessionStore,
+  InMemorySessionStore,
+  loadOrCreateSecret,
+} from "./session-store.js"
+export type { SessionStore, StoredSession, SessionMembership } from "./session-store.js"
 export {
   buildSamlClient,
   samlLoginRedirectUrl,
