@@ -5,6 +5,7 @@ exports.createFederatedFrontend = createFederatedFrontend;
 const node_crypto_1 = require("node:crypto");
 const jose_1 = require("jose");
 const credentials_js_1 = require("./credentials.js");
+const verify_js_1 = require("./verify.js");
 const saml_js_1 = require("./saml.js");
 /**
  * In-process Frontend API — the embedded counterpart to a deployed OpenAuthFederated server.
@@ -279,9 +280,9 @@ function normalizeConnections(config) {
 }
 function normalizeConfig(config) {
     const { google: googleCfg, saml: samlCfg } = normalizeConnections(config);
-    // Resolve the Google OAuth credentials the library was given: explicit config → generic
-    // GOOGLE_CLIENT_ID/SECRET env. The library reads no app-specific file — the embedding app sources
-    // the value and passes it in. We capture a secret-free remediation message rather than throwing,
+    // Resolve the Google OAuth credentials the library was given (explicit config only — the library
+    // reads no environment variable and no app-specific file; the embedding app sources the value and
+    // passes it in). We capture a secret-free remediation message rather than throwing,
     // so a missing credential surfaces as a clear 503 at request time (and the SAML path, which needs
     // no Google credential, still works).
     const resolved = (0, credentials_js_1.loadGoogleCredentials)({
@@ -320,6 +321,7 @@ function normalizeConfig(config) {
         // Idle timeout ON by default (~12h): an idle/stolen session ages out instead of living for the
         // full maximum lifetime. Only enforced when a sessionStore tracks lastActiveAt; 0 disables it.
         inactivityTimeoutSeconds: config.inactivityTimeoutSeconds ?? 12 * 60 * 60,
+        sessionStoreMigrate: config.sessionStoreMigrate === true,
         sessionStore: config.sessionStore,
         // Secure by default — never ship a non-Secure session cookie to production.
         cookieSecure: config.cookieSecure ?? true,
@@ -357,13 +359,18 @@ function createFederatedFrontend(config) {
         cfg.sessionSecret.length < 32 ||
         PLACEHOLDER_SECRETS.has(cfg.sessionSecret)) {
         throw new Error("createFederatedFrontend: sessionSecret must be a strong, non-default value of at least 32 " +
-            "characters. Set AUTH_SESSION_SECRET (e.g. via loadOrCreateSecret) — no default is provided.");
+            "characters. Supply it via this API (e.g. from loadOrCreateSecret) — no default is provided.");
     }
+    // Configure embedded-mode verification from the SAME config used to mint below, so verifyToken()
+    // validates with this app's secret/issuer WITHOUT reading any environment variable. This is the
+    // single bridge between minting (here) and verification (verify.ts) — one source of truth, set by
+    // the API caller.
+    (0, verify_js_1.configureEmbeddedVerification)({ sessionSecret: cfg.sessionSecret, issuer: cfg.issuer });
     // Derive a distinct per-purpose subkey (HKDF-SHA256, distinct info labels) for each cookie-signing
     // context that stays INSIDE this module — the session cookie, the OAuth state cookie, and the SAML
     // relay cookie. A leak of the low-value state/relay flow then cannot forge a session. The access
     // token is the one credential consumed OUTSIDE this module (by verifyToken() in embedded mode,
-    // which keys off the raw AUTH_SESSION_SECRET), so it is signed with the master secret to stay
+    // which keys off the raw sessionSecret), so it is signed with the master secret to stay
     // verifiable — its short TTL and per-app audience bound it.
     const master = new TextEncoder().encode(cfg.sessionSecret);
     const subkey = (label) => new Uint8Array((0, node_crypto_1.hkdfSync)("sha256", master, new Uint8Array(0), `oaf:${label}`, 32));
@@ -471,9 +478,9 @@ function createFederatedFrontend(config) {
             }
             // No durable record for this sid. When a store is configured it is authoritative, so "no
             // record" means signed-out / revoked (a lost tombstone must NOT resurrect access). Fail
-            // closed. A one-time migration that re-creates records from valid cookies can be done with an
-            // explicit AUTH_SESSION_STORE_MIGRATE=true opt-in.
-            if (process.env.AUTH_SESSION_STORE_MIGRATE === "true") {
+            // closed. A one-time migration that re-creates records from valid cookies is enabled by the
+            // API caller via the `sessionStoreMigrate` config flag.
+            if (cfg.sessionStoreMigrate) {
                 const createdAt = typeof payload.iat === "number" ? payload.iat : now;
                 const expireAt = typeof payload.exp === "number" ? payload.exp : now + cfg.sessionTtlSeconds;
                 await cfg.sessionStore.create({
@@ -588,8 +595,8 @@ function createFederatedFrontend(config) {
         sendJson(res, 503, {
             error: "oauth_not_configured",
             error_message: "Google sign-in is not configured on the server. An administrator must supply the Google " +
-                "OAuth client id and secret (via GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET or the out-of-repo " +
-                "credentials file). See `remediation` for the exact path and JSON shape.",
+                "OAuth client id and secret to the embedding app, which passes them into " +
+                "createFederatedFrontend(). See `remediation` for details.",
             // `remediation` is deliberately secret-free — safe to surface to the operator.
             remediation: cfg.googleRemediation,
         });

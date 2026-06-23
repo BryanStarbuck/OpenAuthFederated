@@ -4,6 +4,7 @@ import type { IncomingMessage, ServerResponse } from "node:http"
 import { createRemoteJWKSet, jwtVerify, SignJWT } from "jose"
 
 import { credentialsRemediation, loadGoogleCredentials } from "./credentials.js"
+import { configureEmbeddedVerification } from "./verify.js"
 import type { SessionMembership, SessionStore, StoredSession } from "./session-store.js"
 import {
   buildSamlClient,
@@ -90,16 +91,14 @@ export interface ResolvedGrants {
 export interface GoogleConnectionConfig {
   strategy: "oauth_google"
   /**
-   * Google OAuth Web-client id. **Optional.** When omitted/empty, the library falls back to the
-   * generic `GOOGLE_CLIENT_ID` environment variable (see `credentials.ts`). The embedding app
-   * owns where the value is sourced from (its own secrets file/env) and passes it in here; the
-   * library never reads an app-specific credentials file. Never hardcode the value or commit it.
+   * Google OAuth Web-client id. **Optional** (sign-in fails closed with a 503 if absent). The
+   * embedding app owns where the value is sourced from (its own secrets file/config) and passes it
+   * in here; the library reads no environment variable and no app-specific file. Never hardcode or commit it.
    */
   clientId?: string
   /**
-   * Google OAuth Web-client secret. **Optional** — resolved the same way as {@link clientId}
-   * (explicit value here, then the generic `GOOGLE_CLIENT_SECRET` env var). Never hardcode the
-   * value or commit it.
+   * Google OAuth Web-client secret. **Optional** — supplied the same way as {@link clientId}
+   * (an explicit value here, sourced by the embedding app). Never hardcode the value or commit it.
    */
   clientSecret?: string
   /** Must exactly match an Authorized redirect URI in the Google Cloud OAuth client. */
@@ -148,7 +147,10 @@ export interface FederatedFrontendConfig {
   saml?: SamlSpConfig
   /** Email/`hd` domains permitted to complete sign-in. Anything else is rejected. */
   allowedDomains: string[]
-  /** HS256 secret used to sign the session cookie + access tokens. MUST match AUTH_SESSION_SECRET. */
+  /**
+   * HS256 secret used to sign the session cookie + access tokens. The SAME value is used to verify
+   * those tokens (this function calls configureEmbeddedVerification with it). Supplied by the caller.
+   */
   sessionSecret: string
   /** `iss` stamped on minted access tokens (informational in embedded mode). */
   issuer?: string
@@ -181,6 +183,12 @@ export interface FederatedFrontendConfig {
    * (the store is where `lastActiveAt` is durably tracked).
    */
   inactivityTimeoutSeconds?: number
+  /**
+   * One-time migration opt-in: when true, a valid session cookie whose durable record is missing
+   * re-creates that record from the cookie (instead of failing closed). Off by default. Supplied by
+   * the API caller — never read from the environment.
+   */
+  sessionStoreMigrate?: boolean
   /**
    * Durable server-side session store (the stateful half of the Clerk model). When provided, each
    * sign-in writes a {@link StoredSession}; reads validate it (revocation, max-lifetime, inactivity)
@@ -500,6 +508,7 @@ interface InternalConfig {
   sessionTtlSeconds: number
   accessTokenTtlSeconds: number
   inactivityTimeoutSeconds: number
+  sessionStoreMigrate: boolean
   sessionStore?: SessionStore
   cookieSecure: boolean
   sessionCookieSameSite: "Lax" | "Strict"
@@ -557,9 +566,9 @@ function normalizeConnections(config: FederatedFrontendConfig): {
 function normalizeConfig(config: FederatedFrontendConfig): InternalConfig {
   const { google: googleCfg, saml: samlCfg } = normalizeConnections(config)
 
-  // Resolve the Google OAuth credentials the library was given: explicit config → generic
-  // GOOGLE_CLIENT_ID/SECRET env. The library reads no app-specific file — the embedding app sources
-  // the value and passes it in. We capture a secret-free remediation message rather than throwing,
+  // Resolve the Google OAuth credentials the library was given (explicit config only — the library
+  // reads no environment variable and no app-specific file; the embedding app sources the value and
+  // passes it in). We capture a secret-free remediation message rather than throwing,
   // so a missing credential surfaces as a clear 503 at request time (and the SAML path, which needs
   // no Google credential, still works).
   const resolved = loadGoogleCredentials({
@@ -599,6 +608,7 @@ function normalizeConfig(config: FederatedFrontendConfig): InternalConfig {
     // Idle timeout ON by default (~12h): an idle/stolen session ages out instead of living for the
     // full maximum lifetime. Only enforced when a sessionStore tracks lastActiveAt; 0 disables it.
     inactivityTimeoutSeconds: config.inactivityTimeoutSeconds ?? 12 * 60 * 60,
+    sessionStoreMigrate: config.sessionStoreMigrate === true,
     sessionStore: config.sessionStore,
     // Secure by default — never ship a non-Secure session cookie to production.
     cookieSecure: config.cookieSecure ?? true,
@@ -643,15 +653,21 @@ export function createFederatedFrontend(
   ) {
     throw new Error(
       "createFederatedFrontend: sessionSecret must be a strong, non-default value of at least 32 " +
-        "characters. Set AUTH_SESSION_SECRET (e.g. via loadOrCreateSecret) — no default is provided.",
+        "characters. Supply it via this API (e.g. from loadOrCreateSecret) — no default is provided.",
     )
   }
+
+  // Configure embedded-mode verification from the SAME config used to mint below, so verifyToken()
+  // validates with this app's secret/issuer WITHOUT reading any environment variable. This is the
+  // single bridge between minting (here) and verification (verify.ts) — one source of truth, set by
+  // the API caller.
+  configureEmbeddedVerification({ sessionSecret: cfg.sessionSecret, issuer: cfg.issuer })
 
   // Derive a distinct per-purpose subkey (HKDF-SHA256, distinct info labels) for each cookie-signing
   // context that stays INSIDE this module — the session cookie, the OAuth state cookie, and the SAML
   // relay cookie. A leak of the low-value state/relay flow then cannot forge a session. The access
   // token is the one credential consumed OUTSIDE this module (by verifyToken() in embedded mode,
-  // which keys off the raw AUTH_SESSION_SECRET), so it is signed with the master secret to stay
+  // which keys off the raw sessionSecret), so it is signed with the master secret to stay
   // verifiable — its short TTL and per-app audience bound it.
   const master = new TextEncoder().encode(cfg.sessionSecret)
   const subkey = (label: string): Uint8Array =>
@@ -763,9 +779,9 @@ export function createFederatedFrontend(
       }
       // No durable record for this sid. When a store is configured it is authoritative, so "no
       // record" means signed-out / revoked (a lost tombstone must NOT resurrect access). Fail
-      // closed. A one-time migration that re-creates records from valid cookies can be done with an
-      // explicit AUTH_SESSION_STORE_MIGRATE=true opt-in.
-      if (process.env.AUTH_SESSION_STORE_MIGRATE === "true") {
+      // closed. A one-time migration that re-creates records from valid cookies is enabled by the
+      // API caller via the `sessionStoreMigrate` config flag.
+      if (cfg.sessionStoreMigrate) {
         const createdAt = typeof payload.iat === "number" ? (payload.iat as number) : now
         const expireAt =
           typeof payload.exp === "number" ? (payload.exp as number) : now + cfg.sessionTtlSeconds
@@ -916,8 +932,8 @@ export function createFederatedFrontend(
       error: "oauth_not_configured",
       error_message:
         "Google sign-in is not configured on the server. An administrator must supply the Google " +
-        "OAuth client id and secret (via GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET or the out-of-repo " +
-        "credentials file). See `remediation` for the exact path and JSON shape.",
+        "OAuth client id and secret to the embedding app, which passes them into " +
+        "createFederatedFrontend(). See `remediation` for details.",
       // `remediation` is deliberately secret-free — safe to surface to the operator.
       remediation: cfg.googleRemediation,
     })

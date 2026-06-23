@@ -3,7 +3,7 @@ import type { CreateFederatedClientOptions } from "./types.js";
 export { AuthClient, AuthClient as FederatedClient, verifyWebhook } from "./client.js";
 export type { User, Session, Organization, OrganizationMembership, Invitation, JwtTemplate, PaginatedResourceResponse, AuthUser, AuthSession, AuthOrganization, AuthMembership, AuthInvitation, AuthJwtTemplate, ListResponse, } from "./client.js";
 export type { TokenClaims, MachineClaims, PermissionCheck, CreateFederatedClientOptions, CreateAuthClientOptions, } from "./types.js";
-export { verifyToken, verifyMachineToken, hasScope } from "./verify.js";
+export { verifyToken, verifyMachineToken, hasScope, configureEmbeddedVerification, } from "./verify.js";
 export type { VerifyTokenOptions } from "./verify.js";
 export { requirePermission, requireRole, hasPermission, hasRole, checkClaims, } from "./permissions.js";
 export { authMiddleware, createRouteMatcher, getRequestAuth, authenticateRequest, bearerToken, AuthError, } from "./middleware.js";
@@ -19,8 +19,8 @@ export type { SamlSpConfig, SamlAcsResult, SamlReplayStore } from "./saml.js";
 export { loadGoogleCredentials, assertGoogleCredentials, credentialsRemediation, OAuthCredentialsError, } from "./credentials.js";
 export type { GoogleCredentials, CredentialResolution, CredentialSource, LoadGoogleCredentialsOptions, } from "./credentials.js";
 /**
- * Construct a configured backend client via `createFederatedClient(options)`. Reads
- * AUTH_SECRET_KEY / AUTH_BACKEND_API / AUTH_JWT_ISSUER when the matching option is omitted.
+ * Construct a configured backend client via `createFederatedClient(options)`. All config (secretKey,
+ * apiUrl, issuer) is supplied through `options` — the library reads no environment variables.
  */
 export declare function createFederatedClient(options?: CreateFederatedClientOptions): AuthClient;
 /**

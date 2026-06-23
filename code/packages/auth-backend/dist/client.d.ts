@@ -251,7 +251,7 @@ export declare class AuthClient {
     private readonly audience?;
     private readonly authorizedParties?;
     constructor(opts?: CreateFederatedClientOptions);
-    /** Networkless JWT verification (JWKS in production, HS256 `AUTH_SESSION_SECRET` when embedded). */
+    /** Networkless JWT verification (JWKS in production, HS256 `sessionSecret` when embedded). */
     verifyToken(token: string): Promise<TokenClaims>;
     /** Verify a token and assert a `<feature>:<action>` permission; throws `Forbidden`. */
     requirePermission(token: string, permission: string): Promise<TokenClaims>;

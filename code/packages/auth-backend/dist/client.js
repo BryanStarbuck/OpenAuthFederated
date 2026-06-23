@@ -278,8 +278,9 @@ class AuthClient {
     audience;
     authorizedParties;
     constructor(opts = {}) {
-        this.secretKey = opts.secretKey ?? process.env.AUTH_SECRET_KEY ?? "";
-        this.apiUrl = opts.apiUrl ?? process.env.AUTH_BACKEND_API ?? "https://api.localhost/v1";
+        // Config comes from the API caller only — the library reads no environment variables.
+        this.secretKey = opts.secretKey ?? "";
+        this.apiUrl = opts.apiUrl ?? "https://api.localhost/v1";
         // The secret key is sent as a Bearer to apiUrl, so the transport must be TLS. Reject a
         // plaintext apiUrl up front rather than leaking the credential over http. (Loopback http is
         // allowed for local development only.)
@@ -295,12 +296,12 @@ class AuthClient {
                 throw err;
             throw new Error("@auth/backend: apiUrl is not a valid URL");
         }
-        this.issuer = opts.issuer ?? process.env.AUTH_JWT_ISSUER;
+        this.issuer = opts.issuer;
         this.jwtKey = opts.jwtKey;
         this.audience = opts.audience;
         this.authorizedParties = opts.authorizedParties;
     }
-    /** Networkless JWT verification (JWKS in production, HS256 `AUTH_SESSION_SECRET` when embedded). */
+    /** Networkless JWT verification (JWKS in production, HS256 `sessionSecret` when embedded). */
     verifyToken(token) {
         return (0, verify_js_1.verifyToken)(token, {
             issuer: this.issuer,

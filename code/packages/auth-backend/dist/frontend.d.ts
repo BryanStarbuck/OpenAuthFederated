@@ -30,16 +30,14 @@ export interface ResolvedGrants {
 export interface GoogleConnectionConfig {
     strategy: "oauth_google";
     /**
-     * Google OAuth Web-client id. **Optional.** When omitted/empty, the library falls back to the
-     * generic `GOOGLE_CLIENT_ID` environment variable (see `credentials.ts`). The embedding app
-     * owns where the value is sourced from (its own secrets file/env) and passes it in here; the
-     * library never reads an app-specific credentials file. Never hardcode the value or commit it.
+     * Google OAuth Web-client id. **Optional** (sign-in fails closed with a 503 if absent). The
+     * embedding app owns where the value is sourced from (its own secrets file/config) and passes it
+     * in here; the library reads no environment variable and no app-specific file. Never hardcode or commit it.
      */
     clientId?: string;
     /**
-     * Google OAuth Web-client secret. **Optional** — resolved the same way as {@link clientId}
-     * (explicit value here, then the generic `GOOGLE_CLIENT_SECRET` env var). Never hardcode the
-     * value or commit it.
+     * Google OAuth Web-client secret. **Optional** — supplied the same way as {@link clientId}
+     * (an explicit value here, sourced by the embedding app). Never hardcode the value or commit it.
      */
     clientSecret?: string;
     /** Must exactly match an Authorized redirect URI in the Google Cloud OAuth client. */
@@ -86,7 +84,10 @@ export interface FederatedFrontendConfig {
     saml?: SamlSpConfig;
     /** Email/`hd` domains permitted to complete sign-in. Anything else is rejected. */
     allowedDomains: string[];
-    /** HS256 secret used to sign the session cookie + access tokens. MUST match AUTH_SESSION_SECRET. */
+    /**
+     * HS256 secret used to sign the session cookie + access tokens. The SAME value is used to verify
+     * those tokens (this function calls configureEmbeddedVerification with it). Supplied by the caller.
+     */
     sessionSecret: string;
     /** `iss` stamped on minted access tokens (informational in embedded mode). */
     issuer?: string;
@@ -119,6 +120,12 @@ export interface FederatedFrontendConfig {
      * (the store is where `lastActiveAt` is durably tracked).
      */
     inactivityTimeoutSeconds?: number;
+    /**
+     * One-time migration opt-in: when true, a valid session cookie whose durable record is missing
+     * re-creates that record from the cookie (instead of failing closed). Off by default. Supplied by
+     * the API caller — never read from the environment.
+     */
+    sessionStoreMigrate?: boolean;
     /**
      * Durable server-side session store (the stateful half of the Clerk model). When provided, each
      * sign-in writes a {@link StoredSession}; reads validate it (revocation, max-lifetime, inactivity)

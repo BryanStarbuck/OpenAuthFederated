@@ -51,17 +51,17 @@ export interface PermissionCheck {
  * are accepted for source-compatibility and used where they apply (e.g. token verification).
  */
 export interface CreateFederatedClientOptions {
-  /** Defaults to process.env.AUTH_SECRET_KEY. (Federated: `secretKey`, required there.) */
+  /** Backend API secret key (required for authorized REST calls). Supplied here — no env fallback. */
   secretKey?: string
   /** Browser-safe publishable key. Accepted for Federated parity; unused server-side in embedded mode. */
   publishableKey?: string
   /** JWKS public key for networkless RS256 verification. Maps to verifyToken's `jwtKey`. */
   jwtKey?: string
-  /** Backend API base, e.g. https://api.<domain>/v1. Defaults to AUTH_BACKEND_API. (Federated: `apiUrl`.) */
+  /** Backend API base, e.g. https://api.<domain>/v1. Supplied here — no env fallback. (Federated: `apiUrl`.) */
   apiUrl?: string
   /** Backend API version segment. Accepted for Federated parity. */
   apiVersion?: string
-  /** Expected token issuer for JWKS verification. Defaults to AUTH_JWT_ISSUER. */
+  /** Expected token issuer for JWKS verification. Supplied here — no env fallback. */
   issuer?: string
   /** Expected token audience. Accepted for Federated parity; forwarded to verifyToken. */
   audience?: string | string[]

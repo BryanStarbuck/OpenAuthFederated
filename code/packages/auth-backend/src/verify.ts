@@ -13,19 +13,48 @@ import type { MachineClaims, TokenClaims } from "./types.js"
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>()
 
 /**
+ * Embedded-mode verification config — supplied by the HOST application through the library's API
+ * (see {@link configureEmbeddedVerification}, called by `createFederatedFrontend()`), NEVER read
+ * from `process.env`. OpenAuthFederated is an embedded library: the apps that consume it own their
+ * own configuration and pass it in. Reaching into the host's environment would be a side channel
+ * the host cannot control, so the library does not do it.
+ */
+interface EmbeddedVerificationConfig {
+  /** The shared HS256 secret used to verify access tokens minted in-process. */
+  sessionSecret: string
+  /** Expected token issuer (`iss`), enforced when set. */
+  issuer?: string
+  /** Optional JWKS host allowlist (SSRF guard) for the asymmetric path. */
+  jwksAllowedHosts?: string[]
+}
+
+let embeddedVerification: EmbeddedVerificationConfig | null = null
+
+/**
+ * Tell the verifier how to validate embedded-mode tokens. Called once, at bootstrap, by the host
+ * app's `createFederatedFrontend()` with the SAME `sessionSecret`/`issuer` it mints with — so token
+ * minting and token verification share one source of truth and the library reads no environment.
+ * Apps that only verify (no in-process minting) may call this directly.
+ */
+export function configureEmbeddedVerification(cfg: EmbeddedVerificationConfig): void {
+  embeddedVerification = { ...cfg }
+}
+
+/**
  * Embedded mode: OpenAuthFederated runs in-process as a library (no deployed server, no JWKS
- * endpoint). Access tokens are minted and verified with one shared HS256 secret
- * (`AUTH_SESSION_SECRET`) by `createAuthFrontend()` in the same process — after a REAL Google /
- * SAML sign-in. This is a production deployment shape, NOT a mock: there is no dev/default secret
- * (see {@link symmetricSecret}).
+ * endpoint). Access tokens are minted and verified with one shared HS256 secret — supplied via
+ * {@link configureEmbeddedVerification} (or a per-call {@link VerifyTokenOptions}) — by
+ * `createFederatedFrontend()` in the same process, after a REAL Google / SAML sign-in. This is a
+ * production deployment shape, NOT a mock: there is no dev/default secret (see {@link symmetricSecret}).
  *
  * OpenAuthFederated deliberately has **no dev mock / dev-auth mode of its own**. It never accepts a
  * weak, shared-secret "dev" token and never short-circuits real verification. If an app wants a
  * local no-IdP convenience mode, the app implements that on its own side and OpenAuthFederated is
  * not involved.
  */
-function isEmbedded(): boolean {
-  return process.env.AUTH_EMBEDDED === "true"
+function isEmbedded(opts: VerifyTokenOptions): boolean {
+  if (opts.embedded !== undefined) return opts.embedded
+  return embeddedVerification !== null
 }
 
 /**
@@ -34,7 +63,20 @@ function isEmbedded(): boolean {
  * networkless verification.
  */
 export interface VerifyTokenOptions {
-  /** Expected token issuer (`iss`). Defaults to AUTH_JWT_ISSUER. */
+  /**
+   * Force embedded (HS256, in-process) vs JWKS verification for this call. When omitted, embedded
+   * mode is inferred from whether {@link configureEmbeddedVerification} has been called. Never read
+   * from the environment.
+   */
+  embedded?: boolean
+  /**
+   * HS256 secret for embedded verification, supplied by the API caller. Overrides the value from
+   * {@link configureEmbeddedVerification}. Never read from the environment.
+   */
+  sessionSecret?: string
+  /** JWKS host allowlist (SSRF guard), supplied by the API caller. Never read from the environment. */
+  jwksAllowedHosts?: string[]
+  /** Expected token issuer (`iss`). Supplied by the API caller (or configureEmbeddedVerification). */
   issuer?: string
   /** Expected audience (`aud`). Accepted for Federated parity. */
   audience?: string | string[]
@@ -56,41 +98,40 @@ export interface VerifyTokenOptions {
 
 /**
  * Validate that an issuer string is safe to turn into an outbound JWKS fetch (SSRF guard): it must
- * be an absolute `https:` URL whose host is on the optional `AUTH_JWKS_ALLOWED_HOSTS` allowlist
- * (comma-separated). Without an allowlist we still require https + a real host, rejecting internal
- * IPs / metadata endpoints presented as bare hostnames. Returns the normalized origin host.
+ * be an absolute `https:` URL whose host is on the optional host allowlist supplied by the API
+ * caller (`jwksAllowedHosts`). Without an allowlist we still require https + a real host, rejecting
+ * internal IPs / metadata endpoints presented as bare hostnames.
  */
-function assertSafeIssuer(issuer: string): void {
+function assertSafeIssuer(issuer: string, allowedHosts: string[]): void {
   let url: URL
   try {
     url = new URL(issuer)
   } catch {
-    throw new Error("verifyToken: AUTH_JWT_ISSUER must be an absolute URL")
+    throw new Error("verifyToken: issuer must be an absolute URL")
   }
   if (url.protocol !== "https:") {
     throw new Error("verifyToken: issuer must use https")
   }
-  const allow = (process.env.AUTH_JWKS_ALLOWED_HOSTS ?? "")
-    .split(",")
-    .map((h) => h.trim().toLowerCase())
-    .filter(Boolean)
+  const allow = allowedHosts.map((h) => h.trim().toLowerCase()).filter(Boolean)
   if (allow.length > 0 && !allow.includes(url.hostname.toLowerCase())) {
-    throw new Error("verifyToken: issuer host is not on AUTH_JWKS_ALLOWED_HOSTS allowlist")
+    throw new Error("verifyToken: issuer host is not on the configured jwksAllowedHosts allowlist")
   }
 }
 
 /**
- * The shared HS256 secret for embedded-mode verification. Requires a strong, operator-supplied
- * `AUTH_SESSION_SECRET`. There is intentionally **no** dev/default secret: OpenAuthFederated will
- * not fall back to a well-known value (which would let anyone forge a session), so an unset or
+ * The shared HS256 secret for embedded-mode verification. Requires a strong secret supplied by the
+ * API caller (per-call `opts.sessionSecret` or {@link configureEmbeddedVerification}). There is
+ * intentionally **no** dev/default secret and the library reads no environment variable: OpenAuthFederated
+ * will not fall back to a well-known value (which would let anyone forge a session), so an unset or
  * placeholder secret fails closed.
  */
-function symmetricSecret(): Uint8Array {
-  const secret = process.env.AUTH_SESSION_SECRET ?? ""
+function symmetricSecret(opts: VerifyTokenOptions): Uint8Array {
+  const secret = opts.sessionSecret ?? embeddedVerification?.sessionSecret ?? ""
   if (!secret || secret === "dev-shared-secret") {
     throw new Error(
-      "verifyToken: embedded mode requires a strong AUTH_SESSION_SECRET. OpenAuthFederated " +
-        "provides no dev/default secret and never falls back to one.",
+      "verifyToken: embedded mode requires a strong sessionSecret configured via the API " +
+        "(configureEmbeddedVerification / createFederatedFrontend). OpenAuthFederated reads no " +
+        "environment variables and provides no dev/default secret.",
     )
   }
   return new TextEncoder().encode(secret)
@@ -102,11 +143,11 @@ function symmetricSecret(): Uint8Array {
  * - **Production:** validates the RS256 signature against the issuer's JWKS
  *   (`<issuer>/.well-known/jwks.json`) and checks `iss`/`exp`. No per-request round
  *   trip — the JWKS is cached.
- * - **Embedded mode** (`AUTH_EMBEDDED=true`): validates an HS256 token signed with
- *   `AUTH_SESSION_SECRET` — the secret the in-process `createAuthFrontend()` mints with after a
- *   real Google / SAML sign-in — so it works with no separate server and no JWKS endpoint.
+ * - **Embedded mode** (configured via {@link configureEmbeddedVerification}): validates an HS256
+ *   token signed with the `sessionSecret` the in-process `createFederatedFrontend()` mints with
+ *   after a real Google / SAML sign-in — so it works with no separate server and no JWKS endpoint.
  *
- * There is **no dev mock / `AUTH_DEV_MODE`**: OpenAuthFederated never accepts a token signed with a
+ * There is **no dev mock**: OpenAuthFederated never accepts a token signed with a
  * shared "dev" secret and never bypasses real verification. A no-IdP local convenience mode, if an
  * app wants one, is the app's own responsibility — never this library's.
  */
@@ -116,26 +157,26 @@ export async function verifyToken(
 ): Promise<TokenClaims> {
   if (!token) throw new Error("verifyToken: empty token")
 
-  if (isEmbedded()) {
+  if (isEmbedded(opts)) {
     // Pin HS256 for the embedded symmetric path (no algorithm agility), and enforce the issuer
     // when one is configured so a token from a different deployment is not accepted on a shared
     // secret. Audience is enforced when the caller supplies one.
-    const issuer = opts.issuer ?? process.env.AUTH_JWT_ISSUER
+    const issuer = opts.issuer ?? embeddedVerification?.issuer
     const verifyOpts: Parameters<typeof jwtVerify>[2] = {
       algorithms: opts.algorithms ?? ["HS256"],
     }
     if (issuer) verifyOpts.issuer = issuer
     if (opts.audience !== undefined) verifyOpts.audience = opts.audience
     if (opts.clockSkewInMs !== undefined) verifyOpts.clockTolerance = Math.ceil(opts.clockSkewInMs / 1000)
-    const { payload } = await jwtVerify(token, symmetricSecret(), verifyOpts)
+    const { payload } = await jwtVerify(token, symmetricSecret(opts), verifyOpts)
     return payload as TokenClaims
   }
 
-  const issuer = opts.issuer ?? process.env.AUTH_JWT_ISSUER
-  if (!issuer) throw new Error("verifyToken: AUTH_JWT_ISSUER is not set")
+  const issuer = opts.issuer ?? embeddedVerification?.issuer
+  if (!issuer) throw new Error("verifyToken: issuer is not configured (pass opts.issuer or configure it via the API)")
   // SSRF guard: the issuer becomes an outbound JWKS fetch URL, so validate it (https + host
   // allowlist) before constructing the remote key set.
-  assertSafeIssuer(issuer)
+  assertSafeIssuer(issuer, opts.jwksAllowedHosts ?? embeddedVerification?.jwksAllowedHosts ?? [])
 
   let jwks = jwksCache.get(issuer)
   if (!jwks) {
@@ -156,7 +197,7 @@ export async function verifyToken(
 /**
  * Verify a **machine** token — an M2M access token or an API key minted for server-to-server
  * calls (spec §15) — and return its claims. Verification follows the same path as a user
- * token (HS256 `AUTH_SESSION_SECRET` in embedded mode, JWKS in production) but asserts `token_type`
+ * token (HS256 `sessionSecret` in embedded mode, JWKS in production) but asserts `token_type`
  * is `machine` so a human session JWT can never be mistaken for a service credential.
  */
 export async function verifyMachineToken(

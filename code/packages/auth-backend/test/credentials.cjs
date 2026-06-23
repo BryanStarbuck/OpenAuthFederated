@@ -1,9 +1,9 @@
 /**
  * Credential-loading + fail-loud-guard test (standalone Node, no jest needed — mirrors
  * saml-roundtrip.cjs). Covers the library contract: OpenAuthFederated is credential-SOURCE-agnostic.
- * It resolves the Google OAuth client id/secret from an explicit config argument, then from its own
- * generic GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET env vars — and from NO host-app file. When neither
- * supplies a value it fails CLOSED with a clear, secret-free error and never leaks the values.
+ * It resolves the Google OAuth client id/secret ONLY from an explicit config argument passed in by
+ * the host app — it reads NO environment variable and NO host-app file. When nothing is passed it
+ * fails CLOSED with a clear, secret-free error and never leaks the values.
  *
  *   1. build:  pnpm --filter @auth/backend build
  *   2. run:    node packages/auth-backend/test/credentials.cjs
@@ -35,53 +35,57 @@ function ok(name) {
   console.log(`  ✓ ${name}`)
 }
 
-// --- 1. Env resolution: generic GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET ---------------------
+// --- 1. The library reads NO environment variable -------------------------------------------
 {
+  // Even with GOOGLE_CLIENT_ID/SECRET present in the environment, the library must ignore them:
+  // config is supplied only through the API. The env values must NOT leak into the resolution.
   process.env.GOOGLE_CLIENT_ID = FAKE_ID
   process.env.GOOGLE_CLIENT_SECRET = FAKE_SECRET
   const r = loadGoogleCredentials()
-  assert.strictEqual(r.clientId, FAKE_ID, "clientId from env")
-  assert.strictEqual(r.clientSecret, FAKE_SECRET, "clientSecret from env")
-  assert.strictEqual(r.ok, true, "ok when both present")
-  assert.strictEqual(r.clientIdSource, "env", "clientId source = env")
+  assert.strictEqual(r.clientId, "", "env GOOGLE_CLIENT_ID is ignored")
+  assert.strictEqual(r.clientSecret, "", "env GOOGLE_CLIENT_SECRET is ignored")
+  assert.strictEqual(r.ok, false, "not ok — nothing was passed in via the API")
+  assert.strictEqual(r.clientIdSource, "missing", "clientId source = missing (env is never read)")
   delete process.env.GOOGLE_CLIENT_ID
   delete process.env.GOOGLE_CLIENT_SECRET
-  ok("reads clientId/clientSecret from the generic GOOGLE_CLIENT_ID/SECRET env vars")
+  ok("ignores the GOOGLE_CLIENT_ID/SECRET env vars — the library reads no environment")
 }
 
-// --- 2. Explicit config overrides env (resolution order) -----------------------------------
+// --- 2. Explicit config (passed in by the host) resolves ------------------------------------
 {
+  // And it must NOT be perturbed by any env value that happens to be set.
   process.env.GOOGLE_CLIENT_ID = "env-id.apps.googleusercontent.com"
   process.env.GOOGLE_CLIENT_SECRET = "env-secret"
   const r = loadGoogleCredentials({ clientId: "cfg-id", clientSecret: "cfg-secret" })
-  assert.strictEqual(r.clientId, "cfg-id", "config wins over env")
+  assert.strictEqual(r.clientId, "cfg-id", "config value resolves")
   assert.strictEqual(r.clientIdSource, "config", "source = config")
+  assert.strictEqual(r.ok, true, "ok when both passed in")
   delete process.env.GOOGLE_CLIENT_ID
   delete process.env.GOOGLE_CLIENT_SECRET
-  ok("an explicit config value (passed in by the host app) overrides the env var")
+  ok("an explicit config value (passed in by the host app) resolves, env is irrelevant")
 }
 
-// --- 3. No file fallback: the library reads no host-app credentials file -------------------
+// --- 3. No fallback at all: no env, no host-app file ---------------------------------------
 {
-  // With nothing passed and no env, the credential is simply "missing" — the library does NOT go
-  // looking in ~/.credentials/<anything>. (Resolution is config → env only.)
+  // With nothing passed in, the credential is simply "missing" — the library does NOT go looking
+  // in the environment or in ~/.credentials/<anything>.
   const r = loadGoogleCredentials()
-  assert.strictEqual(r.ok, false, "not ok when neither config nor env supplies a value")
+  assert.strictEqual(r.ok, false, "not ok when nothing is passed in")
   assert.strictEqual(r.clientId, "", "empty clientId")
-  assert.strictEqual(r.clientIdSource, "missing", "source = missing (never 'file')")
-  ok("resolves config → env only; there is no host-app file fallback in the library")
+  assert.strictEqual(r.clientIdSource, "missing", "source = missing (never 'env' or 'file')")
+  ok("resolves from passed-in config only; no env and no host-app file fallback")
 }
 
-// --- 4. Remediation is generic + secret-free -----------------------------------------------
+// --- 4. Remediation names the API entry point, is secret-free, references no env/file -------
 {
   const msg = credentialsRemediation()
   assert.ok(msg.includes("createFederatedFrontend"), "remediation names the API entry point")
-  assert.ok(msg.includes("GOOGLE_CLIENT_ID"), "remediation lists the generic env-var alternative")
-  // It must NOT name any host application's file/path/key — the library knows none.
+  // It must NOT tell the operator to set an env var (the library reads none) or name any host file.
+  assert.ok(!msg.includes("GOOGLE_CLIENT_ID"), "remediation does not point at an env var")
   assert.ok(!msg.includes("app_internal_act3"), "remediation names no app-specific JSON key")
   assert.ok(!msg.includes(".credentials"), "remediation names no app-specific file path")
   assert.ok(!msg.includes(FAKE_SECRET), "remediation never echoes a secret")
-  ok("remediation is generic (API + env), secret-free, and names no host-app file")
+  ok("remediation points at the API, is secret-free, and names no env var or host-app file")
 }
 
 // --- 5. assertGoogleCredentials throws a secret-free OAuthCredentialsError ------------------

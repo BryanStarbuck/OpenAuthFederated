@@ -2,8 +2,8 @@
  * "No dev mock" guarantee test (standalone Node — mirrors credentials.cjs / saml-roundtrip.cjs).
  *
  * Contract: OpenAuthFederated has NO dev auth mock of its own. It must NEVER accept a token signed
- * with a well-known/shared "dev" secret, and `AUTH_DEV_MODE` must do nothing. Embedded mode still
- * works, but only with a strong, operator-supplied AUTH_SESSION_SECRET — there is no default.
+ * with a well-known/shared "dev" secret, and it reads NO environment variable (env must do nothing).
+ * Embedded mode still works, but only with a strong sessionSecret supplied via the API — no default.
  *
  *   1. build:  pnpm --filter @auth/backend build   (or: npx tsc -p tsconfig.json)
  *   2. run:    node packages/auth-backend/test/no-dev-mock.cjs
@@ -15,6 +15,7 @@ const { SignJWT } = require("jose")
 
 const backend = require("../dist/index.js")
 const { verifyToken } = backend
+const STRONG = "a-genuinely-strong-operator-supplied-secret-32+chars"
 
 let passed = 0
 function ok(name) {
@@ -54,30 +55,34 @@ async function main() {
     ok("no dev-mode/dev-guard API is exported from @auth/backend")
   }
 
-  // --- 2. AUTH_DEV_MODE + the public "dev-shared-secret" is rejected, not honoured -----------
+  // --- 2. Env vars do nothing; a shared-secret token is never honoured via a dev path --------
   {
     clearEnv()
+    // Set every legacy env var — the library must ignore ALL of them. With no embedded config
+    // passed via the API and no opts.issuer, verification fails closed (it does not read env).
     process.env.AUTH_DEV_MODE = "true"
     process.env.AUTH_DEV_SHARED_SECRET = "dev-shared-secret"
+    process.env.AUTH_EMBEDDED = "true"
+    process.env.AUTH_SESSION_SECRET = "dev-shared-secret"
     process.env.AUTH_JWT_ISSUER = "http://localhost:9111"
     const token = await signHS256("dev-shared-secret")
-    // With no JWKS server reachable and no embedded secret, verification must fail — it must NOT
-    // quietly accept the shared-secret token via a dev path.
     await assert.rejects(verifyToken(token), (err) => {
       assert.ok(!/dev mode/i.test(String(err && err.message)), "must not mention a dev-mode path")
       return true
     })
-    ok("AUTH_DEV_MODE=true never makes a shared-secret token verify (no dev mock)")
+    ok("environment variables are ignored — a shared-secret token never verifies (no dev mock)")
   }
 
   // --- 3. Embedded mode requires a strong secret; the dev default fails closed ---------------
   {
     clearEnv()
-    process.env.AUTH_EMBEDDED = "true"
-    process.env.AUTH_SESSION_SECRET = "dev-shared-secret" // the weak default — must be refused
+    // Config is passed via the API (opts), never env. The weak default must be refused.
     await assert.rejects(
-      verifyToken(await signHS256("dev-shared-secret")),
-      /strong AUTH_SESSION_SECRET/,
+      verifyToken(await signHS256("dev-shared-secret"), {
+        embedded: true,
+        sessionSecret: "dev-shared-secret",
+      }),
+      /strong sessionSecret/,
       "embedded mode must reject the dev/default secret",
     )
     ok("embedded mode refuses the weak default secret (no silent fallback)")
@@ -86,17 +91,19 @@ async function main() {
   // --- 4. Embedded mode works with a real secret; a wrong-secret token is rejected ----------
   {
     clearEnv()
-    process.env.AUTH_EMBEDDED = "true"
-    process.env.AUTH_SESSION_SECRET = "a-genuinely-strong-operator-supplied-secret-32+chars"
-    const good = await verifyToken(
-      await signHS256("a-genuinely-strong-operator-supplied-secret-32+chars"),
-    )
+    // (a) per-call opts.
+    const good = await verifyToken(await signHS256(STRONG), { embedded: true, sessionSecret: STRONG })
     assert.strictEqual(good.email, "dev@whitehatengineering.com")
     await assert.rejects(
-      verifyToken(await signHS256("some-other-secret")),
+      verifyToken(await signHS256("some-other-secret"), { embedded: true, sessionSecret: STRONG }),
       "a token signed with the wrong secret must be rejected",
     )
-    ok("embedded mode verifies only tokens signed with the real AUTH_SESSION_SECRET")
+    // (b) module-level config set once via the API (configureEmbeddedVerification), as
+    // createFederatedFrontend does — verifyToken then needs no per-call secret.
+    backend.configureEmbeddedVerification({ sessionSecret: STRONG })
+    const good2 = await verifyToken(await signHS256(STRONG))
+    assert.strictEqual(good2.email, "dev@whitehatengineering.com")
+    ok("embedded mode verifies only tokens signed with the API-supplied sessionSecret")
   }
 
   clearEnv()

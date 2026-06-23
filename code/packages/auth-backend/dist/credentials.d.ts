@@ -2,20 +2,15 @@
  * Google OAuth client-credential resolution for the embedded Frontend API.
  *
  * Ownership boundary (deliberate): this library is embedded by many host applications, so it must
- * stay credential-*source*-agnostic. It **accepts** a Google OAuth client id/secret — as explicit
- * arguments to `createAuthFrontend(...)` / `loadGoogleCredentials(...)`, or from its own generic
- * `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` environment variables — and it **uses** them to run
- * the OAuth flow. It does NOT know, and must never read, any host application's secrets file, that
- * file's path, its override env-var name, or its JSON layout: sourcing a secret from a file is the
- * embedding app's job, and the app passes the resolved value in. This mirrors how a consumer of a
- * hosted identity-platform SDK supplies keys — to the SDK constructor or via the SDK's own env
- * vars — never by handing the SDK a path into the app's filesystem.
+ * stay credential-*source*-agnostic. It **accepts** a Google OAuth client id/secret as explicit
+ * arguments to `createAuthFrontend(...)` / `loadGoogleCredentials(...)` and **uses** them to run the
+ * OAuth flow. It reads NO environment variable and does NOT know, and must never read, any host
+ * application's secrets file, that file's path, its override env-var name, or its JSON layout:
+ * sourcing a secret is entirely the embedding app's job, and the app passes the resolved value in.
+ * This mirrors how a consumer of a hosted identity-platform SDK supplies keys — to the SDK
+ * constructor — never by handing the SDK a path into the app's filesystem or the host environment.
  *
- * Resolution order for each of `clientId` / `clientSecret` (first non-empty wins):
- *   1. Explicit value passed in (resolved by the host from wherever it keeps its secrets).
- *   2. `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` environment variables.
- *
- * When neither yields a value the credential is "missing": `loadGoogleCredentials().ok` is false,
+ * The credential is "missing" when no value is passed in: `loadGoogleCredentials().ok` is false,
  * `assertGoogleCredentials()` throws a secret-free {@link OAuthCredentialsError}, and the embedded
  * Frontend API fails closed (503) rather than redirecting to Google with an empty `client_id`.
  */
@@ -25,8 +20,8 @@ export interface GoogleCredentials {
     clientSecret: string;
 }
 /** Where a resolved value originated. Used for diagnostics only — never carries the value. */
-export type CredentialSource = "config" | "env" | "missing";
-/** The outcome of resolving Google OAuth credentials across config / env. */
+export type CredentialSource = "config" | "missing";
+/** The outcome of resolving Google OAuth credentials passed in by the host. */
 export interface CredentialResolution extends GoogleCredentials {
     /** True only when BOTH `clientId` and `clientSecret` are present and non-empty. */
     ok: boolean;
@@ -40,8 +35,6 @@ export interface LoadGoogleCredentialsOptions {
     clientId?: string;
     /** An explicit client secret (highest priority). Resolved by the host the same way. */
     clientSecret?: string;
-    /** Read `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` from the environment. Default true. */
-    useEnv?: boolean;
 }
 /**
  * Thrown when Google OAuth credentials cannot be resolved. Its `message` is operator-actionable and
@@ -62,8 +55,10 @@ export declare class OAuthCredentialsError extends Error {
  */
 export declare function credentialsRemediation(): string;
 /**
- * Resolve Google OAuth credentials across config → generic env. Never reads the filesystem and
- * never throws: inspect `.ok` to see whether both fields resolved. A host that wants a hard failure
+ * Resolve Google OAuth credentials from the values the API caller passes in. The library reads no
+ * environment variables and never touches the filesystem — the embedding app owns WHERE the values
+ * come from (its own out-of-repo secrets file or deployment config) and passes the resolved pair in.
+ * Never throws: inspect `.ok` to see whether both fields resolved. A host that wants a hard failure
  * on a missing credential calls {@link assertGoogleCredentials} (or relies on the embedded Frontend
  * API's fail-closed 503).
  */

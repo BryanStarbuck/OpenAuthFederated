@@ -28,7 +28,12 @@ export type {
   CreateFederatedClientOptions,
   CreateAuthClientOptions,
 } from "./types.js"
-export { verifyToken, verifyMachineToken, hasScope } from "./verify.js"
+export {
+  verifyToken,
+  verifyMachineToken,
+  hasScope,
+  configureEmbeddedVerification,
+} from "./verify.js"
 export type { VerifyTokenOptions } from "./verify.js"
 export {
   requirePermission,
@@ -104,8 +109,8 @@ export type {
 } from "./credentials.js"
 
 /**
- * Construct a configured backend client via `createFederatedClient(options)`. Reads
- * AUTH_SECRET_KEY / AUTH_BACKEND_API / AUTH_JWT_ISSUER when the matching option is omitted.
+ * Construct a configured backend client via `createFederatedClient(options)`. All config (secretKey,
+ * apiUrl, issuer) is supplied through `options` — the library reads no environment variables.
  */
 export function createFederatedClient(options: CreateFederatedClientOptions = {}): AuthClient {
   return new AuthClient(options)
@@ -117,9 +122,10 @@ export function createFederatedClient(options: CreateFederatedClientOptions = {}
  */
 export const createAuthClient = createFederatedClient
 
-// Preconfigured singleton for the common case. Lazily constructed on first use so the
-// host's environment (e.g. NestJS ConfigModule loading .env) is in place before it reads
-// AUTH_SECRET_KEY / AUTH_BACKEND_API / AUTH_JWT_ISSUER.
+// Preconfigured singleton for the common case (lazily constructed on first use). It carries no
+// secretKey/issuer — embedded-mode verification is configured by createFederatedFrontend() via
+// configureEmbeddedVerification(), so federatedClient.verifyToken() works without per-client config.
+// For authorized Backend REST calls, construct an explicit createFederatedClient({ secretKey, apiUrl }).
 let singleton: AuthClient | null = null
 function instance(): AuthClient {
   if (!singleton) singleton = new AuthClient()
