@@ -298,7 +298,7 @@ export function UserButton(props: { afterSignOutUrl?: string }): ReactNode {
   )
 }
 
-/** Google One Tap prompt. In the dev mock there is no real prompt, so it renders nothing. */
+/** Google One Tap prompt. Renders nothing until the One Tap UI is wired to the real client. */
 export function GoogleOneTap(_props: {
   cancelOnTapOutside?: boolean
   fallbackRedirectUrl?: string

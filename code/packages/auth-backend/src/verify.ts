@@ -12,14 +12,17 @@ import type { MachineClaims, TokenClaims } from "./types.js"
 /** Per-issuer remote JWKS set, cached so verification is networkless after the first call. */
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>()
 
-function isDevMode(): boolean {
-  return process.env.AUTH_DEV_MODE === "true"
-}
-
 /**
  * Embedded mode: OpenAuthFederated runs in-process as a library (no deployed server, no JWKS
  * endpoint). Access tokens are minted and verified with one shared HS256 secret
- * (`AUTH_SESSION_SECRET`) by `createAuthFrontend()` in the same process.
+ * (`AUTH_SESSION_SECRET`) by `createAuthFrontend()` in the same process — after a REAL Google /
+ * SAML sign-in. This is a production deployment shape, NOT a mock: there is no dev/default secret
+ * (see {@link symmetricSecret}).
+ *
+ * OpenAuthFederated deliberately has **no dev mock / dev-auth mode of its own**. It never accepts a
+ * weak, shared-secret "dev" token and never short-circuits real verification. If an app wants a
+ * local no-IdP convenience mode, the app implements that on its own side and OpenAuthFederated is
+ * not involved.
  */
 function isEmbedded(): boolean {
   return process.env.AUTH_EMBEDDED === "true"
@@ -45,11 +48,20 @@ export interface VerifyTokenOptions {
   secretKey?: string
 }
 
-/** The shared HS256 secret for symmetric (dev / embedded) verification. */
+/**
+ * The shared HS256 secret for embedded-mode verification. Requires a strong, operator-supplied
+ * `AUTH_SESSION_SECRET`. There is intentionally **no** dev/default secret: OpenAuthFederated will
+ * not fall back to a well-known value (which would let anyone forge a session), so an unset or
+ * placeholder secret fails closed.
+ */
 function symmetricSecret(): Uint8Array {
-  const secret = isEmbedded()
-    ? process.env.AUTH_SESSION_SECRET ?? process.env.AUTH_DEV_SHARED_SECRET ?? "dev-shared-secret"
-    : process.env.AUTH_DEV_SHARED_SECRET ?? "dev-shared-secret"
+  const secret = process.env.AUTH_SESSION_SECRET ?? ""
+  if (!secret || secret === "dev-shared-secret") {
+    throw new Error(
+      "verifyToken: embedded mode requires a strong AUTH_SESSION_SECRET. OpenAuthFederated " +
+        "provides no dev/default secret and never falls back to one.",
+    )
+  }
   return new TextEncoder().encode(secret)
 }
 
@@ -60,11 +72,12 @@ function symmetricSecret(): Uint8Array {
  *   (`<issuer>/.well-known/jwks.json`) and checks `iss`/`exp`. No per-request round
  *   trip — the JWKS is cached.
  * - **Embedded mode** (`AUTH_EMBEDDED=true`): validates an HS256 token signed with
- *   `AUTH_SESSION_SECRET` — the secret the in-process `createAuthFrontend()` mints with — so a
- *   real Google sign-in works with no separate server and no JWKS endpoint.
- * - **Dev mode** (`AUTH_DEV_MODE=true`): validates an HS256 token signed with
- *   `AUTH_DEV_SHARED_SECRET` — the same secret the `@auth/react` dev client mints with —
- *   so the whole flow works locally with no deployed server.
+ *   `AUTH_SESSION_SECRET` — the secret the in-process `createAuthFrontend()` mints with after a
+ *   real Google / SAML sign-in — so it works with no separate server and no JWKS endpoint.
+ *
+ * There is **no dev mock / `AUTH_DEV_MODE`**: OpenAuthFederated never accepts a token signed with a
+ * shared "dev" secret and never bypasses real verification. A no-IdP local convenience mode, if an
+ * app wants one, is the app's own responsibility — never this library's.
  */
 export async function verifyToken(
   token: string,
@@ -72,7 +85,7 @@ export async function verifyToken(
 ): Promise<TokenClaims> {
   if (!token) throw new Error("verifyToken: empty token")
 
-  if (isDevMode() || isEmbedded()) {
+  if (isEmbedded()) {
     const verifyOpts: Parameters<typeof jwtVerify>[2] = {}
     if (opts.audience !== undefined) verifyOpts.audience = opts.audience
     if (opts.clockSkewInMs !== undefined) verifyOpts.clockTolerance = Math.ceil(opts.clockSkewInMs / 1000)
@@ -99,8 +112,8 @@ export async function verifyToken(
 /**
  * Verify a **machine** token — an M2M access token or an API key minted for server-to-server
  * calls (spec §15) — and return its claims. Verification follows the same path as a user
- * token (HS256 dev secret in dev mode, JWKS in production) but asserts `token_type` is
- * `machine` so a human session JWT can never be mistaken for a service credential.
+ * token (HS256 `AUTH_SESSION_SECRET` in embedded mode, JWKS in production) but asserts `token_type`
+ * is `machine` so a human session JWT can never be mistaken for a service credential.
  */
 export async function verifyMachineToken(
   token: string,

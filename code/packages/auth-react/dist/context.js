@@ -1,6 +1,6 @@
 import { jsx as _jsx } from "react/jsx-runtime";
 import { createContext, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, } from "react";
-import { DevAuthCore, RealAuthCore } from "./core.js";
+import { RealAuthCore } from "./core.js";
 const AuthContext = createContext(null);
 export function useAuthContext() {
     const ctx = useContext(AuthContext);
@@ -19,9 +19,10 @@ export function FederatedProvider(props) {
         const domains = props.allowedDomains && props.allowedDomains.length > 0
             ? props.allowedDomains
             : ["act3ai.com", "whitehatengineering.com"];
-        coreRef.current = props.devMode
-            ? new DevAuthCore(domains, props.devSharedSecret ?? "dev-shared-secret", props.frontendApi ?? "https://auth.dev.local")
-            : new RealAuthCore(props.frontendApi ?? "", props.publishableKey ?? "", domains);
+        // Default to the real federated client. OpenAuthFederated ships no dev mock; an app that wants a
+        // localhost-only dev core builds its own and injects it via `core` (gated on its own side).
+        coreRef.current =
+            props.core ?? new RealAuthCore(props.frontendApi ?? "", props.publishableKey ?? "", domains);
     }
     const core = coreRef.current;
     const [isLoaded, setIsLoaded] = useState(false);

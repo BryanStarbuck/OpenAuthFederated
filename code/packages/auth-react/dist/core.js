@@ -1,12 +1,14 @@
-import { SignJWT } from "jose";
 import { domainSlug, EMPTY_SNAPSHOT, hasPermission, hasRole, } from "./types.js";
-const LS_SESSION = "openauthfed_dev_session_v1";
-const LS_PENDING = "openauthfed_dev_pending_v1";
 // Active-org is per-tab (sessionStorage), so two tabs can hold different active orgs — the
 // "tab-aware active organization context" the spec calls out (§14).
 const SS_ACTIVE_ORG = "openauthfed_active_org_v1";
-/** Shared subscribe/emit plumbing for the external store. */
-class BaseCore {
+/**
+ * Shared subscribe/emit plumbing for the external store. Exported so a consuming app can build its
+ * OWN {@link AuthCore} (e.g. a localhost-only dev core) on top of it and inject it via
+ * `<FederatedProvider core={...}>`. OpenAuthFederated itself ships only {@link RealAuthCore} — it
+ * provides no dev/mock core of its own.
+ */
+export class BaseCore {
     snapshot = EMPTY_SNAPSHOT;
     state = "loading";
     listeners = new Set();
@@ -76,31 +78,6 @@ class BaseCore {
         }
         catch {
             // sessionStorage unavailable (SSR / privacy mode) — active org stays in-memory only.
-        }
-    }
-    /** Safe localStorage access — returns null when storage is unavailable (SSR / privacy mode). */
-    readLocal(key) {
-        try {
-            return localStorage.getItem(key);
-        }
-        catch {
-            return null;
-        }
-    }
-    writeLocal(key, value) {
-        try {
-            localStorage.setItem(key, value);
-        }
-        catch {
-            // storage unavailable — the dev mock keeps its session in-memory for this page only.
-        }
-    }
-    removeLocal(key) {
-        try {
-            localStorage.removeItem(key);
-        }
-        catch {
-            // storage unavailable — nothing to remove.
         }
     }
     async setActiveOrg(orgId) {
@@ -189,207 +166,6 @@ function readJwtExp(jwt) {
     }
     catch {
         return null;
-    }
-}
-/**
- * Local dev mock: no Google round-trip, no running server. Sign-in establishes a session
- * in localStorage and `getToken()` mints a short-lived HS256 JWT with the shared dev secret
- * that `@auth/backend` verifies in dev mode.
- */
-export class DevAuthCore extends BaseCore {
-    allowedDomains;
-    devSharedSecret;
-    issuer;
-    token = null;
-    tokenExp = 0;
-    constructor(allowedDomains, devSharedSecret, issuer) {
-        super();
-        this.allowedDomains = allowedDomains;
-        this.devSharedSecret = devSharedSecret;
-        this.issuer = issuer;
-    }
-    connections() {
-        return this.allowedDomains.map((domain) => ({
-            id: `conn_${domainSlug(domain)}`,
-            domain,
-            label: domain,
-        }));
-    }
-    async load() {
-        const raw = this.readLocal(LS_SESSION);
-        if (!raw) {
-            this.setState("loaded");
-            return;
-        }
-        try {
-            const stored = JSON.parse(raw);
-            // Honor a per-tab active org if one was chosen and is still a valid membership.
-            const activeOrg = this.readActiveOrg();
-            const orgId = activeOrg && stored.memberships?.some((m) => m.organization.id === activeOrg)
-                ? activeOrg
-                : stored.orgId;
-            this.setSnapshot({ ...stored, orgId });
-        }
-        catch {
-            this.removeLocal(LS_SESSION);
-        }
-        finally {
-            this.setState("loaded");
-        }
-    }
-    async authenticateWithRedirect(params) {
-        const conn = this.connections().find((c) => c.id === params.connectionId) ?? this.connections()[0];
-        this.writeLocal(LS_PENDING, JSON.stringify({ domain: conn?.domain, redirectUrlComplete: params.redirectUrlComplete }));
-        window.location.assign(params.redirectUrl);
-    }
-    async completeRedirectCallback() {
-        const raw = this.readLocal(LS_PENDING);
-        this.removeLocal(LS_PENDING);
-        const pending = raw ? JSON.parse(raw) : null;
-        const domain = pending?.domain ?? this.allowedDomains[0];
-        // Domain enforcement (the rejection path of §7.3): even though the dev mock has no real
-        // Google round-trip, model the platform's domain gate so the rejection is exercisable —
-        // and with the *same rich shape* the real platform returns, so the app's error UI can be
-        // built and tested entirely against the dev mock. An explicit `?auth_reject=<domain>` on the
-        // callback URL simulates an outsider returning from the IdP (optionally
-        // `&auth_reject_code=identity_email_unverified` to exercise a different reason); a pending
-        // domain outside the allowlist is likewise refused. No session is created.
-        let presentedDomain = domain;
-        let simulatedCode = null;
-        try {
-            const search = new URLSearchParams(window.location.search);
-            const simulated = search.get("auth_reject");
-            if (simulated)
-                presentedDomain = simulated;
-            simulatedCode = search.get("auth_reject_code");
-        }
-        catch {
-            // window.location unavailable (SSR) — fall back to the pending domain.
-        }
-        if (simulatedCode || !presentedDomain || !this.allowedDomains.includes(presentedDomain)) {
-            const code = simulatedCode ?? "identity_domain_not_allowed";
-            const emailVerified = code !== "identity_email_unverified";
-            this.setSnapshot(EMPTY_SNAPSHOT);
-            return {
-                error: {
-                    code,
-                    message: rejectionMessage(code, presentedDomain),
-                    longMessage: `The upstream identity authenticated, but the app refused it (${code}). No account ` +
-                        `was created and no session was started. Allowed company domains: ` +
-                        `${this.allowedDomains.join(", ")}.`,
-                    presentedDomain,
-                    meta: {
-                        allowedDomains: this.allowedDomains,
-                        presentedDomain,
-                        emailVerified,
-                    },
-                    traceId: `trace_dev_${domainSlug(presentedDomain ?? "unknown")}`,
-                },
-            };
-        }
-        const snapshot = this.buildSession(presentedDomain);
-        this.writeLocal(LS_SESSION, JSON.stringify(snapshot));
-        this.token = null;
-        this.setSnapshot(snapshot);
-        return { redirectTo: pending?.redirectUrlComplete ?? "/" };
-    }
-    buildSession(domain) {
-        const slug = domainSlug(domain);
-        const user = {
-            id: `user_dev_${slug}`,
-            firstName: "Dev",
-            lastName: "Employee",
-            primaryEmailAddress: `dev@${domain}`,
-            // Demo RBAC: read everything, write a subset — enough to exercise <Protect> both ways.
-            roles: ["employee"],
-            permissions: ["*:read", "film:write", "movies:write", "tools:write"],
-            hd: domain,
-        };
-        // Two demo orgs so <OrganizationSwitcher> has something to switch between, and so the
-        // active-org RBAC scoping is exercisable: admin in one, viewer in the other.
-        const memberships = [
-            {
-                id: `orgmem_dev_${slug}_internal`,
-                organization: { id: "org_dev_internal", name: `${domain} (Internal)`, slug: "internal" },
-                role: "org:admin",
-                permissions: ["*:read", "*:write", "org:sys_memberships:manage"],
-            },
-            {
-                id: `orgmem_dev_${slug}_client`,
-                organization: { id: "org_dev_client", name: "Client Workspace", slug: "client" },
-                role: "org:viewer",
-                permissions: ["*:read"],
-            },
-        ];
-        const activeOrg = this.readActiveOrg();
-        const orgId = activeOrg && memberships.some((m) => m.organization.id === activeOrg)
-            ? activeOrg
-            : "org_dev_internal";
-        return {
-            isSignedIn: true,
-            userId: user.id,
-            sessionId: `sess_dev_${slug}`,
-            orgId,
-            user,
-            memberships,
-            lastVerifiedAt: Math.floor(Date.now() / 1000),
-        };
-    }
-    async getToken(opts = {}) {
-        const snap = this.snapshot;
-        if (!snap.isSignedIn || !snap.user)
-            return null;
-        const now = Math.floor(Date.now() / 1000);
-        // A templated token is minted fresh each call (its claim shape may differ); the default
-        // token is cached until ~10s before expiry. Org switches invalidate the cache below.
-        if (!opts.template && this.token && this.tokenExp - now > 10)
-            return this.token;
-        // Scope the token claims to the active organization's grants (tab-aware RBAC).
-        const { roles, permissions } = this.activeGrants();
-        const key = new TextEncoder().encode(this.devSharedSecret);
-        const jwt = await new SignJWT({
-            email: snap.user.primaryEmailAddress,
-            org_id: snap.orgId,
-            // `sid` (session id) lets a backend verify/revoke the server-side session record for
-            // sensitive actions and sign-out, matching the production token shape.
-            sid: snap.sessionId,
-            roles,
-            permissions,
-            hd: snap.user.hd,
-            ...(opts.template ? { template: opts.template } : {}),
-        })
-            .setProtectedHeader({ alg: "HS256" })
-            .setSubject(snap.userId ?? "")
-            .setIssuedAt(now)
-            .setIssuer(this.issuer)
-            .setExpirationTime(now + 60)
-            .sign(key);
-        if (!opts.template) {
-            this.token = jwt;
-            this.tokenExp = now + 60;
-        }
-        return jwt;
-    }
-    async setActiveOrg(orgId) {
-        await super.setActiveOrg(orgId);
-        // Drop the cached token so the next getToken() reflects the new org's grants.
-        this.token = null;
-    }
-    async reverify() {
-        // Dev mock: no real IdP round-trip — just stamp a fresh verification time.
-        if (!this.snapshot.isSignedIn)
-            return;
-        const next = { ...this.snapshot, lastVerifiedAt: Math.floor(Date.now() / 1000) };
-        this.writeLocal(LS_SESSION, JSON.stringify(next));
-        this.setSnapshot(next);
-    }
-    async signOut(opts = {}) {
-        this.removeLocal(LS_SESSION);
-        this.writeActiveOrg(null);
-        this.token = null;
-        this.setSnapshot(EMPTY_SNAPSHOT);
-        if (opts.redirectUrl)
-            window.location.assign(opts.redirectUrl);
     }
 }
 /**

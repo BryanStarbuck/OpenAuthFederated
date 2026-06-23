@@ -215,8 +215,8 @@ function constantTimeEqual(a, b) {
 // --- default RBAC mapping ------------------------------------------------------------------
 /**
  * Default grant: an internal employee who is an admin of the single "internal" org. Read
- * everything, write everything within the org — mirrors the prior dev-mock behavior so the
- * app's `<Protect …:write>` controls keep working. Replace via `config.resolveGrants` to map
+ * everything, write everything within the org — a sensible default so the app's
+ * `<Protect …:write>` controls keep working. Replace via `config.resolveGrants` to map
  * Google Workspace groups to finer-grained roles.
  */
 function defaultResolveGrants(identity) {

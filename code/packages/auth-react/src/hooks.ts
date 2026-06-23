@@ -52,7 +52,7 @@ export function useSession() {
   return { isLoaded, isSignedIn: snapshot.isSignedIn, session }
 }
 
-/** All sessions for the current user (the dev mock surfaces only the active one). */
+/** All sessions for the current user (the snapshot surfaces only the active one). */
 export function useSessionList() {
   const { core, snapshot, isLoaded } = useAuthContext()
   const sessions = snapshot.isSignedIn

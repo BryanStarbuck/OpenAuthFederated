@@ -44,9 +44,11 @@ export {
   OrganizationProfile,
   CreateOrganization,
 } from "./components.js"
-export { hasPermission, hasRole } from "./types.js"
+export { hasPermission, hasRole, EMPTY_SNAPSHOT, domainSlug } from "./types.js"
 export type {
   Appearance,
+  AuthCore,
+  AuthenticateWithRedirectParams,
   AuthRejection,
   AuthRejectionMeta,
   Connection,
@@ -58,3 +60,7 @@ export type {
   SessionSnapshot,
   PermissionCheck,
 } from "./types.js"
+// The base core class — exported so an embedding app can build its own AuthCore (e.g. a
+// localhost-only dev sign-in core) and inject it via `<FederatedProvider core={...}>`.
+// OpenAuthFederated ships no dev/mock core of its own.
+export { BaseCore, RealAuthCore } from "./core.js"

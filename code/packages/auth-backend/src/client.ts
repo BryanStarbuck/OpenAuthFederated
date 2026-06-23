@@ -414,11 +414,7 @@ export class AuthClient {
     this.authorizedParties = opts.authorizedParties
   }
 
-  get isDevMode(): boolean {
-    return process.env.AUTH_DEV_MODE === "true"
-  }
-
-  /** Networkless JWT verification (JWKS in prod, HS256 dev/embedded secret otherwise). */
+  /** Networkless JWT verification (JWKS in production, HS256 `AUTH_SESSION_SECRET` when embedded). */
   verifyToken(token: string): Promise<TokenClaims> {
     return verifyToken(token, {
       issuer: this.issuer,
@@ -445,12 +441,6 @@ export class AuthClient {
 
   /** Low-level authorized request to the Backend API. */
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
-    if (this.isDevMode) {
-      throw new Error(
-        `@auth/backend: ${init.method ?? "GET"} ${path} is unavailable in dev mode ` +
-          `(no live OpenAuthFederated server). Only verifyToken() is supported in dev.`,
-      )
-    }
     const res = await fetch(`${this.apiUrl.replace(/\/+$/, "")}${path}`, {
       ...init,
       headers: {

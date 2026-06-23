@@ -1,6 +1,11 @@
 import { type AuthCore, type AuthenticateWithRedirectParams, type Connection, type LoadState, type PermissionCheck, type RedirectCallbackResult, type SessionSnapshot } from "./types.js";
-/** Shared subscribe/emit plumbing for the external store. */
-declare abstract class BaseCore implements AuthCore {
+/**
+ * Shared subscribe/emit plumbing for the external store. Exported so a consuming app can build its
+ * OWN {@link AuthCore} (e.g. a localhost-only dev core) on top of it and inject it via
+ * `<FederatedProvider core={...}>`. OpenAuthFederated itself ships only {@link RealAuthCore} — it
+ * provides no dev/mock core of its own.
+ */
+export declare abstract class BaseCore implements AuthCore {
     protected snapshot: SessionSnapshot;
     protected state: LoadState;
     private readonly listeners;
@@ -18,10 +23,6 @@ declare abstract class BaseCore implements AuthCore {
     isRecentlyVerified(maxAgeSeconds: number): boolean;
     protected readActiveOrg(): string | null;
     protected writeActiveOrg(orgId: string | null): void;
-    /** Safe localStorage access — returns null when storage is unavailable (SSR / privacy mode). */
-    protected readLocal(key: string): string | null;
-    protected writeLocal(key: string, value: string): void;
-    protected removeLocal(key: string): void;
     setActiveOrg(orgId: string | null): Promise<void>;
     abstract load(): Promise<void>;
     abstract connections(): Connection[];
@@ -34,32 +35,6 @@ declare abstract class BaseCore implements AuthCore {
         redirectUrl?: string;
     }): Promise<void>;
     abstract reverify(): Promise<void>;
-}
-/**
- * Local dev mock: no Google round-trip, no running server. Sign-in establishes a session
- * in localStorage and `getToken()` mints a short-lived HS256 JWT with the shared dev secret
- * that `@auth/backend` verifies in dev mode.
- */
-export declare class DevAuthCore extends BaseCore {
-    private readonly allowedDomains;
-    private readonly devSharedSecret;
-    private readonly issuer;
-    private token;
-    private tokenExp;
-    constructor(allowedDomains: string[], devSharedSecret: string, issuer: string);
-    connections(): Connection[];
-    load(): Promise<void>;
-    authenticateWithRedirect(params: AuthenticateWithRedirectParams): Promise<void>;
-    completeRedirectCallback(): Promise<RedirectCallbackResult>;
-    private buildSession;
-    getToken(opts?: {
-        template?: string;
-    }): Promise<string | null>;
-    setActiveOrg(orgId: string | null): Promise<void>;
-    reverify(): Promise<void>;
-    signOut(opts?: {
-        redirectUrl?: string;
-    }): Promise<void>;
 }
 /**
  * Real client against the Frontend API: rehydrates the Client, mints short-lived JWTs, and
@@ -96,4 +71,3 @@ export declare class RealAuthCore extends BaseCore {
         redirectUrl?: string;
     }): Promise<void>;
 }
-export {};

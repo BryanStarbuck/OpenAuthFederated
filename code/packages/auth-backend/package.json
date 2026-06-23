@@ -20,7 +20,8 @@
     "build": "tsc -p tsconfig.json",
     "test:saml": "node test/saml-roundtrip.cjs",
     "test:creds": "node test/credentials.cjs",
-    "test": "node test/credentials.cjs && node test/saml-roundtrip.cjs"
+    "test:noverify": "node test/no-dev-mock.cjs",
+    "test": "node test/credentials.cjs && node test/saml-roundtrip.cjs && node test/no-dev-mock.cjs"
   },
   "dependencies": {
     "@node-saml/node-saml": "^5.1.0",

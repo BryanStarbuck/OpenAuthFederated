@@ -112,8 +112,8 @@ export interface PermissionCheck {
 /** The SDK lifecycle state — drives `<AuthLoading>` / `<AuthLoaded>` / `<AuthFailed>`. */
 export type LoadState = "loading" | "loaded" | "degraded" | "failed";
 /**
- * The framework-agnostic engine behind the provider. Two implementations exist: a real
- * Frontend-API client and a local dev mock (see core.ts).
+ * The framework-agnostic engine behind the provider: the real Frontend-API client
+ * (`RealAuthCore` in core.ts). OpenAuthFederated ships no dev mock.
  */
 export interface AuthCore {
     load(): Promise<void>;

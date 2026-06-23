@@ -39,7 +39,7 @@ export declare function useSession(): {
         lastVerifiedAt: number | null;
     } | null;
 };
-/** All sessions for the current user (the dev mock surfaces only the active one). */
+/** All sessions for the current user (the snapshot surfaces only the active one). */
 export declare function useSessionList(): {
     isLoaded: boolean;
     sessions: {

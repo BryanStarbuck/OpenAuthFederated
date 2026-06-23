@@ -25,12 +25,16 @@ export interface FederatedProviderProps {
     signUpUrl?: string;
     afterSignOutUrl?: string;
     appearance?: Appearance;
-    /** Local dev mock (no deployed server). The app passes VITE_AUTH_DEV_MODE. */
-    devMode?: boolean;
     /** The company domains presented as "global logins" (the two SSO connections). */
     allowedDomains?: string[];
-    /** Shared HS256 secret used to mint dev JWTs; must match the backend's AUTH_DEV_SHARED_SECRET. */
-    devSharedSecret?: string;
+    /**
+     * Inject a custom {@link AuthCore} instead of the default real Frontend-API client. This is the
+     * generic extension seam an embedding app uses to supply its OWN core — e.g. a localhost-only dev
+     * sign-in core, which the app may engage only under its own gate (running on localhost AND no
+     * credentials file). OpenAuthFederated ships no dev/mock core: when this is omitted it always
+     * builds {@link RealAuthCore}. When provided, the app owns the gate — never this library.
+     */
+    core?: AuthCore;
 }
 /**
  * @deprecated Use {@link FederatedProviderProps}. Alias retained for existing imports.

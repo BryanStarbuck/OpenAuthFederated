@@ -6,5 +6,9 @@ useFederated, useOpenAuth, } from "./hooks.js";
 export { SignIn, SignUp, SignInButton, SignUpButton, SignOutButton, UserButton, GoogleOneTap, AuthenticateWithRedirectCallback, readAuthError, useAuthError, Protect, Show, SignedIn, SignedOut, RedirectToSignIn, RedirectToSignUp, AuthLoaded, AuthLoading, AuthDegraded, AuthFailed, 
 // Federated-named aliases for the load-state gates.
 AuthLoaded as FederatedLoaded, AuthLoading as FederatedLoading, OrganizationSwitcher, OrganizationList, OrganizationProfile, CreateOrganization, } from "./components.js";
-export { hasPermission, hasRole } from "./types.js";
+export { hasPermission, hasRole, EMPTY_SNAPSHOT, domainSlug } from "./types.js";
+// The base core class — exported so an embedding app can build its own AuthCore (e.g. a
+// localhost-only dev sign-in core) and inject it via `<FederatedProvider core={...}>`.
+// OpenAuthFederated ships no dev/mock core of its own.
+export { BaseCore, RealAuthCore } from "./core.js";
 //# sourceMappingURL=index.js.map

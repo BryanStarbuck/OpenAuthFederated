@@ -25,18 +25,19 @@ export interface VerifyTokenOptions {
  *   (`<issuer>/.well-known/jwks.json`) and checks `iss`/`exp`. No per-request round
  *   trip — the JWKS is cached.
  * - **Embedded mode** (`AUTH_EMBEDDED=true`): validates an HS256 token signed with
- *   `AUTH_SESSION_SECRET` — the secret the in-process `createAuthFrontend()` mints with — so a
- *   real Google sign-in works with no separate server and no JWKS endpoint.
- * - **Dev mode** (`AUTH_DEV_MODE=true`): validates an HS256 token signed with
- *   `AUTH_DEV_SHARED_SECRET` — the same secret the `@auth/react` dev client mints with —
- *   so the whole flow works locally with no deployed server.
+ *   `AUTH_SESSION_SECRET` — the secret the in-process `createAuthFrontend()` mints with after a
+ *   real Google / SAML sign-in — so it works with no separate server and no JWKS endpoint.
+ *
+ * There is **no dev mock / `AUTH_DEV_MODE`**: OpenAuthFederated never accepts a token signed with a
+ * shared "dev" secret and never bypasses real verification. A no-IdP local convenience mode, if an
+ * app wants one, is the app's own responsibility — never this library's.
  */
 export declare function verifyToken(token: string, opts?: VerifyTokenOptions): Promise<TokenClaims>;
 /**
  * Verify a **machine** token — an M2M access token or an API key minted for server-to-server
  * calls (spec §15) — and return its claims. Verification follows the same path as a user
- * token (HS256 dev secret in dev mode, JWKS in production) but asserts `token_type` is
- * `machine` so a human session JWT can never be mistaken for a service credential.
+ * token (HS256 `AUTH_SESSION_SECRET` in embedded mode, JWKS in production) but asserts `token_type`
+ * is `machine` so a human session JWT can never be mistaken for a service credential.
  */
 export declare function verifyMachineToken(token: string, opts?: VerifyTokenOptions): Promise<MachineClaims>;
 /** True if `granted` covers the requested machine `scope` (exact or `*` super-scope). */

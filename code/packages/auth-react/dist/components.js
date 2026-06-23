@@ -162,7 +162,7 @@ export function UserButton(props) {
         return null;
     return (_jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: 8 }, children: [_jsx("span", { style: { fontSize: 13, color: "#374151" }, children: user.primaryEmailAddress }), _jsx("button", { type: "button", onClick: () => signOut({ redirectUrl: props.afterSignOutUrl ?? "/sign-in" }), children: "Sign out" })] }));
 }
-/** Google One Tap prompt. In the dev mock there is no real prompt, so it renders nothing. */
+/** Google One Tap prompt. Renders nothing until the One Tap UI is wired to the real client. */
 export function GoogleOneTap(_props) {
     return null;
 }
