@@ -27,6 +27,7 @@ import {
  *   GET  /sign_in/sso                         → 302 to Google's OAuth 2.0 / OIDC authorize URL
  *   GET  /oauth_callback                      → code→token exchange, id_token + hd verification,
  *                                               establishes the session cookie, 302 back to the SPA
+ *   GET  /environment                         → instance configuration (Clerk-style, secret-free)
  *   GET  /client                              → rehydrate the current session (signed-out = empty)
  *   POST /client/sessions/:id/tokens          → mint a short-lived access JWT for API calls
  *   POST /client/sessions/:id/tokens/:tmpl    → templated token mint (same path, tagged)
@@ -1256,6 +1257,36 @@ export function createFederatedFrontend(
     backToApp(res, fallbackRedirect, { redirect_url_complete: redirectUrlComplete })
   }
 
+  /**
+   * GET /environment — instance configuration, mirroring Clerk's Frontend-API `/v1/environment`.
+   * Clerk-compatible clients fetch this on load to learn which sign-in strategies exist before any
+   * session is established, so it is UNAUTHENTICATED by design and must stay secret-free: it
+   * exposes only which strategies are enabled and the non-secret session policy — never client
+   * ids/secrets, cookie names, or the signing secret.
+   */
+  function handleEnvironment(res: ServerResponse): void {
+    sendJson(res, 200, {
+      object: "environment",
+      auth_config: {
+        object: "auth_config",
+        single_session_mode: true,
+        session_maximum_lifetime_seconds: cfg.sessionTtlSeconds,
+        session_inactivity_timeout_seconds: cfg.inactivityTimeoutSeconds,
+      },
+      display_config: {
+        object: "display_config",
+        allowed_domains: cfg.allowedDomains,
+      },
+      user_settings: {
+        social: {
+          oauth_google: { enabled: cfg.googleConfigured, strategy: "oauth_google" },
+        },
+        saml: { enabled: Boolean(cfg.saml) },
+      },
+      organization_settings: { enabled: true },
+    })
+  }
+
   async function handleClient(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const session = await readSession(req)
     if (!session || !session.sid) {
@@ -1296,6 +1327,9 @@ export function createFederatedFrontend(
         cfg.log("warn", "session store touch failed on token mint", err)
       }
     }
+    // Audit trail: token refresh is logged alongside sign-in/sign-out (consumer specs require it).
+    // The client caches the access token, so this fires roughly once a minute during active use.
+    cfg.log("info", `Access token refreshed for ${redactEmail(session.email)}`)
     sendJson(res, 200, { jwt, object: "token" })
   }
 
@@ -1366,15 +1400,22 @@ export function createFederatedFrontend(
 
   async function handleRemove(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // Revoke the durable record (tombstone) so the session can't be reused, then clear the cookie.
-    if (cfg.sessionStore) {
+    let session: SessionRecord | null = null
+    try {
+      session = await readSession(req)
+    } catch {
+      session = null
+    }
+    if (cfg.sessionStore && session?.sid) {
       try {
-        const session = await readSession(req)
-        if (session?.sid) await cfg.sessionStore.remove(session.email, session.sid)
+        await cfg.sessionStore.remove(session.email, session.sid)
       } catch (err) {
         cfg.log("warn", "session store remove failed at sign-out", err)
       }
     }
     clearCookie(res, cfg.sessionCookieName, cfg.cookieSecure)
+    // Audit trail: sign-out is logged like sign-in and token refresh (consumer specs require it).
+    if (session) cfg.log("info", `Sign-out completed for ${redactEmail(session.email)}`)
     sendJson(res, 200, { object: "session", deleted: true })
   }
 
@@ -1612,6 +1653,12 @@ export function createFederatedFrontend(
       }
       if (method === "POST" && path === "/saml/acs") {
         await handleSamlAcs(req, res)
+        return true
+      }
+      // Clerk-compatible instance-configuration endpoint. Some Clerk-style clients fetch this on
+      // load; without it the request falls through to the host app as a noisy 404.
+      if (method === "GET" && path === "/environment") {
+        handleEnvironment(res)
         return true
       }
       if (method === "GET" && path === "/client") {
