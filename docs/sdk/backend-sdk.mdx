@@ -14,6 +14,14 @@ as an end user.
 > Never ship `AUTH_SECRET_KEY` to the browser or embed it in client bundles. It grants full
 > read/write access to your identity data.
 
+**Implemented in code.** This SDK is the `auth-backend` package:
+
+* `createAuthClient()` / the `authClient` singleton — `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/index.ts` — `createFederatedClient()`.
+* `authClient.users.*` — `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `UsersResource` (`getUser()`, `getUserList()`, `updateUserMetadata()`, `deleteUser()`).
+* `authClient.sessions.*` — same file — class `SessionsResource` (`getSessionList()`, `revokeSession()`, `verifySession()`).
+* `authClient.organizations.*` — same file — class `OrganizationsResource` (`getOrganization()`, `getOrganizationMembershipList()`, `createOrganization()`).
+* `verifyToken()` — `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts` — `verifyToken()` (networkless JWKS/RS256 verification).
+
 ## Installation
 
 ```bash

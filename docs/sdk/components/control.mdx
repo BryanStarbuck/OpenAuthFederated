@@ -10,6 +10,9 @@ expose its loading lifecycle (`<AuthLoaded>` and friends), and gate what your ap
 on auth state (`<Show>`) or RBAC (`<Protect>`). They are the building blocks for
 permission-aware UIs and smooth loading.
 
+**Implemented in code.** These control components live in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/components.tsx` — `Show()`, `Protect()`, `AuthLoaded()`, `AuthLoading()`, `AuthDegraded()`, `AuthFailed()`, `RedirectToSignIn()`, `RedirectToSignUp()`, `AuthenticateWithRedirectCallback()`. `<AuthProvider>` is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/context.tsx` — `FederatedProvider()` (exported as `AuthProvider`), and the SSO handshake it completes is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/core.ts` — class `RealAuthCore`, method `completeRedirectCallback()`.
+
 ## `<AuthProvider>`
 
 The root provider. Wrap your entire app so every hook and component can read auth state. It

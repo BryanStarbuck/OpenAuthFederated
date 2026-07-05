@@ -30,6 +30,13 @@ There is also `@auth/ui`, the styling/theming package that powers the appearance
 drop-in components. You rarely install it directly — it comes in transitively through
 `@auth/nextjs` and `@auth/react`.
 
+**Implemented in code.** The SDKs are the two packages under
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/`:
+
+* `@auth/react` (client hooks, components, provider) — `auth-react/src/` (`hooks.ts`, `components.tsx`, `context.tsx`, `core.ts`).
+* `@auth/backend` (server SDK / `authClient`, token verify) — `auth-backend/src/` (`client.ts`, `verify.ts`, `index.ts`).
+* The `@auth/nextjs` server helpers (`authMiddleware`, `createRouteMatcher`, `getAuth`) are provided by `auth-backend/src/middleware.ts` and `auth-backend/src/express.ts`.
+
 ## `@auth/nextjs` — full-stack
 
 The full-stack SDK is the one most apps should reach for. It bundles everything:

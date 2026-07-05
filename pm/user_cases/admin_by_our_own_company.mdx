@@ -227,6 +227,21 @@ The web app talks to **three** OpenAuthFederated surfaces, each with its own cre
 **Platform API** (secret key, one-time admin config). See
 `/Users/bryan/BGit/Bryan_git/OpenAuthFederated/docs/apis/platform/api-keys.mdx`.
 
+## Where this use case is implemented in code
+
+* Validate the Google assertion, enforce the verified domain, JIT-resolve the user, apply the group→role mapping, and issue the short-lived JWT — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()` (`handleCallback` for OIDC, `handleSamlAcs` for SAML; `defaultResolveGrants` maps groups to grants).
+* SAML assertion validation used by the ACS handler — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts` — `validateSamlAcs()`.
+* The `has({ permission: 'app:admin' })` / `has({ role: 'admin' })` authorization checks (front end and backend) — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts` — `hasPermission()`, `hasRole()`, `checkClaims()`.
+* Backend authoritative re-check (`verifyToken` + permission check) and middleware route gating — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts` — `verifyToken()`; and `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/middleware.ts` — `authMiddleware()`, `createRouteMatcher()`.
+* Stateful session verify for sensitive admin actions — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `SessionsResource`, method `verifySession()`.
+* Front-end gating components (`<Protect>`, `<AuthenticateWithRedirectCallback>`, `useAuth().has`) — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/components.tsx` — `Protect()`, `AuthenticateWithRedirectCallback()`; and `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/hooks.ts` — `useAuth()`.
+
 ## Security
 
 * **Domain enforcement first.** Only active members of the verified company domain can sign in at

@@ -23,6 +23,12 @@ NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.whitehatengineering.com
 AUTH_SECRET_KEY=sk_live_...
 ```
 
+**Implemented in code.** The server-side surface of this SDK lives in `auth-backend`:
+
+* `authMiddleware()` and `createRouteMatcher()`, plus the `auth`/`has()`/`protect()` object — `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/middleware.ts` — `authMiddleware()`, `createRouteMatcher()`, `getRequestAuth()`.
+* `getAuth(req)` (Pages Router) — `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/express.ts` — `getAuth()`.
+* The permission/role resolution behind `has()` / `protect()` — `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts` — `checkClaims()`.
+
 ## `authMiddleware()`
 
 Integrates OpenAuthFederated into your Next.js request pipeline. It runs on every matched

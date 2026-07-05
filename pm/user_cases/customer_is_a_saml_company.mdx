@@ -239,6 +239,21 @@ Customer employee browser ◀── Our SaaS app ──(Bearer JWT per request)�
                                                                           Allow / 403
 ```
 
+## Where this use case is implemented in code
+
+* Route the customer's login to their tenant's SSO connection, validate the assertion/token, enforce the verified domain, JIT-provision, and issue the org-scoped session — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()` (`handleCallback`, `handleSamlAcs`; `emailDomain()` for the domain check).
+* Customer-owned SAML 2.0 SP handshake (per-tenant IdP metadata, replay protection) — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts` — `buildSamlClient()`, `validateSamlAcs()`, class `InMemorySamlReplayStore`.
+* Runtime "does this user qualify for this tenant?" — token verify, then confirm `org_id` and live membership — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts` — `verifyToken()`; and `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `OrganizationsResource`, method `getOrganizationMembershipList()`.
+* Tenant permission checks — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts` — `hasPermission()`, `checkClaims()`.
+* Immediate revocation for sensitive actions — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `SessionsResource`, methods `verifySession()`, `revokeSession()`.
+* Tenant onboarding/switching UI (`<CreateOrganization>`, `<OrganizationSwitcher>`, `<OrganizationList>`) — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/components.tsx` — `CreateOrganization()`, `OrganizationSwitcher()`, `OrganizationList()`.
+
 ## Security
 
 * **Tenant isolation by verified domain.** A domain is claimed by exactly one org; domain

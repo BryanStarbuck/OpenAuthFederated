@@ -57,6 +57,29 @@ OpenAuthFederated provides a complete, self-hostable identity layer:
 * **UI components** — drop-in sign-in / sign-up / account-management UI so apps don't rebuild auth
   screens.
 
+## Where the platform is implemented in code
+
+Each deliverable above is implemented in the two library packages under
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/` (`auth-backend`, the Node/SP library, and
+`auth-react`, the browser SDK):
+
+* Federated SSO (SAML 2.0) — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts` — `buildSamlClient()`, `validateSamlAcs()`, `samlSpMetadata()`.
+* Federated SSO (OIDC) + the SP callback that validates, enforces domain, JIT-resolves, and issues the session — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()` (`handleSsoStart`, `handleCallback`).
+* Domain enforcement — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `emailDomain()` + the domain check inside `handleCallback`.
+* RBAC (`<feature>:<action>` permission/role checks) — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts` — `hasPermission()`, `hasRole()`, `checkClaims()`.
+* Hybrid session model (stateless verify + server-side revocable records) — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts` — `verifyToken()`; and `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/session-store.ts` — class `FileSessionStore`.
+* Organizations / multi-tenancy administration — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `AuthClient` (`organizations`, `users`, `sessions` resources).
+* Security headers + `SameSite`/`HttpOnly` cookies — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `setSecurityHeaders()`, `setCookie()`.
+* UI components (drop-in sign-in / sign-up / account menu) — implemented in code:
+  `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/components.tsx` — `SignIn()`, `SignUp()`, `UserButton()`.
+
 ## First real use
 
 The first consumer of OpenAuthFederated is an internal company web app gated to our company

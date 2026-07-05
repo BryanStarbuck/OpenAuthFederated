@@ -13,6 +13,9 @@ rest, since auth state hydrates asynchronously.
 > Brandless names like `useUser`, `useAuth`, and `useSession` are kept as-is. The only
 > renamed hook is `useOpenAuth` (the imperative client object).
 
+**Implemented in code.** Every hook on this page lives in one file:
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/hooks.ts` — `useUser()`, `useAuth()`, `useSession()`, `useSessionList()`, `useSignIn()`, `useSignUp()`, `useOrganization()`, `useOrganizationList()`, `useReverification()`, and `useOpenAuth()` (exported as `useFederated`). The reactive state they read is established by `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/context.tsx` — `FederatedProvider()`.
+
 ## `useUser`
 
 Access and manage the current user's profile data.

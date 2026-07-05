@@ -13,6 +13,9 @@ enforcement (OIDC `hd` + `email_verified`) rejects out-of-org accounts.
 
 All components must be rendered inside an [`<AuthProvider>`](./control.mdx#authprovider).
 
+**Implemented in code.** The sign-in/sign-out components live in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/components.tsx` — `SignIn()`, `SignUp()`, `SignInButton()`, `SignUpButton()`, `SignOutButton()`, `GoogleOneTap()`. The federated redirect they trigger is driven by `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/core.ts` — class `RealAuthCore`, method `authenticateWithRedirect()`.
+
 ## `<SignIn>`
 
 Renders the complete sign-in experience. Because authentication is federated, the rendered

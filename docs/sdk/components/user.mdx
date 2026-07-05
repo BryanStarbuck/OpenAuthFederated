@@ -10,6 +10,9 @@ Mount them inside an [`<AuthProvider>`](./control.mdx#authprovider); they read t
 user from context. Profile fields come from the federated identity (Google Workspace) plus
 any metadata the platform stores.
 
+**Implemented in code.** `<UserButton>` (avatar menu + sign-out) lives in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/components.tsx` — `UserButton()`, and the user/profile data it renders comes from `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/hooks.ts` — `useUser()`.
+
 ## `<UserButton>`
 
 An avatar that opens a menu with account actions — manage account, switch sessions, and sign
