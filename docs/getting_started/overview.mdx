@@ -36,6 +36,9 @@ Step by step:
 7. **Establish a session.** A server-side session record is created and a **hybrid session** is issued: a short-lived JWT access token (Bearer) plus a rotating, HttpOnly refresh cookie. The session record enables immediate revocation despite short token lifetimes.
 8. **App receives a short-lived JWT.** Your app verifies the JWT statelessly and the user is in.
 
+**Implemented in code.** The SP-initiated federation flow above (steps 1-8) is implemented in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()` (`handleSsoStart` starts the redirect; `handleCallback` / `handleSamlAcs` validate, enforce domain via `emailDomain()`, JIT-resolve via `defaultResolveGrants()`, and issue the session). Group→role→permission mapping is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts` — `checkClaims()`, and stateless JWT verification (step 8) is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts` — `verifyToken()`.
+
 ## Architecture overview
 
 ```

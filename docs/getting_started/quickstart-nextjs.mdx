@@ -46,6 +46,8 @@ See [Environment variables](./environment-variables.mdx) for the full reference.
 
 Create `middleware.ts` at the root of your project (next to `app/`). `authMiddleware()` makes the auth context available to every request and is required for the server helpers to work.
 
+**Implemented in code.** `authMiddleware()` is defined in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/middleware.ts` — `authMiddleware()`, and the `<AuthProvider>` you add in step 4 is `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/context.tsx` — `FederatedProvider()`.
+
 ```ts
 // middleware.ts
 import { authMiddleware } from '@auth/nextjs/server'

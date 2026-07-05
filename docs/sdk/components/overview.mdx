@@ -13,6 +13,9 @@ upstream-IdP flow — in the reference deployment, sign-in goes through the
 
 The components fall into five groups.
 
+**Implemented in code.** The drop-in components are defined in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/components.tsx` (e.g. `SignIn()`, `SignUp()`, `SignInButton()`, `SignOutButton()`, `UserButton()`, `GoogleOneTap()`, `OrganizationSwitcher()`, `OrganizationList()`, `CreateOrganization()`, `Show()`, `Protect()`, `AuthLoaded()`, `AuthenticateWithRedirectCallback()`), and the root provider in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/context.tsx` — `FederatedProvider()` (exported as `AuthProvider`).
+
 ## Authentication
 
 Pre-built flows for getting users in and out. `<SignIn>` / `<SignUp>` render the full

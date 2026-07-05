@@ -10,6 +10,9 @@ maps to a tenant; members carry roles derived from upstream IdP groups, and thos
 to `<feature>:<action>` permissions (authoritative in our DB). Mount them inside an
 [`<AuthProvider>`](./control.mdx#authprovider).
 
+**Implemented in code.** These organization components live in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/components.tsx` — `OrganizationSwitcher()`, `OrganizationProfile()`, `CreateOrganization()`, `OrganizationList()`. Switching the active org (which re-scopes permissions) is handled by `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/core.ts` — class `RealAuthCore`, method `setActiveOrg()`, surfaced through the `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/hooks.ts` hooks `useOrganization()` / `useOrganizationList()`.
+
 ## `<OrganizationSwitcher>`
 
 A dropdown for switching the active organization and (optionally) creating new ones. Setting
