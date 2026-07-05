@@ -1,0 +1,380 @@
+TITLE: Email Delivery Hero — Security & OpenAuthFederated-Usage Audit
+=====================================================================
+
+SCOPE: /Users/bryan/BGit/Bryan_git/EmailDeliveryHero/code (NestJS backend + Vite/React
+frontend, launchd/systemd/schtasks scheduler). Reviewed against the OpenAuthFederated
+(@auth/backend + @auth/react) library contract and general web-app security. Backend is
+the primary attack surface; the frontend auth wiring was also reviewed.
+
+SUMMARY: 9 findings — 1 High, 3 Medium, 5 Low. Split: 3 MISUSE (OpenAuthFederated
+integration), 6 APP-BUG (app-side security). The app follows an intentional
+"identify, don't gate" model (login optional, unauthenticated requests run as a built-in
+`default` user). That design decision is the root of the most serious findings: several
+state-changing and host-affecting endpoints (package install, OS scheduler install,
+audit triggers) are reachable by the unauthenticated `default` user. CORS is correctly
+locked to a localhost allowlist and fails closed, which limits browser-cross-origin
+attacks today, but the repo ships a Dockerfile/docker-compose for deployment; any deploy
+that widens CORS_ORIGINS exposes all of these unauthenticated endpoints to the network.
+
+POSITIVES VERIFIED (no finding): no secrets committed (.env is git-ignored and empty;
+Google client + session secret load out-of-repo); tokens are kept in memory only — none
+in localStorage/sessionStorage; every child process uses execFile/spawn with an argv
+array and no shell (no command injection in dig/openssl/whois/swaks/brew/npm/launchctl
+paths); the DMARC XML reader strips DOCTYPE and never resolves external entities (no XXE);
+helmet CSP + HSTS enabled; global exception filter never echoes internals for 5xx; no
+"Clerk"/"clark" strings present anywhere in code.
+
+TABLE OF CONTENTS
+-----------------
+1. Unauthenticated package installation (brew/npm) on the host [HIGH] [APP-BUG]
+2. Unauthenticated OS scheduler control + os.label path traversal [MEDIUM] [APP-BUG]
+3. Unauthenticated audit/domain endpoints = DNS-probe & amplification proxy [MEDIUM] [APP-BUG]
+4. 10-month session TTL with inactivity timeout effectively disabled [MEDIUM] [MISUSE]
+5. MTA-STS policy fetch is an SSRF with cert validation disabled [LOW] [APP-BUG]
+6. Token audience never enforced on verifyToken [LOW] [MISUSE]
+7. requireHostedDomain / hostedDomain left unset (hd claim not required) [LOW] [MISUSE]
+8. Unauthenticated client-error endpoint: log forging + log flooding [LOW] [APP-BUG]
+9. CSRF-style side effects via no-body simple POST endpoints [LOW] [APP-BUG]
+
+
+====
+1. Unauthenticated package installation (brew/npm) on the host [HIGH] [APP-BUG]
+
+SITUATION / PROBLEM: The Install module lets a caller install CLI tools (dig, openssl,
+whois, swaks, spamassassin, nmap, pnpm, pipx tools, etc.) via brew/npm/pipx. Every route
+on the controller is reachable by the unauthenticated `default` user — there is no
+@RequireRole / @RequirePermission on any of them. The controller comment even notes the
+`tools:install` permission hook exists "if a deployment wants to" but it is NOT applied.
+
+ROOT CAUSE: The app-wide "identify, don't gate" model (JwtAuthGuard always resolves a
+`default` user, never 401s) combined with no authorization decorator on
+InstallController. POST /api/install/run spawns package-manager processes with a 10-minute
+budget each.
+
+SCENARIO: On any instance reachable beyond the single trusted localhost user (a shared
+box, or a Docker deploy whose CORS/network is widened), an anonymous caller POSTs
+{"ids":["nmap","spamassassin",...]} and drives brew/npm installs. Package managers run
+arbitrary maintainer post-install scripts as the server user — an attacker who can also
+influence the tap/registry, or simply wants to burn CPU/disk/network, gets host-level
+effects with zero authentication. Even constrained to the fixed catalog, this is remote,
+unauthenticated triggering of software installation.
+
+RISK: Resource exhaustion (each install up to 10 min, serial jobs), host mutation, and
+post-install script execution as the service account. High impact, no auth required.
+
+REPRO STEPS:
+  1. curl -s http://localhost:9312/api/install/catalog   (enumerate installable ids)
+  2. curl -s -X POST http://localhost:9312/api/install/run \
+       -H 'Content-Type: application/json' -d '{"ids":["nmap"]}'
+  3. Observe a jobId returned and brew/npm spawned server-side (GET /api/install/run/:id).
+
+SOURCE FILES INVOLVED:
+  - code/packages/backend/src/modules/install/install.controller.ts:31-77 (no authz; run())
+  - code/packages/backend/src/modules/install/install.service.ts:74-90,102-194 (spawns brew/npm)
+  - code/packages/backend/src/modules/auth/jwt-auth.guard.ts:46-48 (never 401; default user)
+
+CALL COUNT: 1 unauthenticated controller (5 routes) → InstallService.start/runJob.
+
+FIX: Gate the whole InstallController (and at minimum POST /run and POST /detect) with
+@RequireRole("admin") or @RequirePermission("tools:install"), matching how
+SettingsController protects destructive actions. Do not rely on the UI hiding the page.
+
+
+====
+2. Unauthenticated OS scheduler control + os.label path traversal [MEDIUM] [APP-BUG]
+
+SITUATION / PROBLEM: The scheduler config and OS-artifact install/uninstall routes are all
+open to the `default` user (explicitly documented on the controller). PUT
+/api/scheduler/config accepts an arbitrary `os.label` string, and POST
+/api/scheduler/os/install then writes a launchd plist to a path DERIVED FROM that label and
+runs `launchctl load` on it.
+
+ROOT CAUSE: normalizeSchedule() accepts `rawOs.label` with only `.trim()` — no rejection of
+`/`, `..`, or absolute paths. The label flows into
+launchdPlistPath = join(homedir(), "Library","LaunchAgents", `${label}.plist`); Node's
+join() collapses `..` segments, so a label like "../../../../tmp/x/evil" escapes the
+LaunchAgents directory. installArtifact() writes the rendered plist there and calls
+`launchctl load -w <path>`.
+
+SCENARIO: An unauthenticated caller PUTs a crafted os.label, then POSTs os/install. The
+server writes a .plist to an attacker-chosen location (within what the service user can
+write) and loads it as a LaunchAgent. The plist ProgramArguments are fixed (curl or the
+in-repo node trigger script), so this is not direct arbitrary-command execution, but it is
+attacker-directed file write of structured content to an arbitrary path plus persistent
+LaunchAgent registration/unregistration — a real integrity/persistence primitive, again
+with no authentication.
+
+RISK: Arbitrary-path file write (path traversal), unwanted LaunchAgent persistence, and
+denial/tampering of the legitimate schedule. Medium (write target/content is constrained,
+but auth-free and traversal is real).
+
+REPRO STEPS:
+  1. curl -X PUT http://localhost:9312/api/scheduler/config \
+       -H 'Content-Type: application/json' -d '{"os":{"label":"../../../../tmp/edh/evil"}}'
+  2. curl -X POST http://localhost:9312/api/scheduler/os/install
+  3. Observe a plist written outside ~/Library/LaunchAgents and launchctl load invoked.
+
+SOURCE FILES INVOLVED:
+  - code/packages/backend/src/modules/scheduler/schedule-config.store.ts:152-157 (label unsanitized)
+  - code/packages/backend/src/modules/scheduler/os-artifact.ts:87-89 (launchdPlistPath join)
+  - code/packages/backend/src/modules/scheduler/os-artifact.ts:328-338 (write + launchctl load)
+  - code/packages/backend/src/modules/scheduler/scheduler.controller.ts:42-79 (routes ungated)
+
+CALL COUNT: 2 unauth routes (PUT config, POST os/install) → installArtifact().
+
+FIX: (a) Validate os.label against a strict pattern (e.g. ^[A-Za-z0-9._-]{1,120}$ and
+reject any that resolves outside ~/Library/LaunchAgents after path.resolve). (b) Gate the
+os/install, os/uninstall and config-write routes with @RequireRole("admin"). POST
+/scheduler/run may stay open for the OS trigger, but config/install must not.
+
+
+====
+3. Unauthenticated audit/domain endpoints = DNS-probe & amplification proxy [MEDIUM] [APP-BUG]
+
+SITUATION / PROBLEM: DomainsController (create/update/delete), AuditController (run,
+runAll, scoped re-runs, spot-check, dkim-discovery), ContentSampleController (upload),
+BlacklistsController and ReportsController are all open to the `default` user. An
+unauthenticated caller can add arbitrary domains and trigger audits that make the server
+perform many outbound DNS lookups (node:dns and shelled `dig`, incl. against explicit
+resolvers via the SPF cross-resolver path) plus RHSBL/URIBL queries.
+
+ROOT CAUSE: "identify, don't gate" leaves all read AND all audit-trigger endpoints
+ungated. Worse, the content-sample upload (PUT /api/audit/content-sample/:domainId) lets
+an attacker inject arbitrary link hostnames into the sample .eml; the Link/URL reputation
+checker extracts those and issues resolve4()/resolveTxt() for `<attacker-host>.<zone>`
+combinations — the server becomes the query origin for attacker-chosen names.
+
+SCENARIO: An attacker scripts domain-create + audit-run to use the box as a DNS query
+source (reflection/amplification, hiding their own IP, or enumerating internal split-horizon
+names that resolve only from the server's network). The FQDN regex (DOMAIN_RE) blocks raw
+IPs and single-label internal names, but an attacker who owns a real domain can point
+arbitrary subdomains at any address, so the "valid domain" check does not stop internal
+targeting via DNS.
+
+RISK: Server-as-proxy for DNS scanning/amplification, resource consumption, and light SSRF
+surface. Medium (no direct response exfiltration of internal HTTP in first round; the one
+outbound TCP connect path is finding #5 and is gated off by default).
+
+REPRO STEPS:
+  1. curl -X POST http://localhost:9312/api/domains -H 'Content-Type: application/json' \
+       -d '{"name":"attacker-owned.example"}'
+  2. curl -X POST http://localhost:9312/api/audit/run/<returned-id>
+  3. Observe server-side DNS/dig queries against the attacker-controlled name/subdomains.
+
+SOURCE FILES INVOLVED:
+  - code/packages/backend/src/modules/audit/audit.controller.ts:72-275 (no authz on any route)
+  - code/packages/backend/src/modules/domains/domains.controller.ts:17-61 (create/update/delete open)
+  - code/packages/backend/src/modules/audit/content-sample.controller.ts:97-114 (attacker-supplied links)
+  - code/packages/backend/src/modules/audit/checks/dns-util.ts:319-413 (shelled dig w/ optional resolver)
+  - code/packages/backend/src/modules/audit/checks/link-url-reputation/link-url-reputation.check.ts:239-271
+
+CALL COUNT: Multiple ungated controllers (audit, domains, content-sample, blacklists,
+reports) → AuditService fan-out → dns-util.
+
+FIX: Require at least authenticated company identity (@RequireRole for any authenticated
+role, or a dedicated permission) on audit-trigger and domain-mutation routes; keep pure
+reads open only if intended. Add a per-source rate limit on audit runs and cap
+domain-create for the `default` user.
+
+
+====
+4. 10-month session TTL with inactivity timeout effectively disabled [MEDIUM] [MISUSE]
+
+SITUATION / PROBLEM: buildAuthFrontend() sets sessionTtlSeconds AND inactivityTimeoutSeconds
+both to TEN_MONTHS_SECONDS (10*30*24*60*60 ≈ 25,920,000s). The library default is 7 days.
+Access tokens are correctly short (15 min), but the rotating refresh session — the thing
+that mints new access tokens — is valid for ~10 months and, because the inactivity timeout
+equals the absolute TTL, an idle session is never expired early.
+
+ROOT CAUSE: Deliberate "stay signed in for 10 months across restarts" policy overriding the
+library's conservative TTL, and setting inactivityTimeout to the same huge value (which
+nullifies the inactivity control the library provides).
+
+SCENARIO: A stolen/copied refresh cookie (from a shared machine, backup, or XSS on any
+future page) remains usable for the better part of a year. A FileSessionStore IS wired
+(getAppSessionStore), so admin/force-revocation is possible — but nothing expires the
+session on its own for ~10 months, so the capture window is enormous.
+
+RISK: Greatly enlarged credential-capture/replay window. Mitigated by having a sessionStore
+(revocation is at least possible) and HttpOnly + SameSite cookies.
+
+REPRO STEPS: Sign in, capture the session cookie, leave it idle for weeks; it continues to
+mint fresh 15-min access tokens with no inactivity cutoff.
+
+SOURCE FILES INVOLVED:
+  - code/packages/backend/src/modules/auth/auth-frontend.ts:129 (TEN_MONTHS_SECONDS)
+  - code/packages/backend/src/modules/auth/auth-frontend.ts:154 (sessionTtlSeconds)
+  - code/packages/backend/src/modules/auth/auth-frontend.ts:156 (inactivityTimeoutSeconds = same)
+
+CALL COUNT: 1 createFederatedFrontend() config.
+
+FIX: Set a much shorter absolute TTL (days, not months) and a genuinely shorter
+inactivityTimeoutSeconds (e.g. hours) so idle sessions expire well before the absolute cap.
+Rely on the rotating cookie for "stays signed in" rather than a 10-month absolute lifetime.
+
+
+====
+5. MTA-STS policy fetch is an SSRF with cert validation disabled [LOW] [APP-BUG]
+
+SITUATION / PROBLEM: The MTA-STS checker fetches https://mta-sts.<domain>/.well-known/
+mta-sts.txt with rejectUnauthorized:false (TLS cert intentionally not enforced, so the cert
+verdict can be surfaced as a finding). Combined with the unauthenticated audit trigger
+(finding #3), an attacker who owns a domain can point `mta-sts.<domain>` at an internal IP
+and have the server connect to it, ignoring certificate validity.
+
+ROOT CAUSE: rejectUnauthorized:false on an outbound request whose host is derived from
+user-controlled domain input. The host is a valid FQDN (regex-checked) but its DNS can
+resolve anywhere the attacker chooses.
+
+SCENARIO: Attacker registers evil.example, points mta-sts.evil.example at 169.254.169.254
+or an internal service, enables the MTA-STS HTTPS probe, and triggers an audit; the server
+performs the GET and returns status/body/redirect signals in the audit result.
+
+RISK: SSRF to internal hosts with disabled cert checks. IMPORTANT MITIGATION: this HTTPS
+round is gated behind the admin feature flag checks.mtaSts.httpsProbeEnabled, which
+defaults to FALSE — so it is inert unless an admin enables it. Hence Low.
+
+REPRO STEPS: Enable checks.mtaSts.httpsProbeEnabled; add an attacker-owned domain whose
+mta-sts.<domain> A record points internal; run the audit; inspect results.policyStatus.
+
+SOURCE FILES INVOLVED:
+  - code/packages/backend/src/modules/audit/checks/mta-sts/mta-sts.check.ts:213-313 (fetchPolicy)
+  - code/packages/backend/src/modules/audit/checks/mta-sts/mta-sts.check.ts:235 (rejectUnauthorized:false)
+  - code/packages/backend/src/modules/audit/checks/mta-sts/mta-sts.check.ts:516-541 (flag gate)
+
+CALL COUNT: 1 fetch path, gated by one feature flag.
+
+FIX: Before connecting, resolve the policy host and refuse private/reserved/link-local IP
+ranges (RFC 1918, 127/8, 169.254/16, ::1, fc00::/7); keep the no-redirect + capped-body
+controls already present. Consider requiring auth on the audit trigger regardless.
+
+
+====
+6. Token audience never enforced on verifyToken [LOW] [MISUSE]
+
+SITUATION / PROBLEM: The federated strategy calls federatedClient.verifyToken(token) with
+no `audience` argument, and no `audience` is configured on createFederatedFrontend. Per the
+library contract, audience is stamped but the embedded verifyToken does NOT enforce it
+unless the app passes `audience` on verify — so audience binding is silently absent.
+
+ROOT CAUSE: Audience omitted at both mint config and verify call. (The app does set a
+distinct issuer "email-delivery-hero" and uses a per-app on-disk HS256 secret, which
+already prevents cross-app token reuse — so practical exploitability is low.)
+
+SCENARIO: If two apps ever shared a signing secret, or a future refactor moved to a shared
+key/JWKS, tokens minted for another audience would be accepted here. Today the unique
+per-app secret is the only thing stopping that; audience is the intended second control and
+is missing.
+
+RISK: Loss of defense-in-depth against token confusion across services. Low given the
+per-app secret.
+
+SOURCE FILES INVOLVED:
+  - code/packages/backend/src/modules/auth/auth.strategy.ts:65 (verifyToken, no audience)
+  - code/packages/backend/src/modules/auth/auth-frontend.ts:148-164 (config has issuer, no audience)
+
+CALL COUNT: 1 verify path.
+
+FIX: Set an `audience` in the frontend config and pass the same `audience` to verifyToken so
+the library enforces it.
+
+
+====
+7. requireHostedDomain / hostedDomain left unset (hd claim not required) [LOW] [MISUSE]
+
+SITUATION / PROBLEM: The Google connection sets hostedDomain only from GOOGLE_HOSTED_DOMAIN,
+which is undefined by default, and requireHostedDomain is never passed. Per the contract,
+requireHostedDomain defaults FALSE, so a Google identity whose email domain merely matches
+an allowlisted domain can pass without proving it is a real Workspace (hd) account. The
+app's own strategy recheck uses `hd || emailDomain(email)`, i.e. it falls back to the email
+string when the hd claim is absent.
+
+ROOT CAUSE: Hosted-domain enforcement not enabled; domain trust rests on the email-address
+string rather than the verified Workspace `hd` claim.
+
+SCENARIO: The practical risk is low because a consumer Google account cannot normally carry
+an @whitehatengineering.com / @act3ai.com email unless that domain is actually a Workspace
+the org controls. But the intended hardening (require the hd claim, verified email) is off,
+so the allowlist leans on a claim that is weaker than the Workspace assertion it is meant to
+represent.
+
+RISK: Weaker-than-intended domain enforcement / potential acceptance of a non-Workspace
+identity asserting an allowlisted email domain. Low.
+
+SOURCE FILES INVOLVED:
+  - code/packages/backend/src/modules/auth/auth-frontend.ts:88-94,117-125 (allowedDomains, hostedDomain undefined)
+  - code/packages/backend/src/modules/auth/auth.strategy.ts:68-79 (hd || emailDomain fallback)
+
+CALL COUNT: 1 connection config + 1 strategy recheck.
+
+FIX: Set requireHostedDomain:true (and/or a concrete hostedDomain) and require
+email_verified so only real Workspace accounts on the allowed hosted domain(s) authenticate.
+
+
+====
+8. Unauthenticated client-error endpoint: log forging + log flooding [LOW] [APP-BUG]
+
+SITUATION / PROBLEM: POST /api/health/client-error is @Public() and writes the
+caller-supplied message, url and stack straight into the app's error trail (error.err) with
+no control-character sanitization. Elsewhere (auth.strategy sanitizeForLog) the app strips
+control chars before logging token-controlled strings; this endpoint does not.
+
+ROOT CAUSE: Direct logging of untrusted body fields on an unauthenticated route.
+
+SCENARIO: An attacker sends newline/CR-laced messages to inject forged log lines (log
+forging / trail confusion) or floods the endpoint to bloat error.err (log-volume DoS / disk
+fill).
+
+RISK: Log integrity/forensics tampering and disk-fill DoS. Low.
+
+REPRO STEPS:
+  curl -X POST http://localhost:9312/api/health/client-error \
+    -H 'Content-Type: application/json' \
+    -d '{"message":"line1\n[ERROR] forged admin action","level":"error"}'
+
+SOURCE FILES INVOLVED:
+  - code/packages/backend/src/modules/health/health.controller.ts:70-84 (logs body fields raw)
+  - code/packages/backend/src/shared/logging.ts (sink)
+
+CALL COUNT: 1 public route.
+
+FIX: Sanitize control chars (reuse sanitizeForLog), cap field lengths (DTO already bounds
+some), and rate-limit the endpoint.
+
+
+====
+9. CSRF-style side effects via no-body simple POST endpoints [LOW] [APP-BUG]
+
+SITUATION / PROBLEM: Because authentication is optional and unauthenticated requests run as
+the `default` user, several state-changing POSTs take NO request body and thus qualify as
+CORS "simple requests" (no preflight): e.g. POST /api/audit/run/:domainId, POST
+/api/scheduler/os/install, POST /api/scheduler/run. A malicious web page the trusted user
+visits can fire these cross-origin at http://localhost:9312 without a preflight; CORS blocks
+reading the response but the side effect still executes.
+
+ROOT CAUSE: The credential-based CSRF defenses (SameSite cookie, CORS allowlist) protect the
+authenticated session and JSON-body endpoints (which DO trigger preflight and are blocked
+cross-origin), but they do not protect endpoints whose effect requires no auth and no
+non-simple content-type.
+
+SCENARIO: A user with the app running on localhost browses a hostile site that issues
+`fetch('http://localhost:9312/api/scheduler/os/install',{method:'POST'})` — the request
+reaches the server and executes as the `default` user.
+
+RISK: Drive-by triggering of audits / scheduler installs from any site the user visits. Low
+(localhost-scoped, no data read back, most damaging endpoints have bodies and are
+preflight-protected).
+
+SOURCE FILES INVOLVED:
+  - code/packages/backend/src/main.ts:61-75 (CORS allowlist — protects reads/preflight only)
+  - code/packages/backend/src/modules/audit/audit.controller.ts:115-140,268-274 (no-body POST)
+  - code/packages/backend/src/modules/scheduler/scheduler.controller.ts:48-79 (no-body POST)
+
+CALL COUNT: Several no-body POST routes.
+
+FIX: Require auth on state-changing routes (this also resolves #1/#2/#3), and/or require a
+custom header (e.g. X-Requested-With) or CSRF token so these stop being CORS-simple requests.
+
+
+====
+END OF REPORT

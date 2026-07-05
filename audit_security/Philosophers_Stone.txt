@@ -1,0 +1,465 @@
+================================================================================
+SECURITY AUDIT — Philosophers Stone
+================================================================================
+
+Scope: /Users/bryan/BGit/Bryan_git/Philosophers_Stone/code
+       NestJS backend (packages/backend), Vite/React frontend (packages/frontend),
+       shared zod schemas (packages/shared), the `phil` CLI, and the app's use of
+       the OpenAuthFederated library (@auth/backend + @auth/react, linked from
+       ~/BGit/Bryan_git/OpenAuthFederated/code/packages/*).
+
+Summary: 10 findings — 1 HIGH, 3 MEDIUM, 5 LOW, 1 INFO.
+         The single most serious issue is an authentication bypass: in the DEFAULT
+         "local" deployment mode the backend hands full admin to ANY caller
+         (including remote, non-loopback clients), because the mode-aware guard
+         never re-checks that a "local" request actually came from loopback and the
+         server binds all interfaces. The library itself is used mostly correctly
+         (distinct cookiePrefix, out-of-repo generated secret, FileSessionStore for
+         revocation, tokens in memory not localStorage); the misuse findings are
+         hosted-domain enforcement left off, a broad domain fallback, and
+         cookieSecure defaulting off.
+
+================================================================================
+TABLE OF CONTENTS  (highest severity first)
+================================================================================
+1. Local mode grants full admin to any remote caller (auth bypass)        [HIGH]   [APP-BUG]
+2. Google Workspace hosted-domain enforcement off + gmail.com fallback     [MEDIUM] [MISUSE]
+3. cookieSecure (and security headers) default OFF in server mode          [MEDIUM] [MISUSE]
+4. Communities default to world_read = true                                [MEDIUM] [APP-BUG]
+5. Verbose 500 responses leak raw internal error messages/paths            [LOW]    [APP-BUG]
+6. Unauthenticated /api/client-error: log injection + log-flood DoS        [LOW]    [APP-BUG]
+7. /tmp state-dir fallback can expose the HS256 signing secret             [LOW]    [APP-BUG]
+8. CORS reflects any localhost/127.0.0.1 origin with credentials           [LOW]    [APP-BUG]
+9. JFK Social "publish" is an unauthenticated stub (future integration)    [LOW]    [MISUSE]
+10. AI first-principles check is a stub — prompt-injection note for later   [INFO]   [APP-BUG]
+
+================================================================================
+DETAILS
+================================================================================
+
+1. Local mode grants full admin to any remote caller (auth bypass)  [HIGH][APP-BUG]
+
+SITUATION / PROBLEM
+The two global guards (JwtAuthGuard then RolesGuard, registered as APP_GUARD in
+app.module.ts:15-17) implement a "mode-aware" policy: in "local" mode the guard
+attaches the DEFAULT_USER and, crucially, grants it the "admin" role so that a
+single citizen on their own box has full control. The default deployment mode is
+"local" (schemas.ts:17, DeploymentModeSchema.default("local")) and a fresh install
+is `configured:false`. The bug: nothing ties "local mode" to the request actually
+originating from loopback. JwtAuthGuard.resolveMode() (jwt-auth.guard.ts:29-35)
+returns getAppConfig().deployment.mode verbatim; it only falls back to the loopback
+check when reading the config THROWS. So for any normal request in local mode —
+regardless of source IP — handleRequest() returns { ...DEFAULT_USER, roles:["admin"] }
+(jwt-auth.guard.ts:48-52), and any real signed-in user is likewise auto-promoted to
+admin (jwt-auth.guard.ts:44). The server binds all interfaces: main.ts:54 calls
+`app.listen(port)` with no host argument, so it listens on 0.0.0.0/::.
+
+ROOT CAUSE
+The authors correctly loopback-guard the one-time first-run setup write
+(deployment.controller.ts:25-29 assertLoopback) and set `trust proxy` to loopback
+(main.ts:21), showing awareness that remote clients must not seize an install — but
+they did NOT apply the same loopback restriction to per-request auth in local mode,
+and they bind the listener to every interface.
+
+SCENARIO
+A user runs the app on a laptop on shared/office/coffee-shop Wi-Fi (or a
+misconfigured host) in the default local mode. Another device on the same network
+requests http://<laptop-ip>:9333/api/communities. The guard treats it as the
+local admin, returning every community; the attacker can then create/edit/DELETE
+any community, area, or decision (all mutating routes only require the service-level
+"admin ⇒ owner" grant, community-store.ts:90-91), change the deployment mode via
+PATCH /api/deployment (RequireRole("admin") is satisfied), and read all state.
+
+RISK
+Full unauthenticated read/write/delete of all application data and configuration
+by any network-adjacent attacker whenever the app runs in its default mode on a
+non-loopback-only interface. This is a complete authentication/authorization bypass.
+
+REPRO STEPS
+1. Start the backend with default config (mode=local).
+2. From another host on the LAN: curl http://<host>:9333/api/communities
+   → returns 200 with all communities (treated as admin), no token.
+3. curl -X DELETE http://<host>:9333/api/communities/charlie_kirk → 200, deleted.
+
+SOURCE FILES INVOLVED
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/auth/jwt-auth.guard.ts:29-35, 37-54, 57-60
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/main.ts:53-54
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/app.module.ts:15-17
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/shared/src/schemas.ts:14-20 (mode default "local")
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/communities/community-access.util.ts:23-30
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/community-store.ts:90-91
+
+CALL COUNT
+Affects every controller (all are behind the two global guards): communities,
+areas, decisions, deployment(GET/PATCH), auth/me — i.e. the whole API.
+
+FIX
+In local mode, require the request to actually be loopback before attaching the
+admin default user: reuse isLoopback(req) in handleRequest and treat any non-loopback
+local-mode request as unauthenticated (401), OR bind the listener to 127.0.0.1 when
+mode==="local" (app.listen(port, "127.0.0.1")). Do not grant admin to remote peers.
+Also stop auto-promoting arbitrary authenticated users to admin (line 44) unless the
+box is loopback-only.
+
+====
+
+2. Google Workspace hosted-domain enforcement off + gmail.com fallback  [MEDIUM][MISUSE]
+
+SITUATION / PROBLEM
+The charter's canonical use is federating to Google Workspace and enforcing the
+hosted-domain (`hd`) claim so only real Workspace members of an allowed domain get
+in. This app never sets `requireHostedDomain` on createFederatedFrontend
+(auth-frontend.ts:55-74), so it defaults to FALSE (library default confirmed in
+OpenAuthFederated/.../frontend.ts:217-222 and :517). With it off, the library
+accepts a consumer account whose *email domain* matches allowedDomains even if it
+carries no `hd` claim. Worse, oafAllowedDomains() falls back to
+["gmail.com","act3ai.com","whitehatengineering.com"] whenever no allow-list is
+configured (auth-frontend.ts:39-41). "gmail.com" on the allow-list means essentially
+any personal Google account can complete the OIDC round-trip.
+
+ROOT CAUSE
+requireHostedDomain not passed; a permissive hard-coded domain fallback that
+includes the world-open gmail.com; no verified-Workspace requirement.
+
+SCENARIO
+An install intended for a company domain, but with the access config left at
+defaults, lets any random @gmail.com user complete sign-in and obtain a session.
+
+RISK
+Domain-restricted sign-in is not actually domain-restricted; personal Gmail
+accounts satisfy "Workspace" enforcement. Note the practical blast radius is
+limited by defense-in-depth: in *server* mode the NestJS passport strategy
+independently re-checks the app's own allow-list (auth.strategy.ts:13-19, 35-38),
+and the default access config (allow_companies=false, allow_individuals=false,
+schemas.ts:31-37) is fail-closed, so a defaulted server install rejects everyone at
+the strategy. The exposure is real when an admin allow-lists a company domain
+(a personal Gmail whose local part collides is not blocked by hd) and in local mode,
+where the strategy performs no allow-list check at all.
+
+REPRO STEPS
+1. Configure Google creds, leave access config empty, mode=server, allow-list
+   "whitehatengineering.com" via AUTH_ALLOWED_DOMAINS only (which feeds the OIDC
+   allowedDomains but sets no hd requirement).
+2. Sign in with a consumer Google account whose email domain is on the list → the
+   OIDC layer accepts it because hd is not required.
+
+SOURCE FILES INVOLVED
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/auth/auth-frontend.ts:24-42, 55-74
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/auth/auth.strategy.ts:13-19, 33-38
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/shared/src/schemas.ts:30-37
+(library) /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts:217-222, 517
+
+CALL COUNT
+One config site (auth-frontend.ts buildAuthFrontend), governs all sign-ins.
+
+FIX
+Pass requireHostedDomain: true when federating to Google Workspace, and remove
+gmail.com from the fallback (or drop the fallback entirely and fail closed when no
+allow-list is configured). Keep the server-mode strategy re-check as the
+authoritative gate.
+
+====
+
+3. cookieSecure (and security headers) default OFF in server mode  [MEDIUM][MISUSE]
+
+SITUATION / PROBLEM
+cookieSecure is derived solely from `process.env.COOKIE_SECURE === "true"`
+(auth-frontend.ts:53), and securityHeaders is bound to the same flag
+(auth-frontend.ts:70-71). If COOKIE_SECURE is unset — which it is by default; the
+.env/.env.example ship it commented out and even suggest `# COOKIE_SECURE=false`
+(.env:11) — the session cookie and the rotating HttpOnly refresh cookie are issued
+WITHOUT the Secure attribute, and the library's security headers are disabled.
+
+ROOT CAUSE
+Secure-cookie posture is opt-in via an easily-forgotten env var rather than keyed
+to the deployment mode; server mode does not force it on.
+
+SCENARIO
+A "server" (multi-user, central) deployment is placed behind HTTPS but the operator
+forgets COOKIE_SECURE=true. Cookies are sent over any plaintext hop (e.g. HTTP →
+proxy) and can be captured by a network attacker, who then replays the session.
+
+RISK
+Session/refresh cookie theft over non-TLS transport; loss of CSP/HSTS-style headers
+the library would otherwise emit. Directly undermines the library's "HTTPS only,
+Secure + HttpOnly cookies" security contract.
+
+REPRO STEPS
+1. Deploy in server mode without COOKIE_SECURE=true.
+2. Observe Set-Cookie for the session lacks `Secure`.
+
+SOURCE FILES INVOLVED
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/auth/auth-frontend.ts:53, 70-71
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/main.ts:23-25 (helmet HSTS also tied to `secure`)
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/.env:11
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/.env.example:11
+
+CALL COUNT
+One config site; affects all cookies in server deployments.
+
+FIX
+Force cookieSecure=true (and securityHeaders=true) whenever deployment mode is
+"server", regardless of COOKIE_SECURE; only allow it off for loopback-only local
+dev. Remove the misleading `# COOKIE_SECURE=false` hint.
+
+====
+
+4. Communities default to world_read = true  [MEDIUM][APP-BUG]
+
+SITUATION / PROBLEM
+CommunityAccessSchema.world_read defaults to true (schemas.ts:122). Every newly
+created community sets world_read = true (communities.service.ts:71), and the seeded
+"Charlie Kirk" / "Puppet Master" communities are seeded world_read = true
+(community-store.ts:275). accessLevel() grants "reader" to anyone when world_read is
+set (community-store.ts:96). In server mode that means every allow-listed user can
+read every community and all its areas/decisions by default, whether or not the
+owner intended it.
+
+ROOT CAUSE
+"Open by default" access model; the safer default for sensitive investigation
+content (the app hosts Charlie Kirk / "Puppet Master" investigations) would be
+world_read = false.
+
+SCENARIO
+A citizen creates a private-feeling community and adds sensitive decisions. Any
+other allow-listed account immediately sees it in GET /api/communities and can read
+every decision, because world_read was silently true.
+
+RISK
+Unintended broad disclosure of investigation content across all users of a
+server deployment. IDOR-by-default (though it is a deliberate access flag, not a
+missing check).
+
+REPRO STEPS
+1. Server mode, two allow-listed users A and B.
+2. A creates a community and decisions.
+3. B calls GET /api/communities → sees A's community with access "reader".
+
+SOURCE FILES INVOLVED
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/shared/src/schemas.ts:117-124
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/communities/communities.service.ts:64-72
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/community-store.ts:90-97, 265-278
+
+CALL COUNT
+Default on every community creation + 2 seeded communities.
+
+FIX
+Default world_read to false; require an explicit owner action to make a community
+world-readable, surfaced clearly in the UI.
+
+====
+
+5. Verbose 500 responses leak raw internal error messages/paths  [LOW][APP-BUG]
+
+SITUATION / PROBLEM
+AllExceptionsFilter returns the raw Error.message to the client for any
+non-HttpException (all-exceptions.filter.ts:22-23) and serializes it into the
+response body (line 32) even for 500s. Internal errors here often contain absolute
+filesystem paths, e.g. writeYaml/writeText throw "writeYaml failed for
+/Users/<user>/T/_philosophers_stone/communities/.../decision_3.yaml: ..."
+(yaml-store.ts:50, text-store.ts:20).
+
+ROOT CAUSE
+The catch-all filter does not mask 5xx messages; it echoes exception.message.
+
+SCENARIO
+A disk/permission error during a decision write returns a 500 whose body reveals the
+server's home directory and internal state layout to any caller.
+
+RISK
+Information disclosure (usernames, absolute paths, internal structure) aiding further
+attacks. Low on its own.
+
+SOURCE FILES INVOLVED
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/all-exceptions.filter.ts:12-13, 22-23, 26-32
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/yaml-store.ts:44-52
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/text-store.ts:14-22
+
+CALL COUNT
+Every unhandled 5xx across the API.
+
+FIX
+For status >= 500, return a generic "Internal server error" to the client and keep
+the detailed message only in the server log (which it already writes at line 27).
+
+====
+
+6. Unauthenticated /api/client-error: log injection + log-flood DoS  [LOW][APP-BUG]
+
+SITUATION / PROBLEM
+POST /api/client-error is @Public (health.controller.ts:15-19) and writes the
+client-supplied message/stack verbatim into error.err via appLogger.error. The
+logger builds a line by direct interpolation with no newline sanitization
+(logging.ts:9-10). An attacker can embed "\n" in the message to forge additional log
+lines, and can call the endpoint unboundedly to flood the log file.
+
+ROOT CAUSE
+Unauthenticated, unsanitized, unrate-limited sink writing attacker input to a shared
+log file.
+
+SCENARIO
+Attacker POSTs {"message":"legit\n[ERROR] [Auth] admin login from 1.2.3.4"} to forge
+audit entries, or scripts thousands of large POSTs to fill the disk holding
+~/T/_philosophers_stone (which also holds all app state).
+
+RISK
+Log forgery / anti-forensics and a disk-exhaustion DoS that can also break state
+writes. Low.
+
+SOURCE FILES INVOLVED
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/health/health.controller.ts:14-20
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/logging.ts:9-23
+
+CALL COUNT
+One public endpoint.
+
+FIX
+Strip CR/LF from logged client input, cap message length, and rate-limit (or
+size-cap/rotate) client-error logging.
+
+====
+
+7. /tmp state-dir fallback can expose the HS256 signing secret  [LOW][APP-BUG]
+
+SITUATION / PROBLEM
+resolveStateDir() falls back to os.tmpdir() (typically /tmp) when homedir() is
+unavailable (state-dir.ts:13-19). The auth session secret is stored at
+<stateDir>/.auth_session_secret (state-dir.ts:55-57) and is the HS256 signing key
+for all tokens. On a shared multi-user host, /tmp/_philosophers_stone is a
+predictable, world-accessible location; another local user could pre-create the
+directory (influencing permissions) or read the secret.
+
+ROOT CAUSE
+World-writable fallback location for security-sensitive files, created with default
+mkdir permissions.
+
+SCENARIO
+On a server where the service account has no resolvable home, the signing secret is
+written under /tmp where a co-tenant reads it and forges valid admin tokens.
+
+RISK
+Signing-key disclosure → token forgery. Low (requires the unusual no-home fallback
+and a shared host).
+
+SOURCE FILES INVOLVED
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/config/state-dir.ts:7-27, 54-57
+
+FIX
+Fail fast (refuse to start in server mode) rather than falling back to /tmp; if a
+fallback is kept, create the dir and secret file with 0700/0600 and a per-install
+random subdirectory.
+
+====
+
+8. CORS reflects any localhost/127.0.0.1 origin with credentials  [LOW][APP-BUG]
+
+SITUATION / PROBLEM
+enableCors reflects (returns allowed) ANY origin matching
+/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/ with credentials:true
+(main.ts:32-41). Any local web page (any port, http or https) can make credentialed
+cross-origin calls to the API.
+
+ROOT CAUSE
+Broad origin allow-list keyed to hostname rather than an exact configured origin.
+
+SCENARIO
+On a developer/local box, a malicious page served from any localhost port could ride
+the user's cookie-based session. Impact is limited because it requires an
+attacker-controlled origin on the victim's own localhost; on a real remote server the
+victim's browser Origin would not be localhost.
+
+RISK
+Low; mainly a local-dev CSRF-adjacent surface.
+
+SOURCE FILES INVOLVED
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/main.ts:27-41
+
+FIX
+In server mode, restrict CORS to the explicitly configured CORS_ORIGINS only; do not
+blanket-allow all localhost origins when credentials are enabled.
+
+====
+
+9. JFK Social "publish" is an unauthenticated stub (future integration)  [LOW][MISUSE]
+
+SITUATION / PROBLEM
+DecisionsService.cast() with body.publish===true only flips
+d.fix.published_to_jfk_social = true (decisions.service.ts:138-142); there is no
+actual external call, no credentials, no network egress today. So there is no live
+SSRF/credential-leak/unauthenticated-publish risk yet — but the charter says the app
+"can publish to JFK Social," and the wiring point is here.
+
+ROOT CAUSE
+Placeholder integration; flagged so it is not later wired insecurely.
+
+RISK
+None currently. Future risk if the real integration: (a) trusts the client's
+publish flag without re-checking authorization, (b) embeds JFK Social credentials in
+repo/logs, or (c) forwards user-controlled URLs/refs (SSRF).
+
+SOURCE FILES INVOLVED
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/decisions/decisions.service.ts:123-144
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/decision-markdown.ts:67-74
+
+FIX
+When implemented: keep JFK Social creds out of repo (out-of-repo credentials file
+like the Google creds), verify write access server-side, and never place
+user-supplied content into request URLs/hosts.
+
+====
+
+10. AI first-principles check is a stub — prompt-injection note for later  [INFO][APP-BUG]
+
+SITUATION / PROBLEM
+aiCheck() calls a deterministic local heuristic reasonFromFirstPrinciples()
+(decisions.service.ts:96-121, 147-185); there is no live LLM call, so there is no
+prompt-injection surface today. The code comment says "wiring the live Claude call
+is a drop-in here," and it hard-codes model "claude-opus-4-8". Decision content
+(titles, questions, evidence statements, sources) is fully attacker/writer
+controlled and schema-validated only for shape, not content.
+
+RISK
+None currently. When the live model call is added, community writers' free-text
+(statements/notes/sources) must not be concatenated into a system/privileged prompt
+that can trigger actions; treat it strictly as untrusted data.
+
+SOURCE FILES INVOLVED
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/decisions/decisions.service.ts:93-121, 147-185
+/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/shared/src/schemas.ts:168-243
+
+FIX
+When wiring the real model: sandbox the decision text as data, never as instructions;
+do not let the model's output drive privileged/state-changing actions without an
+independent server-side authorization check.
+
+====
+
+ADDITIONAL NOTES (verified NON-issues / good practices)
+- Library used correctly in several respects: distinct cookiePrefix "oaf_phil"
+  (not the colliding default "oaf") — auth-frontend.ts:68; FileSessionStore supplied
+  so sign-out revocation works — auth-frontend.ts:69; sessionSecret is generated
+  out-of-repo via loadOrCreateSecret(<stateDir>/.auth_session_secret), not committed
+  and not a placeholder — auth-frontend.ts:66, state-dir.ts:54-57; verifyToken is
+  used as-is (algorithms pinned by the library, not forked) — auth.strategy.ts:32.
+- Frontend keeps the token in memory (via @auth/react getToken through the axios
+  bridge) and relies on the HttpOnly cookie; no localStorage/sessionStorage token
+  storage in source — axios.ts:17-28, AuthBridge.tsx:7-19.
+- No committed .env (only .env.example is tracked; .env is gitignored). No Google
+  client secret in the repo.
+- Path-segment safety is enforced: community/area keys must match ^[a-z0-9_]+$
+  (community-store.ts:34-37, 116, 151) and user keys are sanitized
+  (config-store.ts:37-42); no path traversal found in the flat-file store.
+- The `phil` CLI only edits local flat files (config.yaml) and stores no
+  tokens/secrets — cli.ts:1-38.
+- The audience "stamped-but-not-enforced" footgun is NOT triggered: the app configures
+  no audience on createFederatedFrontend and passes none to verifyToken, so nothing
+  is stamped and nothing needs enforcing (consistent).
+- No literal "Clerk"/"clerk"/"clark" strings found in code, comments, or docs.
+- Every NestJS controller sits behind the two global guards; protected routes are not
+  individually forgotten — public routes are explicitly @Public (health,
+  deployment/config, deployment/setup [loopback-guarded], client-error). The
+  authorization weakness is the local-mode grant in finding #1, not a missing guard.
+
+================================================================================
+END OF REPORT
+================================================================================

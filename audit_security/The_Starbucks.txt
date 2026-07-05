@@ -1,0 +1,348 @@
+================================================================================
+SECURITY AUDIT — The Starbucks (Starbuck Family Hub)
+================================================================================
+
+SCOPE: /Users/bryan/BGit/Bryan_git/the_starbucks/code ONLY (NestJS backend +
+Vite/React frontend). Private, login-only family hub sharing notes / resources /
+member directory, embedding the OpenAuthFederated auth library (@auth/backend +
+@auth/react). Library treated as hardened source of truth
+(/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/*/src). Also spot-
+checked repo charter (code-only-under-/code) and forbidden-name rule.
+
+SUMMARY: 6 findings — 0 CRITICAL, 0 HIGH, 2 MEDIUM, 4 LOW. No forged-token,
+weak-secret, CORS-wildcard, localStorage-token, or missing-guard issue found:
+the global JwtAuthGuard is wired app-wide, the owner gate is server-authoritative,
+tokens live in memory only, CORS fails closed, issuer IS enforced (library
+fallback), and the session secret is loaded out-of-repo. The findings are
+about over-long sessions, a login gate that can silently degrade to domain-only,
+and a couple of small unauthenticated attack surfaces.
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1. 10-month session TTL with inactivity timeout neutralized [MEDIUM] [MISUSE]
+2. Login gate degrades to domain-only; authoritative member list not enforced at login [MEDIUM] [MISUSE]
+3. Unauthenticated client-error endpoint: log forgery + unbounded flooding [LOW] [APP-BUG]
+4. Unauthenticated auth-config endpoint discloses absolute server path / OS username [LOW] [APP-BUG]
+5. Shared notes/resources: no per-item authorization and no delete audit [LOW] [APP-BUG]
+6. Code outside /code (charter violation): mac_tools/code native app + installers [LOW] [APP-BUG]
+
+Non-findings / verified-safe notes are listed at the end.
+
+================================================================================
+1. 10-month session TTL with inactivity timeout neutralized [MEDIUM] [MISUSE]
+================================================================================
+SITUATION / PROBLEM:
+The app configures the embedded OpenAuthFederated frontend with a session
+lifetime of ten months AND sets the inactivity timeout to the SAME ten months,
+which disables inactivity enforcement entirely. The library default sessionTtl
+is 7 days; this app is ~43x longer.
+
+ROOT CAUSE:
+  TEN_MONTHS_SECONDS = 10 * 30 * 24 * 60 * 60  = 25,920,000 s (300 days)
+  sessionTtlSeconds:        TEN_MONTHS_SECONDS
+  inactivityTimeoutSeconds: TEN_MONTHS_SECONDS   <-- equals the TTL, so a
+                                                     session never expires from
+                                                     inactivity; it only ages out
+                                                     at the full 300-day TTL.
+The rotating HttpOnly refresh cookie therefore stays valid for ~300 days, and a
+member who signs in once is never forced to re-authenticate for inactivity.
+
+SCENARIO:
+A family member signs in on a shared/older laptop or a browser that is later
+handed down, sold, or accessed by a houseguest. The refresh cookie remains valid
+for ~10 months with no inactivity cutoff, so whoever holds that browser profile
+keeps a live session to the private hub for the better part of a year.
+
+RISK:
+Long-lived stolen/left-behind session cookie; the primary compensating control
+(inactivity re-auth) is switched off. A FileSessionStore IS configured, so the
+Owner CAN revoke — but there is no logout-all / session-management UI in the app,
+so revocation is a manual server-side action nobody is likely to perform.
+
+REPRO STEPS:
+1. Sign in as any family member; capture the rotating session cookie
+   (prefix oaf_sfh...).
+2. Leave the session idle for weeks. Replay the cookie.
+3. Observe it still mints fresh 15-minute access tokens — no inactivity logout.
+
+SOURCE FILES INVOLVED:
+  code/packages/backend/src/modules/auth/auth-frontend.ts:93   (TEN_MONTHS_SECONDS)
+  code/packages/backend/src/modules/auth/auth-frontend.ts:113-116
+    (sessionTtlSeconds + inactivityTimeoutSeconds both = TEN_MONTHS_SECONDS)
+
+CALL COUNT: 1 configuration site (buildAuthFrontend), affects every session.
+
+FIX:
+Set inactivityTimeoutSeconds to a real idle window (e.g. 7-14 days) that is much
+shorter than sessionTtlSeconds, and shorten sessionTtlSeconds to weeks, not
+months. Add a "sign out everywhere" action that calls the library session store's
+revoke so a lost device can be cut off without shell access.
+
+================================================================================
+2. Login gate degrades to domain-only; authoritative member list not enforced
+   at login [MEDIUM] [MISUSE]
+================================================================================
+SITUATION / PROBLEM:
+For a PRIVATE family hub, the intended restriction is "only these specific family
+people." Two independent allow-lists exist, and they are not connected:
+  * pm/security.yaml lists the 4 real members (bryan, heather, jordan, tom) and
+    is the authoritative identity model — but it is consulted ONLY for the Owner
+    check and frontend nav, NEVER for who may sign in.
+  * Login is gated by the AUTH_ALLOWED_DOMAINS domain check (default
+    "thestarbucks.com") plus an OPTIONAL email allow-list read from the separate
+    env var AUTH_ALLOWED_EMAILS, which DEFAULTS TO EMPTY in code.
+When AUTH_ALLOWED_EMAILS is empty (the code default), the effective gate is
+DOMAIN-ONLY: any Google identity in the thestarbucks.com Workspace can enter,
+not just the four family members.
+
+ROOT CAUSE:
+  app-config.ts:14-19   allowedAuthDomains default "thestarbucks.com"
+  app-config.ts:26-31   allowedAuthEmails default ""  (empty => no email gate)
+  auth.strategy.ts:60-81  Layer-1 domain check always runs; Layer-2 email check
+                          runs ONLY "when configured" (allowedEmails.length > 0)
+  auth-frontend.ts:64-67,110  the library is handed allowedDomains only; the
+                          member list in security.yaml is not passed to it.
+The .env.example DOES ship the four emails (backend .env.example:18), so a fresh
+`just run` install is gated correctly — but nothing enforces that, and the two
+sources of truth silently drift: adding a person to security.yaml does NOT grant
+them login, and clearing/omitting AUTH_ALLOWED_EMAILS silently widens access to
+the whole domain.
+
+SCENARIO:
+The Owner adds a fifth member (or a service mailbox) to the thestarbucks.com
+Workspace, or edits/overwrites the backend .env and drops AUTH_ALLOWED_EMAILS.
+Every account on the domain — including ones never meant to see the family hub —
+can now sign in and read/write all shared notes and resources.
+
+RISK:
+Silent over-admission on a "private" app; the member roster the Owner maintains
+(security.yaml) is not the thing that actually controls the door.
+
+REPRO STEPS:
+1. Unset AUTH_ALLOWED_EMAILS (or start the backend with no .env email line).
+2. Sign in with any @thestarbucks.com Google account not listed in security.yaml.
+3. Access is granted; GET /api/notes, /api/resources, /api/members all succeed.
+
+SOURCE FILES INVOLVED:
+  code/packages/backend/src/config/app-config.ts:14-31
+  code/packages/backend/src/modules/auth/auth.strategy.ts:60-81
+  code/packages/backend/src/modules/auth/auth-frontend.ts:64-67, 108-124
+  pm/security.yaml:28-54  (authoritative members — not used at login)
+
+CALL COUNT: enforced on every request (AuthFederatedStrategy.validate).
+
+FIX:
+Derive the login email allow-list from pm/security.yaml (the same file the Owner
+already maintains and the Owner/nav code already reads), instead of a hand-kept
+env var; make the email allow-list REQUIRED (fail closed at boot if it resolves
+empty) so the gate can never silently fall back to domain-only for a private hub.
+
+================================================================================
+3. Unauthenticated client-error endpoint: log forgery + unbounded flooding
+   [LOW] [APP-BUG]
+================================================================================
+SITUATION / PROBLEM:
+POST /api/health/client-error is marked @Public() (no auth) and writes
+attacker-controlled fields (message, stack, url, context) straight into the
+error.err fault trail. Unlike the auth strategy — which runs every
+token-controlled string through sanitizeForLog() to strip control characters —
+this path performs NO newline/control-character stripping.
+
+ROOT CAUSE:
+  health.controller.ts:71-82  clientError() forwards body.message / body.stack /
+    body.url / body.context to logError()/logWarn() verbatim.
+  logging.ts / rolling-file-writer.ts  append the line as-is; embedded "\n" in
+    the payload produces multiple physical log lines.
+No rate limiting exists anywhere in the app (no @nestjs/throttler), so the
+endpoint can also be called in a tight loop.
+
+SCENARIO:
+Anyone able to reach the backend port POSTs a body whose "message" contains
+newline sequences that mimic real log entries (e.g. a forged
+"[timestamp] [ERROR] [AuthStrategy] ..." line), poisoning the fault trail the
+Owner relies on for incident review; or scripts thousands of POSTs to bloat/roll
+error.err and evict genuine evidence (5 MiB x 5 backups cap).
+
+RISK:
+Log injection / forged audit lines and log flooding by an unauthenticated caller.
+Low impact (bounded field lengths, best-effort logger), but it undermines trust
+in the one fault trail.
+
+REPRO STEPS:
+1. curl -X POST http://localhost:9322/api/health/client-error \
+     -H 'Content-Type: application/json' \
+     -d '{"message":"real-looking\n[2026-01-01T00:00:00Z] [ERROR] [AuthStrategy] forged"}'
+2. Inspect ~/.the_starbucks/error.err — the forged second line appears.
+3. Loop the request to roll the file.
+
+SOURCE FILES INVOLVED:
+  code/packages/backend/src/modules/health/health.controller.ts:71-82
+  code/packages/backend/src/modules/health/dto/client-error.dto.ts (length caps only)
+  code/packages/backend/src/shared/logging.ts:57-77
+  code/packages/backend/src/shared/rolling-file-writer.ts:44-58
+
+CALL COUNT: 1 public endpoint.
+
+FIX:
+Run message/stack/url/context through the existing control-character sanitizer
+(collapse CR/LF) before logging, and add a small rate limit (throttler) on the
+public health/client-error routes.
+
+================================================================================
+4. Unauthenticated auth-config endpoint discloses absolute server path /
+   OS username [LOW] [APP-BUG]
+================================================================================
+SITUATION / PROBLEM:
+GET /api/health/auth-config is @Public() and returns credentials.path — the exact
+absolute path of the credentials file this process reads, e.g.
+/Users/bryan/.credentials/the_starbucks.json — plus per-OS example home paths.
+The home path leaks the server OS account name to any unauthenticated caller.
+
+ROOT CAUSE:
+  health.controller.ts:36-69  authConfig() returns credentials.path.
+  credentials-file.ts:200-229  credentialsLocations() returns credentialsFilePath()
+    = join(homedir(), ".credentials/the_starbucks.json"), i.e. the real home dir.
+
+SCENARIO:
+Before signing in, anyone who can reach the port learns the server's OS username
+and filesystem layout (useful for targeting, and it confirms where the OAuth
+secret file lives). The endpoint also reveals the redirect URI and whether the
+Google client is configured.
+
+RISK:
+Pre-auth information disclosure (username / home path). Low on its own; helps an
+attacker fingerprint the host.
+
+REPRO STEPS:
+1. curl http://localhost:9322/api/health/auth-config
+2. Read credentials.path and perOs[*].example — the real home/username is exposed.
+
+SOURCE FILES INVOLVED:
+  code/packages/backend/src/modules/health/health.controller.ts:36-69
+  code/packages/backend/src/config/credentials-file.ts:200-229
+
+CALL COUNT: 1 public endpoint.
+
+FIX:
+Return only a boolean "configured" state and the redirect URI to unauthenticated
+callers; move the exact file path / per-OS remediation guidance behind auth, or
+render it only when googleConfigured is false AND from loopback.
+
+================================================================================
+5. Shared notes/resources: no per-item authorization and no delete audit
+   [LOW] [APP-BUG]
+================================================================================
+SITUATION / PROBLEM:
+Any signed-in family member can edit or delete ANY note or resource. Deletes are
+irreversible (no soft-delete) and, unlike create/update, do not record who
+performed them.
+
+ROOT CAUSE:
+  notes.controller.ts:38-43  remove() takes no @CurrentUser and passes no actor.
+  notes.service.ts:73-79     remove() hard-filters the item out; no actor logged
+                             ("Note removed {id}" with no email).
+  resources.controller.ts:38-43 / resources.service.ts:76-82  same pattern.
+This is partly by design (the hub's data is explicitly SHARED, so there is no
+IDOR across private items). The gap is the absence of any authorship/audit on
+destructive actions and no owner-vs-member write policy, even though
+security.yaml already models member roles and per-page read/write defaults.
+
+SCENARIO:
+One family member deletes another member's note/resource (accidentally or in a
+dispute); there is no record of who deleted it and no recovery.
+
+RISK:
+Loss of shared data with no attribution; no way to reconstruct who removed what.
+Low (trusted family users), but the app already has the role model to do better.
+
+REPRO STEPS:
+1. Member A creates a note (recorded updatedBy=A).
+2. Member B calls DELETE /api/notes/{id} — succeeds; log line has no actor.
+
+SOURCE FILES INVOLVED:
+  code/packages/backend/src/modules/notes/notes.controller.ts:38-43
+  code/packages/backend/src/modules/notes/notes.service.ts:73-79
+  code/packages/backend/src/modules/resources/resources.controller.ts:38-43
+  code/packages/backend/src/modules/resources/resources.service.ts:76-82
+
+CALL COUNT: 2 delete endpoints (notes, resources).
+
+FIX:
+Capture @CurrentUser on delete and log the actor; consider soft-delete + a
+member/owner write policy driven by security.yaml's role model.
+
+================================================================================
+6. Code outside /code (charter violation): mac_tools/code native app +
+   installers [LOW] [APP-BUG]
+================================================================================
+SITUATION / PROBLEM:
+The repo charter for this project states code lives ONLY under /code and product
+management ONLY under /pm. A separate code tree exists at the repo root under
+mac_tools/code — a native macOS Finder extension (Swift sources, a built
+"Bryan Tools.app", and shell installers) — outside /code.
+
+ROOT CAUSE:
+  mac_tools/code/build.sh, mac_tools/code/install.sh,
+  mac_tools/code/CopyPathExtension/, mac_tools/code/HostApp/,
+  mac_tools/code/build/Bryan Tools.app/  (compiled, code-signed bundle checked in)
+
+SCENARIO:
+Not a runtime vulnerability in the hub itself, but it violates the stated
+one-code-tree charter and ships a prebuilt/code-signed binary in the repo, which
+is an unaudited artifact and a supply-chain/footprint concern.
+
+RISK:
+Charter drift and an unreviewed committed binary. Low.
+
+REPRO STEPS:
+1. ls mac_tools/code — Swift extension sources + a committed .app bundle.
+
+SOURCE FILES INVOLVED:
+  mac_tools/code/ (entire subtree, outside /code)
+
+CALL COUNT: N/A (separate tool, not imported by the hub).
+
+FIX:
+Move mac_tools out of this repo (or under /code with the rest, per charter), and
+do not commit built/code-signed app bundles.
+
+================================================================================
+NON-FINDINGS / VERIFIED SAFE
+================================================================================
+* Session secret: loaded out-of-repo via loadOrCreateSecret() from
+  ~/.the_starbucks/.auth_session_secret (state-dir.ts) — not committed, not a
+  placeholder. Constructor throw-on-weak-secret contract satisfied.
+* Issuer enforcement: app calls federatedClient.verifyToken(token) with no opts,
+  but createFederatedFrontend() -> configureEmbeddedVerification() sets
+  issuer="starbuck-hub"; verify.ts falls back to that, so a token from another
+  deployment on a different secret is rejected. Not forkable (algorithms pinned
+  to HS256 in the library).
+* Audience footgun: NOT triggered — the app configures no `audience`, so none is
+  stamped; there is nothing unverified to exploit. (If an audience is added later,
+  it must also be passed on verify.)
+* cookiePrefix: distinct ("oaf_sfh"), so it does not collide with the default
+  "oaf" cookies of the other localhost apps.
+* cookieSecure: true in production; only false on a plain-http localhost dev
+  origin (resolveCookieSecure). SameSite defaults to Strict. allowedRedirectOrigins
+  is set from CORS_ORIGINS (no open-redirect).
+* sessionStore: FileSessionStore IS configured, so server-side revocation is
+  possible (see finding 1 for the missing UI to use it).
+* CORS: explicit allowlist, credentials:true, fails closed at boot if empty
+  (main.ts:47-59). No wildcard.
+* Global auth: JwtAuthGuard registered as APP_GUARD, fails closed on reflection
+  errors; only health probes + the embedded /api/v1 auth middleware are @Public.
+  Owner-only apps controller is additionally behind OwnerGuard, which resolves the
+  owner server-side from security.yaml (client identity not trusted).
+* Owner "My Web Apps" start: spawn() with fixed argv from a static registry and a
+  fixed dir (no shell:true, no user-supplied command/args) — no command injection.
+* Frontend: tokens are in memory + HttpOnly cookie only; no localStorage/
+  sessionStorage token storage; <Protect>/useIsOwner are UX-only with the backend
+  authoritative.
+* Helmet CSP/HSTS configured; verbose internals are not leaked (AllExceptionsFilter
+  returns "Internal server error" for 5xx).
+* No literal "Clerk"/"clerk"/"clark" found anywhere under code/.
+
+================================================================================
+END OF REPORT
+================================================================================

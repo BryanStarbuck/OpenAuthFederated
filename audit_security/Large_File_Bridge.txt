@@ -1,0 +1,460 @@
+====================================================================
+Large File Bridge
+====================================================================
+Scope: /Users/bryan/BGit/Bryan_git/LargeFileBridge/code (Express + TypeScript
+backend, React/Vite frontend), its OpenAuthFederated (@auth/backend + @auth/react)
+integration, and the launchd sync + IPFS-pinning surface. Audited against the
+CURRENT hardened library source in
+/Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/*/src.
+
+Summary: 10 findings — 1 CRITICAL, 1 HIGH, 4 MEDIUM, 4 LOW.
+Both an authentication-bypass (CRITICAL) and a total-filesystem-exposure (HIGH)
+are present and reinforce each other: the dev bypass grants an unauthenticated,
+network-reachable caller admin, and once "in" there is NO path confinement, so
+every file on the host — including the Google OAuth client secret, SSH keys, and
+browser cookies — is readable. The library itself is used mostly correctly
+(distinct cookiePrefix, per-app secret + issuer, real verifyToken, sessionStore
+present); the misuse findings are configuration footguns and lost defense-in-depth.
+
+--------------------------------------------------------------------
+TABLE OF CONTENTS (highest severity first)
+--------------------------------------------------------------------
+1. Dev-auth bypass = unauthenticated remote admin (no loopback/mode guard, binds 0.0.0.0) [CRITICAL] [APP-BUG]
+2. No filesystem confinement — any principal reads ANY file on the host [HIGH] [APP-BUG]
+3. requireHostedDomain never set on a Google-Workspace-gated app [MEDIUM] [MISUSE]
+4. OAF allowedDomains silently degrades to bare/"gmail.com" domains [MEDIUM] [MISUSE]
+5. cookieSecure defaults false; shipped .env pins it false [MEDIUM] [MISUSE]
+6. CORS reflects ANY localhost origin with credentials:true (local mode) [MEDIUM] [APP-BUG]
+7. Unauthenticated client-log endpoint, unbounded event array [MEDIUM] [APP-BUG]
+8. 10-month session TTL with inactivity timeout disabled [LOW] [MISUSE]
+9. Unauthenticated health/auth-config leaks creds-file path + devAuth state [LOW] [APP-BUG]
+10. Media grant is 6h, path-in-URL, not bound to a user/session [LOW] [APP-BUG]
+
+====================================================================
+1. Dev-auth bypass = unauthenticated remote admin [CRITICAL] [APP-BUG]
+====================================================================
+SITUATION / PROBLEM:
+The "localhost dev bypass" in identify() short-circuits ALL authentication and
+hands the caller a fabricated admin principal (roles:["admin"], allowListed:true)
+whenever three conditions hold: security is configured, no Google creds are
+present, and LFB_DEV_AUTH !== "false". No Bearer token, no cookie, no session is
+required. This is NOT actually restricted to localhost or to local mode.
+
+ROOT CAUSE:
+- The bypass has no loopback check and no server/local mode check — it is gated
+  only on hasGoogleCreds() being false and an env flag that DEFAULTS ON (the
+  shipped .env and .env.example both set LFB_DEV_AUTH=true and ship blank
+  GOOGLE_CLIENT_ID/SECRET).
+- The HTTP server is started with app.listen(port) and NO host argument, so it
+  binds 0.0.0.0 (all interfaces), not 127.0.0.1 — the API is reachable from the
+  local network.
+- CORS is not a mitigation: non-browser clients (curl, scripts) send no Origin
+  header, and corsOrigin() returns cb(null, true) for a missing origin.
+
+So any device on the same network can curl the API with no credentials and be
+treated as an allow-listed admin.
+
+SCENARIO:
+Operator finishes the one-time Security Setup page (security configured) and runs
+LFB locally for offline use without ever configuring Google OAuth — the DEFAULT
+documented posture. Attacker on the same LAN/coffee-shop Wi-Fi runs:
+  curl http://<victim-ip>:8787/api/fs?path=/Users/bryan/.ssh
+  curl 'http://<victim-ip>:8787/api/media/grant?path=/Users/bryan/.credentials/large_files_bridge.json'
+  curl 'http://<victim-ip>:8787/api/media/raw?path=...&e=...&t=...'
+and reads the victim's SSH keys and the app's own Google OAuth client secret. The
+same request set can also flip settings, edit the allow-list (requireAdmin passes
+because roles includes "admin"), and install/enable the launchd workers.
+
+RISK:
+Full unauthenticated remote compromise: arbitrary file read of the entire host,
+config tampering, allow-list takeover, scheduler control. Highest possible impact.
+
+REPRO STEPS:
+1. Complete first-run security setup; leave Google creds blank; keep default env.
+2. From another host on the network: curl http://<ip>:8787/api/auth/me
+   -> returns authenticated:true, roles:["admin"], allowListed:true.
+3. curl http://<ip>:8787/api/fs?path=/ -> full root directory listing.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/auth/identify.ts:17-30 (bypass; no loopback/mode guard)
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/main.ts:121 (app.listen(port) binds 0.0.0.0)
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/main.ts:54-58 (missing-Origin => allow)
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/.env:29-33 and .env.example (LFB_DEV_AUTH=true, blank Google creds)
+
+CALL COUNT: identify is mounted once globally (main.ts:97) and therefore fronts
+all ~13 /api routers; the bypass affects every /api endpoint.
+
+FIX:
+- Gate the dev bypass on BOTH loopback origin AND mode==="local" AND an EXPLICIT
+  opt-in (require LFB_DEV_AUTH==="true" as an intentional set, and additionally
+  verify req.ip is loopback). Never treat "no Google creds" alone as authorization.
+- Bind the listener to 127.0.0.1 in local mode: app.listen(port, "127.0.0.1", ...).
+- Fail closed: if mode==="server" and Google creds are absent, refuse to serve
+  data routes rather than defaulting everyone to admin.
+
+====================================================================
+2. No filesystem confinement — any principal reads ANY file on the host [HIGH] [APP-BUG]
+====================================================================
+SITUATION / PROBLEM:
+The file-system browser and media endpoints accept an arbitrary absolute path and
+resolve it with no confinement to the registered repos, the home directory, or any
+allow-root. resolveDir() and resolveMediaFile() only path.resolve() + stat the
+target; there is no "is this under an allowed root" check. Every allow-listed
+principal (a whole company DOMAIN can be allow-listed) can enumerate the entire
+disk and stream the bytes of any file.
+
+ROOT CAUSE:
+- fs/paths.ts resolveDir(): expands ~, path.resolve(), rejects only NUL — then
+  returns any existing directory.
+- media.service.ts resolveMediaFile(): same, for any existing regular file.
+- The allow-list gate (requireAllowListed) authorizes the CALLER but never
+  restricts WHICH path the caller may read. allowListed() can be satisfied by any
+  email at an allow-listed domain (allow_companies), i.e. any employee, not just
+  the machine owner.
+
+SCENARIO:
+Company allow-lists domain act3ai.com so colleagues can use their own bridges. Any
+act3ai.com user who can reach a co-worker's server-mode instance calls
+  GET /api/fs?path=/Users/victim/.credentials
+  GET /api/media/grant?path=/Users/victim/.credentials/large_files_bridge.json
+  GET /api/media/raw?...   (the returned same-origin URL)
+and exfiltrates that machine's Google OAuth client secret, ~/.ssh/id_rsa,
+password-manager exports, etc. The media/raw route is not even allow-list-gated —
+it trusts only the HMAC grant, which any allow-listed user can mint for any path.
+
+RISK:
+Cross-user / cross-machine arbitrary file read of the whole host filesystem,
+including this app's own long-term secrets. HIGH on its own; combined with
+finding 1 it is unauthenticated.
+
+REPRO STEPS:
+1. Sign in as any allow-listed user.
+2. GET /api/media/grant?path=/etc/passwd -> { url }.
+3. GET that url -> file contents streamed with Range support.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/fs/paths.ts:13-26 (resolveDir, no confinement)
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/fs/fs.service.ts:30-112 (listDirectory serves any dir)
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/media/media.service.ts:26-61 (resolveMediaFile/mintGrant/verifyGrant, any path)
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/media/media.router.ts:35-80 (raw NOT allow-list-gated, HMAC-only)
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/security/security.service.ts:60-71 (allowListed authorizes caller, not path)
+
+CALL COUNT: fs.router 3 read endpoints + media.router 3 endpoints all resolve
+unconfined paths; entity.router (buildEntityView) also takes ?path=<abs>.
+
+FIX:
+Confine every path to an allow-root set (registered repo folders and/or an
+explicitly configured browse root). Reject any resolved absolute path that is not
+under an allowed root (after realpath, to defeat symlink escape). Apply the same
+confinement to fs, media, and entity path inputs.
+
+====================================================================
+3. requireHostedDomain never set on a Workspace-gated app [MEDIUM] [MISUSE]
+====================================================================
+SITUATION / PROBLEM:
+constructAuthFrontend() builds createFederatedFrontend({...}) for a Google
+Workspace deployment (charter: only whitehatengineering.com / act3ai.com members)
+but never passes requireHostedDomain. Per the library contract this defaults FALSE,
+so the OIDC path does not require the Google-asserted hosted-domain (hd) claim —
+domain membership is inferred only from the email string.
+
+ROOT CAUSE:
+The config object (auth-frontend.ts:114-136) omits requireHostedDomain. A
+Workspace app SHOULD set it true so the hd claim (not just the email suffix) proves
+the account is a managed member of the allow-listed domain.
+
+SCENARIO:
+Defense-in-depth is reduced to a single string check. If any future path lets an
+email suffix be presented without a matching managed hd (e.g. a mis-mapped
+individual allow-list entry, or an IdP quirk), sign-in passes OAF's filter. Today
+the app's identify.ts email gate still applies, so this is loss of a layer rather
+than a confirmed breach — but it is exactly the footgun the contract names.
+
+RISK:
+Weakened enforcement of "must be a Workspace member"; the guarantee rests entirely
+on email-string matching instead of the cryptographic hd claim.
+
+REPRO STEPS: N/A (configuration review).
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/auth/auth-frontend.ts:114-136 (no requireHostedDomain)
+
+CALL COUNT: 1 (single createFederatedFrontend call site).
+
+FIX:
+Pass requireHostedDomain: true for the Workspace connection so the hd claim is
+enforced, and verify email_verified. Keep the individual-email path (if any) on a
+separate connection that intentionally does not require hd.
+
+====================================================================
+4. OAF allowedDomains silently degrades to bare/"gmail.com" domains [MEDIUM] [MISUSE]
+====================================================================
+SITUATION / PROBLEM:
+oafAllowedDomains() (fed to createFederatedFrontend allowedDomains) unions the
+company domains with the DOMAIN PART of every allow-listed individual email. If an
+operator allow-lists an individual such as alice@gmail.com, "gmail.com" is added to
+the OIDC domain pre-filter — the exact broad/"anyone" value the library contract
+warns against. OAF's domain enforcement then admits ALL gmail.com accounts at the
+library layer.
+
+ROOT CAUSE:
+security.service.ts:78-85 does set.add(domainOf(e)) for each individual email, with
+no distinction between a corporate domain and a public consumer domain.
+
+SCENARIO:
+Operator adds one Gmail collaborator. Now OAF's allowedDomains contains gmail.com,
+so its domain gate is effectively defeated for that provider; the ONLY remaining
+control is identify.ts allowListed() (exact-email match). Any bug or future change
+that leans on OAF's domain filter as the gate is now wide open. This also compounds
+finding 3: with hd unenforced AND gmail.com allowed, the OAF layer provides no real
+protection.
+
+RISK:
+Loss of the library's domain-enforcement layer; single point of failure shifts to
+the app's own allow-list check.
+
+REPRO STEPS:
+1. Allow-list an individual foo@gmail.com via Security Setup.
+2. Inspect oafAllowedDomains() -> includes "gmail.com".
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/security/security.service.ts:78-85 (oafAllowedDomains adds domainOf(email))
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/auth/auth-frontend.ts:49-51,124 (feeds allowedDomains)
+
+CALL COUNT: computed on every rebuildAuthFrontend()/boot.
+
+FIX:
+Do not add consumer/public email domains to OAF allowedDomains. Model individual
+allow-list entries as an exact-email allowlist on a dedicated connection (or via
+resolveGrants), keeping allowedDomains to verified corporate domains only.
+
+====================================================================
+5. cookieSecure defaults false; shipped .env pins it false [MEDIUM] [MISUSE]
+====================================================================
+SITUATION / PROBLEM:
+cookieSecure is driven by process.env.COOKIE_SECURE === "true", and BOTH shipped
+.env and .env.example set COOKIE_SECURE=false. securityHeaders is tied to the same
+flag. In server mode over real TLS, unless the operator remembers to flip
+COOKIE_SECURE=true, the session/rotation cookies are emitted WITHOUT the Secure
+attribute (and HSTS/hardening headers are suppressed).
+
+ROOT CAUSE:
+The Secure flag is a manual env opt-in rather than derived from mode==="server"
+(the code already knows isLocal). A default-false secret-cookie flag is the exact
+library footgun ("cookieSecure:false in prod = non-Secure cookie").
+
+SCENARIO:
+Operator deploys in server mode behind TLS, copies the example env, forgets
+COOKIE_SECURE. The rotating HttpOnly session cookie is now sent over any plaintext
+downgrade and is not marked Secure.
+
+RISK:
+Session-cookie exposure on any non-TLS path in a production deployment.
+
+REPRO STEPS: set mode=server, leave COOKIE_SECURE unset -> Set-Cookie lacks Secure.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/auth/auth-frontend.ts:102,134 (secure = env==="true"; securityHeaders: secure)
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/.env / .env.example (COOKIE_SECURE=false)
+
+CALL COUNT: 1 config site.
+
+FIX:
+Default cookieSecure to true whenever mode==="server" (only force false for
+plaintext localhost dev), instead of relying on an env flag the operator can forget.
+
+====================================================================
+6. CORS reflects ANY localhost origin with credentials:true (local mode) [MEDIUM] [APP-BUG]
+====================================================================
+SITUATION / PROBLEM:
+In local mode corsOrigin() approves ANY http(s)://localhost:* or 127.0.0.1:* origin
+(regex LOCALHOST_ORIGIN) and the app runs cors({ credentials: true }). Any web page
+served from any port on the machine can therefore make credentialed, cross-origin
+calls the browser will let it READ.
+
+ROOT CAUSE:
+main.ts:50-58 — a wildcard localhost matcher combined with credentials:true. The
+@auth/react flow mints Bearer tokens at /api/v1/client/sessions/:id/tokens using the
+session cookie; a permissive credentialed CORS lets a hostile localhost page drive
+that mint and then call /api on the user's behalf.
+
+SCENARIO:
+User is signed in to LFB and also visits http://localhost:9999 (a malicious dev
+server, another app, or a page a local tool opened). That page fetches
+/api/v1/client to rehydrate, mints a token, then reads /api/fs?path=/ — full
+filesystem read — because CORS reflects its localhost origin with credentials.
+
+RISK:
+Cross-origin authenticated access / token theft from any co-resident localhost
+origin; escalates finding 2 into a browser-driven attack.
+
+REPRO STEPS:
+1. Sign in to LFB on :2222.
+2. From a page on http://localhost:9999, fetch('http://localhost:8787/api/fs?path=/',
+   {credentials:'include'}) -> readable response.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/main.ts:47-59,91 (LOCALHOST_ORIGIN wildcard + credentials:true)
+
+CALL COUNT: 1 CORS middleware fronting all routes.
+
+FIX:
+Do not reflect arbitrary localhost origins with credentials. Pin the exact expected
+web origin(s) (the resolved frontend port) even in local mode, and/or require a
+CSRF/custom-header check on token-minting and mutating routes.
+
+====================================================================
+7. Unauthenticated client-log endpoint, unbounded event array [MEDIUM] [APP-BUG]
+====================================================================
+SITUATION / PROBLEM:
+POST /api/client-log is mounted with NO requireAllowListed gate. It accepts a body
+with an events[] array and writes each into the SHARED fault trail (error.err) via
+the same logger the backend uses. There is no cap on events.length (only per-event
+context<=80 and message<=4000).
+
+ROOT CAUSE:
+clientlog.router.ts iterates the caller-supplied array unbounded; the router is
+reachable by any caller (identify sets DEFAULT_USER but nothing rejects it).
+
+SCENARIO:
+An attacker (unauthenticated, per finding 1 the endpoint is reachable) POSTs
+{events:[...100000 entries...]} repeatedly, flooding error.err (disk fill, log
+rotation churn) and injecting forged "client:*" ERROR/FATAL lines that pollute the
+one fault trail and can mask real incidents.
+
+RISK:
+Log/disk denial-of-service and fault-trail forgery.
+
+REPRO STEPS:
+curl -XPOST http://<ip>:8787/api/client-log -H 'content-type: application/json' \
+  -d '{"events":[{"level":"fatal","message":"x"}, ... x100000]}'
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/clientlog/clientlog.router.ts (no gate, unbounded events[])
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/main.ts:112 (mount)
+
+CALL COUNT: 1 endpoint.
+
+FIX:
+Require an allow-listed session for client-log, cap events per request (e.g. <=50)
+and rate-limit; consider a separate client-fault file so browser noise cannot
+corrupt the backend fault trail.
+
+====================================================================
+8. 10-month session TTL with inactivity timeout disabled [LOW] [MISUSE]
+====================================================================
+SITUATION / PROBLEM:
+sessionTtlSeconds and inactivityTimeoutSeconds are both set to TEN_MONTHS
+(25,920,000s) — inactivity timeout is deliberately equal to the absolute lifetime,
+i.e. effectively disabled. The contract flags years-long TTLs as weakening capture
+risk; 10 months with no idle timeout is in that band.
+
+ROOT CAUSE:
+Charter decision ("authentication should not time out") implemented as a very long
+absolute lifetime plus a disabled idle timeout (auth-frontend.ts:113,129,131).
+
+RISK:
+A stolen session cookie stays valid for up to 10 months and never expires from
+inactivity. Mitigated because sessionStore (FileSessionStore) IS configured, so
+sign-out-everywhere / revocation is available and access tokens remain 15m.
+
+REPRO STEPS: N/A (configuration review).
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/auth/auth-frontend.ts:113,129-132
+
+CALL COUNT: 1 config site.
+
+FIX:
+Keep a long absolute lifetime if the charter demands it, but set a real inactivity
+timeout (e.g. days, not 10 months) so idle stolen sessions age out, and ensure
+revocation on offboarding is exercised.
+
+====================================================================
+9. Unauthenticated health/auth-config leaks creds-file path + devAuth state [LOW] [APP-BUG]
+====================================================================
+SITUATION / PROBLEM:
+GET /api/health and GET /api/health/auth-config have no auth gate. auth-config
+returns oauthConfigured, devAuth (whether the dev bypass is active), and the full
+credentialsFile info including the absolute path/filename/directory of the secrets
+file.
+
+ROOT CAUSE:
+health.router.ts + authConfig() (auth.router.ts) are intentionally public but
+disclose the exact on-disk location of the Google OAuth secret and whether the app
+is currently in unauthenticated-admin dev mode.
+
+RISK:
+Recon aid: an attacker learns devAuth is ON (confirming finding 1 is exploitable)
+and the precise secrets path to target (finding 2). Low on its own.
+
+REPRO STEPS: curl http://<ip>:8787/api/health/auth-config
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/health/health.router.ts:20-27
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/auth/auth.router.ts:25-32
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/config/credentials-file.ts:61-87 (returns path/directory/filename)
+
+CALL COUNT: 2 endpoints.
+
+FIX:
+Return only { oauthConfigured } (a boolean) unauthenticated; move the setup path
+guidance behind the loopback guard used by /api/security, and never echo devAuth
+state to unauthenticated callers.
+
+====================================================================
+10. Media grant is 6h, path-in-URL, not bound to a user/session [LOW] [APP-BUG]
+====================================================================
+SITUATION / PROBLEM:
+mintGrant() returns /api/media/raw?path=<abs>&e=<exp>&t=<hmac> with a 6-hour TTL.
+The HMAC binds (absolutePath, expMs) but NOT the user/session. The absolute path
+travels in the query string (logged in access logs, browser history, referrers) and
+anyone who obtains the URL within 6h can fetch the file, with no allow-list re-check
+on /raw.
+
+ROOT CAUSE:
+media.service.ts:37-61 signs only path+exp; media.router.ts:35 gates /raw on the
+grant alone (by design, so a plain <img>/<video> works), so the capability is a
+bearer URL.
+
+RISK:
+A leaked media URL (proxy log, shared screen, browser history) is a 6h read
+capability for that file, usable by a non-allow-listed party. Low; scoped to one
+file and time-boxed, per-process key.
+
+REPRO STEPS: capture a /api/media/raw URL; replay within 6h from an unauthenticated
+client -> file served.
+
+SOURCE FILES INVOLVED:
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/media/media.service.ts:18,37-61
+- /Users/bryan/BGit/Bryan_git/LargeFileBridge/code/packages/backend/src/modules/media/media.router.ts:35-49
+
+CALL COUNT: 1 grant + 1 raw endpoint.
+
+FIX:
+Shorten the TTL (minutes), bind the grant to the session id (include sid in the
+HMAC and re-check it), and prefer a POST/short-lived token over a long-lived path-
+in-URL capability.
+
+====================================================================
+NOTES (checked, NOT bugs)
+====================================================================
+- sessionSecret: loadOrCreateSecret(authSecretPath()) generates a random 48-byte
+  (base64url) per-app secret on disk (0600), out-of-repo — satisfies the >=32-char
+  non-placeholder requirement; not committed. OK.
+- audience is not passed on mint or verify, but token isolation is real here via a
+  DISTINCT per-app issuer ("large-file-bridge") + distinct per-app sessionSecret, so
+  a sister app's token cannot be replayed. Correct usage, not the audience footgun.
+- verifyToken is the library's (identify.ts calls verifyToken({issuer, embedded:true}));
+  verification is NOT forked and HS256 is pinned by the library. OK.
+- cookiePrefix is set distinctly ("oaf_lfb"), avoiding the default "oaf" collision. OK.
+- sessionStore (FileSessionStore) is configured -> revocation + durable sessions. OK.
+- launchd plist rendering interpolates only server-derived constants (fixed labels,
+  process.execPath, resolveStateDir paths) — NOT user input — so no plist/command
+  injection. IPFS shellouts use execFile/spawn with argument arrays (no shell), and
+  IPFS RPC targets a fixed 127.0.0.1 loopback multiaddr — no SSRF/command injection.
+- No literal "Clerk"/"clerk"/"clark" found in code/comments/docs under code/.
+
+====================================================================
+END OF REPORT
+====================================================================
