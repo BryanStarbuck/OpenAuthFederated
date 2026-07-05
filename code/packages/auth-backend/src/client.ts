@@ -498,7 +498,13 @@ export class AuthClient {
 
   /** Verify a machine (M2M / API-key) token for server-to-server calls (spec §15). */
   verifyMachineToken(token: string): Promise<MachineClaims> {
-    return verifyMachineToken(token, { issuer: this.issuer })
+    // Bind the service credential to this client's audience/issuer (same isolation as user tokens):
+    // a machine token minted for a different app must not verify here just because a secret is shared.
+    return verifyMachineToken(token, {
+      issuer: this.issuer,
+      audience: this.audience,
+      authorizedParties: this.authorizedParties,
+    })
   }
 
   /** Low-level authorized request to the Backend API. */

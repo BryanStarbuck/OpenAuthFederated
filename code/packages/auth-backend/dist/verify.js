@@ -58,9 +58,70 @@ function assertSafeIssuer(issuer, allowedHosts) {
         throw new Error("verifyToken: issuer must use https");
     }
     const allow = allowedHosts.map((h) => h.trim().toLowerCase()).filter(Boolean);
-    if (allow.length > 0 && !allow.includes(url.hostname.toLowerCase())) {
-        throw new Error("verifyToken: issuer host is not on the configured jwksAllowedHosts allowlist");
+    if (allow.length > 0) {
+        if (!allow.includes(url.hostname.toLowerCase())) {
+            throw new Error("verifyToken: issuer host is not on the configured jwksAllowedHosts allowlist");
+        }
+        return;
     }
+    // No allowlist supplied: still refuse an issuer that resolves to a private/loopback/link-local IP
+    // literal, so a caller/tenant-derived issuer cannot be turned into an SSRF probe of internal
+    // https services (e.g. cloud metadata, RFC1918 hosts). A named allowlist above is the strong
+    // control; this is the floor when none is given.
+    if (isPrivateHostLiteral(url.hostname)) {
+        throw new Error("verifyToken: issuer host resolves to a private/link-local IP and is not allowed");
+    }
+}
+/**
+ * True if `host` is an IP-address literal in a private, loopback, link-local, or otherwise
+ * non-public range (IPv4 or IPv6). Bare hostnames (DNS names) return false — only literals are
+ * blocked here, since resolving DNS would itself be a network side effect.
+ */
+function isPrivateHostLiteral(host) {
+    let h = host.trim().toLowerCase();
+    // Strip IPv6 brackets: URL hostnames keep `[::1]` as `[::1]` in some runtimes.
+    if (h.startsWith("[") && h.endsWith("]"))
+        h = h.slice(1, -1);
+    // IPv4 dotted-quad.
+    const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+    if (v4) {
+        const o = v4.slice(1, 5).map((n) => Number(n));
+        if (o.some((n) => n > 255))
+            return true; // malformed → treat as unsafe
+        const [a, b] = o;
+        if (a === 10)
+            return true; // 10.0.0.0/8
+        if (a === 127)
+            return true; // loopback 127.0.0.0/8
+        if (a === 0)
+            return true; // 0.0.0.0/8
+        if (a === 172 && b >= 16 && b <= 31)
+            return true; // 172.16.0.0/12
+        if (a === 192 && b === 168)
+            return true; // 192.168.0.0/16
+        if (a === 169 && b === 254)
+            return true; // link-local 169.254.0.0/16 (incl. cloud metadata)
+        if (a === 100 && b >= 64 && b <= 127)
+            return true; // CGNAT 100.64.0.0/10
+        if (a >= 224)
+            return true; // multicast/reserved
+        return false;
+    }
+    // IPv6 literals.
+    if (h.includes(":")) {
+        if (h === "::1" || h === "::")
+            return true; // loopback / unspecified
+        if (h.startsWith("fe80"))
+            return true; // link-local
+        if (h.startsWith("fc") || h.startsWith("fd"))
+            return true; // unique-local fc00::/7
+        // IPv4-mapped IPv6 (::ffff:10.0.0.1): re-check the embedded v4.
+        const mapped = /::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(h);
+        if (mapped?.[1])
+            return isPrivateHostLiteral(mapped[1]);
+        return false;
+    }
+    return false;
 }
 /**
  * The shared HS256 secret for embedded-mode verification. Requires a strong secret supplied by the
@@ -98,15 +159,18 @@ async function verifyToken(token, opts = {}) {
     if (isEmbedded(opts)) {
         // Pin HS256 for the embedded symmetric path (no algorithm agility), and enforce the issuer
         // when one is configured so a token from a different deployment is not accepted on a shared
-        // secret. Audience is enforced when the caller supplies one.
+        // secret. Audience is enforced when the caller supplies one OR when one was configured via
+        // configureEmbeddedVerification() — so per-app `aud` isolation holds by default, not only when
+        // each verify call remembers to pass it.
         const issuer = opts.issuer ?? embeddedVerification?.issuer;
+        const audience = opts.audience ?? embeddedVerification?.audience;
         const verifyOpts = {
             algorithms: opts.algorithms ?? ["HS256"],
         };
         if (issuer)
             verifyOpts.issuer = issuer;
-        if (opts.audience !== undefined)
-            verifyOpts.audience = opts.audience;
+        if (audience !== undefined)
+            verifyOpts.audience = audience;
         if (opts.clockSkewInMs !== undefined)
             verifyOpts.clockTolerance = Math.ceil(opts.clockSkewInMs / 1000);
         const { payload } = await (0, jose_1.jwtVerify)(token, symmetricSecret(opts), verifyOpts);
@@ -128,8 +192,9 @@ async function verifyToken(token, opts = {}) {
         issuer,
         algorithms: opts.algorithms ?? ["RS256"],
     };
-    if (opts.audience !== undefined)
-        jwksOpts.audience = opts.audience;
+    const jwksAudience = opts.audience ?? embeddedVerification?.audience;
+    if (jwksAudience !== undefined)
+        jwksOpts.audience = jwksAudience;
     if (opts.clockSkewInMs !== undefined)
         jwksOpts.clockTolerance = Math.ceil(opts.clockSkewInMs / 1000);
     const { payload } = await (0, jose_1.jwtVerify)(token, jwks, jwksOpts);

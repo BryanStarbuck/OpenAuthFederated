@@ -11,6 +11,13 @@ interface EmbeddedVerificationConfig {
     sessionSecret: string;
     /** Expected token issuer (`iss`), enforced when set. */
     issuer?: string;
+    /**
+     * Expected per-app audience (`aud`), enforced by default when set. Bridged from the host app's
+     * `createFederatedFrontend({ audience })` so the SAME `aud` that the mint side stamps is required
+     * on verify — a token minted for another app (different `aud`) is rejected even if a secret is
+     * shared. When unset, no audience check is applied (back-compat).
+     */
+    audience?: string | string[];
     /** Optional JWKS host allowlist (SSRF guard) for the asymmetric path. */
     jwksAllowedHosts?: string[];
 }

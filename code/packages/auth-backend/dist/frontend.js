@@ -18,7 +18,7 @@ const saml_js_1 = require("./saml.js");
  *   GET  /sign_in/sso                         → 302 to Google's OAuth 2.0 / OIDC authorize URL
  *   GET  /oauth_callback                      → code→token exchange, id_token + hd verification,
  *                                               establishes the session cookie, 302 back to the SPA
- *   GET  /environment                         → instance configuration (Clerk-style, secret-free)
+ *   GET  /environment                         → instance configuration (hosted-IdP-style, secret-free)
  *   GET  /client                              → rehydrate the current session (signed-out = empty)
  *   POST /client/sessions/:id/tokens          → mint a short-lived access JWT for API calls
  *   POST /client/sessions/:id/tokens/:tmpl    → templated token mint (same path, tagged)
@@ -124,14 +124,22 @@ function setSecurityHeaders(res) {
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'");
 }
-/** Hash an email to a short, non-reversible token so logs carry no raw PII. */
-function redactEmail(email) {
+/**
+ * Hash an email to a short, non-reversible token so logs carry no raw PII. When a per-deployment
+ * `hmacKey` is supplied (derived from this app's sessionSecret), the digest is an HMAC — it is NOT
+ * offline-guessable: an attacker who leaks the logs cannot confirm a guessed email by hashing it,
+ * because they lack the key. The domain is dropped so the identifier is fully opaque (no company
+ * domain enumeration from leaked logs). Without a key it falls back to a plain (keyed-less) SHA-256,
+ * still domain-free.
+ */
+function redactEmail(email, hmacKey) {
     if (!email)
         return "<none>";
-    const at = email.lastIndexOf("@");
-    const domain = at >= 0 ? email.slice(at + 1) : "";
-    const digest = (0, node_crypto_1.createHash)("sha256").update(email.toLowerCase()).digest("hex").slice(0, 12);
-    return `user_${digest}${domain ? `@${domain}` : ""}`;
+    const normalized = email.toLowerCase();
+    const digest = hmacKey
+        ? (0, node_crypto_1.createHmac)("sha256", hmacKey).update(normalized).digest("hex").slice(0, 12)
+        : (0, node_crypto_1.createHash)("sha256").update(normalized).digest("hex").slice(0, 12);
+    return `user_${digest}`;
 }
 function sendJson(res, status, body) {
     const payload = JSON.stringify(body);
@@ -162,8 +170,14 @@ async function readJsonBody(req) {
         };
         req.on("data", (c) => {
             data += c;
-            if (data.length > 1_000_000)
-                finish({}); // guard against oversized bodies
+            if (data.length > 1_000_000) {
+                // Oversized body: resolve early AND stop buffering. Without destroying the stream, `data`
+                // keeps growing on this closure until the client finishes — a slow, large upload is a memory
+                // DoS even after the promise settled. Drop the reference and tear down the request.
+                data = "";
+                finish({});
+                req.destroy();
+            }
         });
         req.on("end", () => {
             try {
@@ -201,8 +215,14 @@ async function readFormBody(req) {
         };
         req.on("data", (c) => {
             data += c;
-            if (data.length > 5_000_000)
-                finish({}); // SAML responses are larger than JSON; cap generously
+            if (data.length > 5_000_000) {
+                // SAML responses are larger than JSON, but still cap. As in readJsonBody, resolve early AND
+                // destroy the stream so an oversized/slow upload cannot keep buffering into memory after the
+                // promise settled. (5MB cap.)
+                data = "";
+                finish({});
+                req.destroy();
+            }
         });
         req.on("end", () => {
             const out = {};
@@ -323,6 +343,14 @@ function normalizeConfig(config) {
         // full maximum lifetime. Only enforced when a sessionStore tracks lastActiveAt; 0 disables it.
         inactivityTimeoutSeconds: config.inactivityTimeoutSeconds ?? 12 * 60 * 60,
         sessionStoreMigrate: config.sessionStoreMigrate === true,
+        sessionStoreMigrateMaxAgeSeconds: config.sessionStoreMigrateMaxAgeSeconds ?? 10 * 60,
+        // Fail CLOSED on a store read error by default: revocation/expiry must not be bypassable under a
+        // (possibly attacker-induced) store fault. Apps that prioritize availability opt into "cookie-grace".
+        sessionStoreFailMode: config.sessionStoreFailMode === "cookie-grace" ? "cookie-grace" : "closed",
+        reresolveGrantsEverySeconds: typeof config.reresolveGrantsEverySeconds === "number" && config.reresolveGrantsEverySeconds > 0
+            ? config.reresolveGrantsEverySeconds
+            : 0,
+        revalidateGrants: config.revalidateGrants,
         sessionStore: config.sessionStore,
         // Secure by default — never ship a non-Secure session cookie to production.
         cookieSecure: config.cookieSecure ?? true,
@@ -363,10 +391,25 @@ function createFederatedFrontend(config) {
             "characters. Supply it via this API (e.g. from loadOrCreateSecret) — no default is provided.");
     }
     // Configure embedded-mode verification from the SAME config used to mint below, so verifyToken()
-    // validates with this app's secret/issuer WITHOUT reading any environment variable. This is the
-    // single bridge between minting (here) and verification (verify.ts) — one source of truth, set by
-    // the API caller.
-    (0, verify_js_1.configureEmbeddedVerification)({ sessionSecret: cfg.sessionSecret, issuer: cfg.issuer });
+    // validates with this app's secret/issuer/audience WITHOUT reading any environment variable. This
+    // is the single bridge between minting (here) and verification (verify.ts) — one source of truth,
+    // set by the API caller. Passing `audience` here is what makes per-app `aud` isolation hold by
+    // default: the same value stamped on mint is required on verify. Same-process tokens this app
+    // mints therefore still verify (identical secret + issuer + audience).
+    (0, verify_js_1.configureEmbeddedVerification)({
+        sessionSecret: cfg.sessionSecret,
+        issuer: cfg.issuer,
+        audience: cfg.audience,
+    });
+    // Isolation guard: `audience` is defense-in-depth, not the primary control. If an app sets an
+    // audience but leaves issuer at the shared default, two sibling apps that both did so would still
+    // share an issuer — warn once so the operator gives each app a distinct issuer (and, above all, a
+    // distinct sessionSecret).
+    if (cfg.audience && !cfg.issuer) {
+        cfg.log("warn", "audience is set but issuer is not: minted tokens fall back to the shared default issuer " +
+            '"openauthfederated". Audience is defense-in-depth only — give each app a DISTINCT ' +
+            "sessionSecret (primary control) and a distinct issuer.");
+    }
     // Derive a distinct per-purpose subkey (HKDF-SHA256, distinct info labels) for each cookie-signing
     // context that stays INSIDE this module — the session cookie, the OAuth state cookie, and the SAML
     // relay cookie. A leak of the low-value state/relay flow then cannot forge a session. The access
@@ -379,6 +422,19 @@ function createFederatedFrontend(config) {
     const accessKey = master;
     const stateKey = subkey("state");
     const relayKey = subkey("relay");
+    // Per-deployment key for HMACing the email identifier in logs, so a log leak does not let an
+    // attacker offline-guess which emails signed in. Derived from (not equal to) the session secret.
+    const emailLogKey = subkey("email-log");
+    // No durable store configured: sign-out is local-only and several security controls are inert.
+    // We do NOT hard-require a store (the library cannot know an appropriate data dir), but we warn
+    // loudly once at construction so this is a deliberate choice, not an invisible gap.
+    if (!cfg.sessionStore) {
+        cfg.log("warn", "No sessionStore configured: sign-out clears only the local cookie (a copied/stolen cookie " +
+            "stays valid until it expires), 'sign out everywhere' / revocation is unavailable, the " +
+            "inactivity timeout is disabled, and the active-sessions list is always empty. Pass a " +
+            "sessionStore (e.g. FileSessionStore) to createFederatedFrontend() to enable server-side " +
+            "revocation and idle timeout.");
+    }
     if (!cfg.googleConfigured) {
         // Loud at construction, but non-fatal: SAML still works, and the OIDC routes fail closed with
         // a clear 503 (see guardGoogleConfigured) instead of redirecting to Google with an empty
@@ -400,6 +456,7 @@ function createFederatedFrontend(config) {
             org_id: record.orgId,
             memberships: record.memberships,
             lvc: record.lastVerifiedAt,
+            gra: record.grantsResolvedAt,
         })
             .setProtectedHeader({ alg: "HS256" })
             .setSubject(record.userId)
@@ -425,6 +482,7 @@ function createFederatedFrontend(config) {
             orgId: s.orgId ?? null,
             memberships: Array.isArray(s.memberships) ? s.memberships : [],
             lastVerifiedAt: s.lastVerifiedAt ?? Math.floor(Date.now() / 1000),
+            grantsResolvedAt: s.grantsResolvedAt ?? s.lastVerifiedAt ?? Math.floor(Date.now() / 1000),
         };
     }
     async function readSession(req) {
@@ -456,11 +514,13 @@ function createFederatedFrontend(config) {
             orgId: payload.org_id ?? null,
             memberships: Array.isArray(m) ? m : [],
             lastVerifiedAt: payload.lvc ?? Math.floor(Date.now() / 1000),
+            grantsResolvedAt: payload.gra ?? payload.lvc ?? Math.floor(Date.now() / 1000),
         };
         // Stateless mode (no store): the signed cookie IS the whole session — return it as before.
         if (!cfg.sessionStore || !cookieRec.sid)
             return cookieRec;
-        // Stateful (Clerk-style) mode: the durable record is the source of truth. This is what makes
+        // Stateful mode (the stateful half of the session model): the durable record is the source of
+        // truth. This is what makes
         // sessions survive restarts and supports revocation + inactivity timeout.
         const now = Math.floor(Date.now() / 1000);
         try {
@@ -483,6 +543,13 @@ function createFederatedFrontend(config) {
             // API caller via the `sessionStoreMigrate` config flag.
             if (cfg.sessionStoreMigrate) {
                 const createdAt = typeof payload.iat === "number" ? payload.iat : now;
+                // Bound the resurrection risk: only migrate a cookie issued within a short window. A lost
+                // tombstone plus an old-but-valid cookie must NOT rebuild a revoked session. An old cookie
+                // (issued before the cutoff) fails closed here instead of being re-created as active.
+                if (now - createdAt > cfg.sessionStoreMigrateMaxAgeSeconds) {
+                    cfg.log("warn", "sessionStoreMigrate: refusing to migrate a cookie older than the migrate cutoff (possible resurrected/revoked session)");
+                    return null;
+                }
                 const expireAt = typeof payload.exp === "number" ? payload.exp : now + cfg.sessionTtlSeconds;
                 await cfg.sessionStore.create({
                     ...cookieRec,
@@ -496,9 +563,15 @@ function createFederatedFrontend(config) {
             return null;
         }
         catch (err) {
-            // A transient filesystem error must not lock the user out: fall back to the signed cookie.
-            cfg.log("warn", "session store read failed; falling back to signed cookie", err);
-            return cookieRec;
+            // A store read error must not silently defeat revocation/expiry. Default (fail "closed"):
+            // treat the request as signed out. Only "cookie-grace" mode falls back to the signed cookie
+            // (availability over the store-side checks), and only for apps that opted into that risk.
+            if (cfg.sessionStoreFailMode === "cookie-grace") {
+                cfg.log("warn", "session store read failed; cookie-grace mode falling back to signed cookie", err);
+                return cookieRec;
+            }
+            cfg.log("warn", "session store read failed; failing closed (signed out)", err);
+            return null;
         }
     }
     /** The Client snapshot shape RealAuthCore.applyClient() consumes. */
@@ -557,6 +630,84 @@ function createFederatedFrontend(config) {
         if (cfg.audience)
             jwt = jwt.setAudience(cfg.audience);
         return await jwt.sign(accessKey);
+    }
+    /** Reconstruct the minimal upstream identity from a live session, for grant re-resolution. */
+    function identityFromSession(session) {
+        return {
+            sub: session.userId.startsWith("user_") ? session.userId.slice("user_".length) : session.userId,
+            email: session.email,
+            // The identity was authenticated at sign-in; re-resolution re-checks AUTHORIZATION (grants),
+            // not authentication, so this is treated as verified.
+            emailVerified: true,
+            hd: session.hd,
+            name: session.name,
+            givenName: session.firstName,
+            familyName: session.lastName,
+        };
+    }
+    /**
+     * Bound deprovision latency (finding #2). When `reresolveGrantsEverySeconds` is set and this
+     * session's grants are older than that window, re-run grant resolution from the session's identity
+     * and update the record in place. Returns `"signed_out"` (and sends the 401 + clears the cookie +
+     * tombstones the store record) when the user no longer qualifies; otherwise `"ok"`. Additive and
+     * off by default (window 0 = never re-resolve, preserving the historical behavior).
+     */
+    async function maybeReresolveGrants(session, res) {
+        if (cfg.reresolveGrantsEverySeconds <= 0)
+            return "ok";
+        const now = Math.floor(Date.now() / 1000);
+        if (now - session.grantsResolvedAt <= cfg.reresolveGrantsEverySeconds)
+            return "ok";
+        const resolver = cfg.revalidateGrants ?? cfg.resolveGrants;
+        let fresh;
+        try {
+            fresh = await resolver(identityFromSession(session));
+        }
+        catch (err) {
+            // A transient resolver error must not lock the user out mid-session: keep existing grants and
+            // retry on the next window.
+            cfg.log("warn", "grant re-resolution threw; keeping existing grants for this mint", err);
+            return "ok";
+        }
+        if (!fresh) {
+            // User no longer qualifies (e.g. removed from the mapped upstream group) → sign out.
+            if (cfg.sessionStore && session.sid) {
+                try {
+                    await cfg.sessionStore.remove(session.email, session.sid);
+                }
+                catch (err) {
+                    cfg.log("warn", "session store remove failed during grant re-resolution sign-out", err);
+                }
+            }
+            clearCookie(res, cfg.sessionCookieName, cfg.cookieSecure);
+            cfg.log("info", `Access revoked on grant re-resolution for ${redactEmail(session.email, emailLogKey)}`);
+            sendJson(res, 401, { error: "not_authenticated" });
+            return "signed_out";
+        }
+        // Apply the fresh grants to the in-memory session (the re-signed cookie below carries them).
+        session.roles = fresh.roles;
+        session.permissions = fresh.permissions;
+        session.memberships = fresh.memberships;
+        // Keep the active org if the user is still a member; otherwise fall back to the fresh default.
+        if (!session.orgId || !fresh.memberships.some((m) => m.organization.id === session.orgId)) {
+            session.orgId = fresh.orgId;
+        }
+        session.grantsResolvedAt = now;
+        if (cfg.sessionStore && session.sid) {
+            try {
+                await cfg.sessionStore.touch(session.email, session.sid, {
+                    roles: session.roles,
+                    permissions: session.permissions,
+                    memberships: session.memberships,
+                    orgId: session.orgId,
+                    grantsResolvedAt: now,
+                });
+            }
+            catch (err) {
+                cfg.log("warn", "session store touch failed after grant re-resolution", err);
+            }
+        }
+        return "ok";
     }
     // --- OAuth state (CSRF + PKCE + return targets) carried in a short-lived signed cookie ----
     async function signState(state) {
@@ -769,6 +920,9 @@ function createFederatedFrontend(config) {
             const { payload } = await (0, jose_1.jwtVerify)(idToken, jwks, {
                 issuer: GOOGLE_ISSUERS,
                 audience: cfg.google.clientId,
+                // Pin RS256 (Google signs id_tokens with RSA) — consistent with every other verify path in
+                // the library and closes any RS/HS algorithm-confusion agility on this call.
+                algorithms: ["RS256"],
             });
             if (saved.nonce && payload.nonce !== saved.nonce) {
                 throw new Error("nonce mismatch");
@@ -875,6 +1029,7 @@ function createFederatedFrontend(config) {
             orgId: grants.orgId,
             memberships: grants.memberships,
             lastVerifiedAt: now,
+            grantsResolvedAt: now,
         };
         const sessionJwt = await signSession(session);
         setCookie(res, cfg.sessionCookieName, sessionJwt, {
@@ -882,7 +1037,7 @@ function createFederatedFrontend(config) {
             secure: cfg.cookieSecure,
             sameSite: cfg.sessionCookieSameSite,
         });
-        // Persist the durable server-side record (Clerk's stateful half) so the session survives app
+        // Persist the durable server-side record (the stateful half of the session model) so the session survives app
         // restarts, can be listed, and can be revoked. Best-effort: a store failure must not block a
         // successful sign-in (the signed cookie still works on its own).
         if (cfg.sessionStore) {
@@ -900,12 +1055,12 @@ function createFederatedFrontend(config) {
             }
         }
         // Redact PII: log a hashed identifier, not the raw email, on the routine per-sign-in line.
-        cfg.log("info", `Sign-in established for ${redactEmail(identity.email)}`);
+        cfg.log("info", `Sign-in established for ${redactEmail(identity.email, emailLogKey)}`);
         backToApp(res, fallbackRedirect, { redirect_url_complete: redirectUrlComplete });
     }
     /**
-     * GET /environment — instance configuration, mirroring Clerk's Frontend-API `/v1/environment`.
-     * Clerk-compatible clients fetch this on load to learn which sign-in strategies exist before any
+     * GET /environment — instance configuration, mirroring the hosted-identity-provider Frontend-API
+     * `/v1/environment`. Hosted-IdP-style clients fetch this on load to learn which sign-in strategies exist before any
      * session is established, so it is UNAUTHENTICATED by design and must stay secret-free: it
      * exposes only which strategies are enabled and the non-secret session policy — never client
      * ids/secrets, cookie names, or the signing secret.
@@ -948,8 +1103,15 @@ function createFederatedFrontend(config) {
         const session = await readSession(req);
         if (!session)
             return sendJson(res, 401, { error: "not_authenticated" });
+        // Optionally re-resolve grants before minting so a deprovision/role change upstream takes effect
+        // within reresolveGrantsEverySeconds instead of only at session end. No-op when disabled.
+        if ((await maybeReresolveGrants(session, res)) === "signed_out")
+            return;
         const body = await readJsonBody(req);
-        const orgId = body.org_id ?? session.orgId;
+        let orgId = body.org_id ?? session.orgId;
+        // After a re-resolution the requested org may no longer be a membership; fall back to the base.
+        if (orgId && !session.memberships.some((m) => m.organization.id === orgId))
+            orgId = session.orgId;
         const jwt = await mintAccessToken(session, orgId);
         // Sliding session: re-issue the session cookie on each mint so an actively-used session rolls
         // forward instead of hard-expiring at the absolute sessionTtl. Re-signed (not just a Max-Age
@@ -975,7 +1137,7 @@ function createFederatedFrontend(config) {
         }
         // Audit trail: token refresh is logged alongside sign-in/sign-out (consumer specs require it).
         // The client caches the access token, so this fires roughly once a minute during active use.
-        cfg.log("info", `Access token refreshed for ${redactEmail(session.email)}`);
+        cfg.log("info", `Access token refreshed for ${redactEmail(session.email, emailLogKey)}`);
         sendJson(res, 200, { jwt, object: "token" });
     }
     async function handleTouch(req, res) {
@@ -1064,12 +1226,12 @@ function createFederatedFrontend(config) {
         clearCookie(res, cfg.sessionCookieName, cfg.cookieSecure);
         // Audit trail: sign-out is logged like sign-in and token refresh (consumer specs require it).
         if (session)
-            cfg.log("info", `Sign-out completed for ${redactEmail(session.email)}`);
+            cfg.log("info", `Sign-out completed for ${redactEmail(session.email, emailLogKey)}`);
         sendJson(res, 200, { object: "session", deleted: true });
     }
     /**
      * GET /client/sessions/active — list the signed-in user's active (non-revoked, unexpired)
-     * sessions. Mirrors Clerk's session-listing surface so an app can build a "sign out other
+     * sessions. Mirrors the hosted-identity-provider session-listing surface so an app can build a "sign out other
      * devices" view. Returns an empty list when signed out or when no store is configured.
      */
     async function handleListSessions(req, res) {
@@ -1280,7 +1442,7 @@ function createFederatedFrontend(config) {
                 await handleSamlAcs(req, res);
                 return true;
             }
-            // Clerk-compatible instance-configuration endpoint. Some Clerk-style clients fetch this on
+            // Hosted-IdP-style instance-configuration endpoint. Some hosted-IdP-style clients fetch this on
             // load; without it the request falls through to the host app as a noisy 404.
             if (method === "GET" && path === "/environment") {
                 handleEnvironment(res);
@@ -1290,7 +1452,7 @@ function createFederatedFrontend(config) {
                 await handleClient(req, res);
                 return true;
             }
-            // List the user's active sessions (Clerk-style). Declared before the :id pattern below.
+            // List the user's active sessions (hosted-IdP-style). Declared before the :id pattern below.
             if (method === "GET" && path === "/client/sessions/active") {
                 await handleListSessions(req, res);
                 return true;

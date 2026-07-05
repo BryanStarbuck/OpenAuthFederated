@@ -37,7 +37,7 @@ Object.defineProperty(exports, "getAuth", { enumerable: true, get: function () {
 var frontend_js_1 = require("./frontend.js");
 Object.defineProperty(exports, "createFederatedFrontend", { enumerable: true, get: function () { return frontend_js_1.createFederatedFrontend; } });
 Object.defineProperty(exports, "createAuthFrontend", { enumerable: true, get: function () { return frontend_js_1.createAuthFrontend; } });
-// Persistent, server-side session store (the stateful half of the Clerk-style session model).
+// Persistent, server-side session store (the stateful half of the session model).
 // Pass a store to createFederatedFrontend({ sessionStore }) to make sessions survive app restarts
 // and support revocation / listing / inactivity timeout.
 var session_store_js_1 = require("./session-store.js");

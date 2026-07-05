@@ -1,10 +1,12 @@
 /**
- * Persistent, server-side session store — the *stateful* half of a Clerk-style session model.
+ * Persistent, server-side session store — the *stateful* half of a hosted-identity-provider-style
+ * session model.
  *
- * Clerk keeps a long-lived session RECORD on the server (so a session can be listed, revoked,
- * and aged out by inactivity) while the browser only ever holds a short-lived session *token*
- * that is refreshed on an interval. OpenAuthFederated's embedded `createFederatedFrontend()`
- * already implements the short-token + sliding-cookie half; this module adds the durable record.
+ * A hosted-identity-provider-style session model keeps a long-lived session RECORD on the server (so
+ * a session can be listed, revoked, and aged out by inactivity) while the browser only ever holds a
+ * short-lived session *token* that is refreshed on an interval. OpenAuthFederated's embedded
+ * `createFederatedFrontend()` already implements the short-token + sliding-cookie half; this module
+ * adds the durable record.
  *
  * Why this matters for "stay logged in forever, even across app restarts": with only a stateless
  * signed cookie, the cookie alone carries the session, so a restart is survivable ONLY as long as
@@ -49,6 +51,11 @@ export interface StoredSession {
     memberships: SessionMembership[];
     /** Last step-up / reverify time (epoch seconds). */
     lastVerifiedAt: number;
+    /**
+     * When the grants (roles/permissions/memberships) on this record were last resolved (epoch
+     * seconds). Optional for back-compat with records written before grant re-resolution existed.
+     */
+    grantsResolvedAt?: number;
     /** When the session was first established (epoch seconds). */
     createdAt: number;
     /** Last time a token was minted / the session was touched (epoch seconds) — drives inactivity. */
@@ -75,7 +82,7 @@ export interface SessionStore {
     touch(userKey: string, sid: string, patch: Partial<StoredSession>): Promise<void> | void;
     /** Revoke (tombstone) a session so it can no longer be used. */
     remove(userKey: string, sid: string): Promise<void> | void;
-    /** List a user's non-revoked sessions (Clerk-style "active sessions"). */
+    /** List a user's non-revoked sessions (the "active sessions" surface). */
     list(userKey: string): Promise<StoredSession[]> | StoredSession[];
 }
 /**

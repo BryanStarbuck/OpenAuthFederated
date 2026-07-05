@@ -40,10 +40,19 @@ export interface SamlSpConfig {
     /** Require the assertion to be signed (default true — never accept an unsigned assertion). */
     wantAssertionsSigned?: boolean;
     /**
-     * Require the whole SAML Response to be signed too. Defaults to **true** — requiring the
-     * response-level signature is the primary defense against XML Signature Wrapping (XSW), where an
-     * attacker relocates a legitimately-signed assertion inside a forged response. Set false only for
-     * an IdP that genuinely signs the assertion but not the response, accepting the documented risk.
+     * Require the whole SAML Response envelope to be signed too — not just the assertion. The
+     * response-level signature is the single strongest defense against XML Signature Wrapping (XSW),
+     * where an attacker relocates a legitimately-signed assertion inside a forged response.
+     *
+     * Defaults to **false**, because the reference IdP (Google Workspace) signs the *assertion* but
+     * not always the *response*, and defaulting this on would break that flow. The residual XSW risk
+     * is mitigated by node-saml v5's signature-reference hardening, the audience + InResponseTo
+     * checks, and the assertion-id replay cache in {@link validateSamlAcs}.
+     *
+     * STRONGLY RECOMMENDED: any IdP that signs the response (most enterprise IdPs, and Google when
+     * configured to sign the response) should set this to **true** for the strongest posture. Leave it
+     * false only for an IdP that genuinely signs the assertion but not the response, accepting the
+     * documented residual risk.
      */
     wantAuthnResponseSigned?: boolean;
     /** Clock-skew tolerance for the assertion's NotBefore / NotOnOrAfter (default 5000ms). */
@@ -76,7 +85,14 @@ export interface SamlReplayStore {
     /** Record a consumed assertion id, expiring no later than `notOnOrAfter` (epoch ms). */
     record(assertionId: string, notOnOrAfter: number): void | Promise<void>;
 }
-/** Default in-memory {@link SamlReplayStore} — adequate for a single-process embedded deployment. */
+/**
+ * Default in-memory {@link SamlReplayStore} — adequate for a SINGLE-process embedded deployment
+ * only. A consumed assertion id recorded here is invisible to sibling processes/instances, so a
+ * horizontally-scaled deployment (more than one process behind a load balancer) can still replay a
+ * SAML assertion across the other instances within its validity window. Multi-instance deployments
+ * MUST supply a shared, cross-process {@link SamlReplayStore} (Redis/DB-backed) via
+ * `createFederatedFrontend({ samlReplayStore })`, and likewise a shared {@link SessionStore}.
+ */
 export declare class InMemorySamlReplayStore implements SamlReplayStore {
     private readonly seenIds;
     seen(assertionId: string): boolean;

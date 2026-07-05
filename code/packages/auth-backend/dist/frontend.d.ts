@@ -105,7 +105,7 @@ export interface FederatedFrontendConfig {
     cookiePrefix?: string;
     sessionCookieName?: string;
     /**
-     * Session **maximum lifetime** in seconds — Clerk's "Maximum lifetime" knob. The absolute ceiling
+     * Session **maximum lifetime** in seconds — the "maximum lifetime" knob. The absolute ceiling
      * after which the user must sign in again, regardless of activity. Defaults to ~4 months. The
      * session is a sliding window (re-issued on each token mint), so active use rolls the cookie
      * forward up to this ceiling. (Name kept as `sessionTtlSeconds` for back-compat.)
@@ -113,7 +113,7 @@ export interface FederatedFrontendConfig {
     sessionTtlSeconds?: number;
     accessTokenTtlSeconds?: number;
     /**
-     * Session **inactivity timeout** in seconds — Clerk's "Inactivity timeout" knob. If a session
+     * Session **inactivity timeout** in seconds — the "inactivity timeout" knob. If a session
      * goes this long without a token refresh / touch, it is treated as signed out. `0` (the default)
      * disables it: combined with the long maximum lifetime, a user stays signed in "forever" as long
      * as they return within the maximum lifetime. Only enforced when a {@link sessionStore} is set
@@ -127,12 +127,46 @@ export interface FederatedFrontendConfig {
      */
     sessionStoreMigrate?: boolean;
     /**
-     * Durable server-side session store (the stateful half of the Clerk model). When provided, each
+     * Durable server-side session store (the stateful half of the session model). When provided, each
      * sign-in writes a {@link StoredSession}; reads validate it (revocation, max-lifetime, inactivity)
      * and the record survives app restarts. When omitted, the library is purely stateless (the signed
      * cookie is the whole session) — backward compatible. See `session-store.ts` / {@link FileSessionStore}.
      */
     sessionStore?: SessionStore;
+    /**
+     * What a session-store READ error does (stateful mode). The store enforces revocation,
+     * max-lifetime, and inactivity; if `store.get()` throws we must decide whether to trust the signed
+     * cookie or treat the request as signed out.
+     *   - `"closed"` (DEFAULT): fail closed — a store error returns null (signed out). Revocation is
+     *     never silently bypassed, including under an attacker-induced store fault.
+     *   - `"cookie-grace"`: fall back to the signed cookie on a store error (availability over the
+     *     store-side checks). Use only for availability-sensitive apps that accept the documented risk
+     *     that a revoked/aged-out session can slip through during a store outage.
+     */
+    sessionStoreFailMode?: "closed" | "cookie-grace";
+    /**
+     * Upper bound (seconds) on how old a session cookie may be for {@link sessionStoreMigrate} to
+     * re-create a missing durable record from it. Migration trusts the cookie, so a lost tombstone
+     * could otherwise resurrect a revoked session from an old-but-valid cookie. Only cookies issued
+     * within this window are migrated; older ones fail closed. Defaults to 600 (10 minutes).
+     */
+    sessionStoreMigrateMaxAgeSeconds?: number;
+    /**
+     * Bound deprovision latency: re-resolve grants on token mint when the session's grants are older
+     * than this many seconds. Grants are otherwise baked in at sign-in and reused until the session
+     * ends, so an upstream demotion/offboard only takes effect at session end. When set (> 0), each
+     * mint whose grants exceed this age re-runs {@link revalidateGrants} (or {@link resolveGrants})
+     * from the session's identity; if the user no longer qualifies (a null result) the session is
+     * treated as signed out. Additive and **off by default** (0/undefined = never re-resolve).
+     */
+    reresolveGrantsEverySeconds?: number;
+    /**
+     * Optional lighter-weight re-resolution used by {@link reresolveGrantsEverySeconds}. Given the
+     * identity reconstructed from the current session, return fresh grants, or `null` to force
+     * sign-out (e.g. the user was removed from the mapped upstream group). Defaults to
+     * {@link resolveGrants} when omitted.
+     */
+    revalidateGrants?: (identity: OidcIdentity) => ResolvedGrants | null | Promise<ResolvedGrants | null>;
     /**
      * Carry the Secure attribute on all cookies. Defaults to **true** (production-safe). Set false
      * ONLY for local http development; never ship a non-Secure session cookie to production.
@@ -145,8 +179,17 @@ export interface FederatedFrontendConfig {
      */
     sessionCookieSameSite?: "Lax" | "Strict";
     /**
-     * Per-app audience (`aud`) stamped on minted session/access tokens and required on verify. Binds
-     * a token to this app so two apps sharing a secret/prefix cannot accept each other's tokens.
+     * Per-app audience (`aud`) stamped on minted session/access tokens AND enforced on verify. This
+     * function bridges the value into `configureEmbeddedVerification`, so `verifyToken()` requires the
+     * same `aud` by default (not only when each verify call passes it) — a token minted for another
+     * app (different `aud`) is rejected here.
+     *
+     * IMPORTANT: `audience` is defense-in-depth, NOT the primary isolation control. The primary
+     * control is a DISTINCT per-app `sessionSecret`: two apps that share a secret can forge each
+     * other's tokens regardless of `aud`. Give every app its own strong `sessionSecret` (and, when
+     * setting `audience`, also a distinct {@link issuer} — two apps that both omit `issuer` share the
+     * default `"openauthfederated"`). A construction-time warning fires if `audience` is set without a
+     * distinct `issuer`.
      */
     audience?: string;
     /**

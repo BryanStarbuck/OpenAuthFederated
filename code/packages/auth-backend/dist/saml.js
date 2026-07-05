@@ -45,7 +45,14 @@ function buildSamlClient(cfg) {
         disableRequestedAuthnContext: true,
     });
 }
-/** Default in-memory {@link SamlReplayStore} — adequate for a single-process embedded deployment. */
+/**
+ * Default in-memory {@link SamlReplayStore} — adequate for a SINGLE-process embedded deployment
+ * only. A consumed assertion id recorded here is invisible to sibling processes/instances, so a
+ * horizontally-scaled deployment (more than one process behind a load balancer) can still replay a
+ * SAML assertion across the other instances within its validity window. Multi-instance deployments
+ * MUST supply a shared, cross-process {@link SamlReplayStore} (Redis/DB-backed) via
+ * `createFederatedFrontend({ samlReplayStore })`, and likewise a shared {@link SessionStore}.
+ */
 class InMemorySamlReplayStore {
     seenIds = new Map();
     seen(assertionId) {
