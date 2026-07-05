@@ -17,6 +17,9 @@ Connections come in two types:
 * **`oidc`** — OpenID Connect. An equivalent path that verifies the hosted-domain (`hd`) claim
   and `email_verified`.
 
+**Implemented in code.** The SAML 2.0 SP side (metadata / ACS URL / Entity ID, login redirect, and
+assertion validation) is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts` — `buildSamlClient()`, `samlSpMetadata()`, `samlLoginRedirectUrl()`, `validateSamlAcs()`. The `saml` / `oauth_google` connection shapes are the `FederatedConnectionConfig` types consumed by `createFederatedFrontend()` in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts`; the browser lists them via `RealAuthCore.connections()` in `auth-react/src/core.ts`.
+
 ## The SSO Connection object
 
 | Field | Type | Description |

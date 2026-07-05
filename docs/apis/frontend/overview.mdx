@@ -47,6 +47,11 @@ All endpoints in this reference are rooted at `/v1`. The Frontend API and the
 [Backend API](../backend/overview.mdx) (`https://api.<your-domain>/v1`) are distinct hosts with
 distinct authorization models — do not mix them.
 
+**Implemented in code.** The Frontend API mux (mountable on the host SP app, e.g.
+`app.use('/api/v1', createFederatedFrontend(cfg))`) that serves the `/client`, `/sign_in/sso`,
+`/oauth_callback`, `/saml/*`, and session-token endpoints is in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`.
+
 ## Authorization
 
 The Frontend API uses a **two-part, public-safe** authorization model:

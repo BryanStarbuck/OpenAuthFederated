@@ -19,6 +19,9 @@ data.
 OpenAuthFederated is self-hosted, so the Backend API runs inside *your* deployment. There is no
 shared multi-tenant host: the base URL is your own domain.
 
+**Implemented in code.** The typed client that fronts every Backend API resource below is built by
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/index.ts` — `createFederatedClient()` — returning the `AuthClient` in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` (class `AuthClient`; `users`, `sessions`, `organizations`, `invitations`, `jwtTemplates` resources).
+
 ## Base URL
 
 All Backend API endpoints are served under the `/v1` path of your deployment's API host:

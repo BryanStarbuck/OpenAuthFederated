@@ -16,6 +16,11 @@ If the Backend API is where your application *reads and writes user/session data
 and the Frontend API is what *browser clients call to sign users in*, the Platform API is where
 an administrator (or your provisioning automation / IaC) *sets the rules of the system*.
 
+**Implemented in code.** OpenAuthFederated is an SP-side library, so the control-plane configuration
+(connections, domains, RBAC) is consumed at runtime rather than served from a hosted dashboard: the
+`FederatedFrontendConfig` (connections, `allowedDomains`, `requireHostedDomain`, `resolveGrants`) is
+applied by `createFederatedFrontend()` in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts`, with SAML wiring in `saml.ts` and RBAC evaluation in `permissions.ts`.
+
 | Plane | API | Audience | Typical caller |
 | --- | --- | --- | --- |
 | **Control plane** | **Platform API** (this reference) | Admins / DevOps / IaC | Backend services holding a secret key |

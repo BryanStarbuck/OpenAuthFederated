@@ -19,6 +19,9 @@ The model has three layers:
 At sign-in, resolved permissions are flattened into the user's session and exposed as JWT claims
 your app enforces.
 
+**Implemented in code.** The `<feature>:<action>` permission/role evaluation (including `*` wildcards)
+is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts` — `hasPermission()`, `hasRole()`, `checkClaims()` (and `requirePermission()` / `requireRole()`). Group→role resolution at sign-in is the `resolveGrants`/`defaultResolveGrants()` hook in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts`.
+
 ## The Permission object
 
 A permission is the string `<feature>:<action>`. `feature` and `action` may each be `*` for

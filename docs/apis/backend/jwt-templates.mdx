@@ -15,6 +15,9 @@ request without calling back to OpenAuthFederated.
 All endpoints are relative to your base URL, e.g.
 `https://api.whitehatengineering.com/v1`.
 
+**Implemented in code.** The typed client over the template endpoints (and templated minting) is in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `JwtTemplatesResource` (`getJwtTemplateList()`, `createJwtTemplate()`, `updateJwtTemplate()`, `deleteJwtTemplate()`, `mintToken()`).
+
 ## The JWT Template object
 
 | Field            | Type    | Description                                                                |

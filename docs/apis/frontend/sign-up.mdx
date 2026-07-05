@@ -22,6 +22,10 @@ All requests use the Frontend API base URL with the **publishable key** + sessio
 https://auth.whitehatengineering.com/v1
 ```
 
+**Implemented in code.** The federated sign-up path shares the sign-in handlers — JIT provisioning
+and domain-enforcement rejection happen in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `handleCallback()` and `finishSignIn()` (rejects non-allowed domains via `backToApp()` with an `identity_domain_not_allowed` error). The browser side is `RealAuthCore.authenticateWithRedirect()` in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/core.ts`.
+
 ## The SignUp object
 
 | Field | Type | Description |

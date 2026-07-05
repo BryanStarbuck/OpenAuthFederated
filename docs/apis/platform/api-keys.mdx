@@ -21,6 +21,9 @@ distinct surface:
 * **SCIM tokens** are managed alongside the connection that owns them (see
   [SCIM provisioning tokens](#scim-provisioning-tokens)).
 
+**Implemented in code.** The secret key is consumed as the server-to-server Bearer (with a TLS-only
+`apiUrl` guard) in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `AuthClient` (constructor). Machine / long-lived API-key token verification (`token_type: "machine"`, scope checks) is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts` — `verifyMachineToken()`, `hasScope()`.
+
 ## The API key object
 
 | Field | Type | Description |

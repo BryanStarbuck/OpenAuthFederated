@@ -14,6 +14,9 @@ and **domain enforcement** to control exactly who may enter your deployment.
 All endpoints are relative to your base URL, e.g.
 `https://api.whitehatengineering.com/v1`.
 
+**Implemented in code.** The typed client over the invitation endpoints is in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `InvitationsResource` (`getInvitationList()`, `createInvitation()`, `revokeInvitation()`). The sign-in-time domain/allowlist enforcement described below is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `finishSignIn()`.
+
 ## The Invitation object
 
 | Field             | Type    | Description                                                            |

@@ -5,6 +5,8 @@ description: Go live with a custom domain, a Google Workspace SAML/OIDC connecti
 
 Going to production means pointing your app at a live OpenAuthFederated instance, federating to Google Workspace, and turning on the enforcement and revocation controls that make the platform safe. This page walks through the reference deployment that gates an internal app to the `whitehatengineering.com` Google Workspace — only active employees can sign in, with no app passwords, no social logins, and no anonymous access.
 
+**Implemented in code.** The SAML connection (SP metadata / ACS URL / Entity ID and assertion validation) is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts` — `samlSpMetadata()`, `buildSamlClient()`, `validateSamlAcs()`. Domain enforcement and Workspace-group→role mapping run at sign-in in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `finishSignIn()` and the `resolveGrants`/`defaultResolveGrants()` hook — with permission checks in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts`.
+
 ## 1. Switch to live keys and a custom domain
 
 Production uses `*_live_*` keys and your own auth/API hostnames. Set these in your hosting provider's environment configuration (never commit secrets).

@@ -15,6 +15,9 @@ endpoint set is how you do that.
 All endpoints are relative to your base URL, e.g.
 `https://api.whitehatengineering.com/v1`.
 
+**Implemented in code.** The typed client over these session endpoints is in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `SessionsResource` (`getSession()`, `getSessionList()`, `revokeSession()`, `verifySession()`); networkless JWT verification is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts` — `verifyToken()`, and templated minting is `JwtTemplatesResource.mintToken()`.
+
 ## The Session object
 
 | Field            | Type    | Description                                                                       |

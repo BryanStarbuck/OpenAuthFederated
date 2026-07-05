@@ -5,6 +5,8 @@ description: Access the current user and session on the server and the client wi
 
 OpenAuthFederated gives you the current user and session in two contexts: on the **server** (Server Components, Route Handlers, Server Actions) with `auth()` and `currentUser()`, and on the **client** (React components) with the `useUser()` and `useAuth()` hooks. Both require the [middleware](./protect-routes.mdx) and the `<AuthProvider>` from the [quickstart](./quickstart-nextjs.mdx).
 
+**Implemented in code.** The server-side session context (`userId`, `sessionId`, `has()`, `getToken()`) is built in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/middleware.ts` — `getRequestAuth()` — and exposed via `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/express.ts` — `getAuth()`; the full-record `currentUser()` read is `UsersResource.getUser()` in `client.ts`. The client hooks are in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/hooks.ts` — `useUser()`, `useAuth()`.
+
 ## On the server
 
 ### `auth()` — session and authorization

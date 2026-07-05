@@ -16,6 +16,10 @@ SCIM complements, rather than replaces, JIT. JIT handles first sign-in; SCIM kee
 correct over time and — critically — **deprovisions** users so access is revoked when someone
 leaves.
 
+**Implemented in code.** Inbound SCIM event signatures are verified by
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — `verifyWebhook()`; the
+provision/deprovision RBAC join those events drive is `OrganizationsResource.createOrganizationMembership()` / `deleteOrganizationMembership()` (same file), and deprovision revocation flows through `SessionsResource.revokeSession()`.
+
 ## How SCIM is authenticated
 
 SCIM uses its **own bearer provisioning token**, scoped to a single connection — **not** your

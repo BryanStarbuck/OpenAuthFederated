@@ -20,6 +20,9 @@ All requests use the Frontend API base URL with the **publishable key** + sessio
 https://auth.whitehatengineering.com/v1
 ```
 
+**Implemented in code.** The server side of the SSO redirect + callback is in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `handleSsoStart()`, `handleSamlLogin()`, `handleCallback()`, and `finishSignIn()` (domain enforcement + session mint). The browser side is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/core.ts` — class `RealAuthCore` (`authenticateWithRedirect()`, `completeRedirectCallback()`).
+
 ## The SignIn object
 
 | Field | Type | Description |

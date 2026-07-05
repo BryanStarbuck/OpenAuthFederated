@@ -10,6 +10,10 @@ user is provisioned, updated, or deprovisioned (via [SCIM](./scim.mdx) or JIT), 
 organization membership changes, or when a session is created or revoked, OpenAuthFederated
 POSTs a **signed event** to the endpoints you register.
 
+**Implemented in code.** Inbound webhook/SCIM event signature verification (HMAC-SHA256 over
+`${timestamp}.${rawBody}`, constant-time compare, replay tolerance) is in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — `verifyWebhook()`.
+
 ## The Webhook endpoint object
 
 | Field | Type | Description |

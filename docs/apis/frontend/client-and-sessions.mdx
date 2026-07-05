@@ -17,6 +17,9 @@ the rotating session cookie — never the secret key.
 https://auth.whitehatengineering.com/v1
 ```
 
+**Implemented in code.** The Client/session endpoints are served by
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `handleClient()` (`GET /client`), `handleListSessions()` (`/client/sessions/active`), `handleTouch()`, `handleMintToken()` (rotates the `__session` cookie), and `handleRemove()`. Browser-side token/sign-out logic is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/core.ts` — `RealAuthCore.getToken()` and `signOut()`.
+
 ## The Client object
 
 | Field | Type | Description |

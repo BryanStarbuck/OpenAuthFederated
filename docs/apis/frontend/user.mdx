@@ -20,6 +20,10 @@ All requests use the Frontend API base URL with the **publishable key** + sessio
 https://auth.whitehatengineering.com/v1
 ```
 
+**Implemented in code.** The client-safe "me" view is delivered inside the Client payload built by
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `handleClient()`. The browser reads it via
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/hooks.ts` — `useUser()` (and `useSession()`), backed by `RealAuthCore.getSnapshot()` in `core.ts`.
+
 ## The User object (client view)
 
 | Field | Type | Description |

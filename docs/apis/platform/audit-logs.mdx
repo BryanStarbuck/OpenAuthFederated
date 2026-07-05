@@ -14,6 +14,9 @@ Each entry pairs an **actor** (who did it) with an **action** and a **target** (
 on), plus request context (`ip`, `user_agent`) and a `trace_id` you can correlate with API
 responses and [webhooks](./webhooks.mdx).
 
+**Implemented in code.** The audited sign-in, sign-out, token-refresh, and domain-rejection events are
+emitted in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `finishSignIn()`, `handleCallback()`, `handleMintToken()`, and `handleRemove()` (via the configured `cfg.log`). (The queryable log store/endpoints described below are deployment-side and not part of this SP library.)
+
 ## The Audit log object
 
 | Field | Type | Description |

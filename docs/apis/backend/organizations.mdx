@@ -15,6 +15,9 @@ inputs, to avoid lock-in.
 All endpoints are relative to your base URL, e.g.
 `https://api.whitehatengineering.com/v1`.
 
+**Implemented in code.** The typed client over these organization/membership endpoints is in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `OrganizationsResource` (`getOrganization()`, `getOrganizationList()`, `getOrganizationMembershipList()`, `createOrganization()`, `updateOrganization()`, `deleteOrganization()`, `createOrganizationMembership()`, `updateOrganizationMembership()`, `deleteOrganizationMembership()`). Role→permission resolution is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts` — `hasPermission()`, `hasRole()`, `checkClaims()`.
+
 ## The Organization object
 
 | Field              | Type    | Description                                                       |

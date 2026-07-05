@@ -9,6 +9,9 @@ Route protection in OpenAuthFederated happens in `middleware.ts`. You decide whi
 
 `authMiddleware()` accepts a callback that receives `auth` and the request. Inside it you use `createRouteMatcher()` to test the URL, then call `auth.protect()` to require access or `has()` to make a custom decision. Everything not matched stays public by default.
 
+**Implemented in code.** Route protection is in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/middleware.ts` — `authMiddleware()`, `createRouteMatcher()`, and the `auth.protect()` / `has()` object built by `getRequestAuth()`. The `has({ permission })` / `has({ role })` resolution against the authoritative RBAC model is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts` — `hasPermission()`, `hasRole()`, `checkClaims()`.
+
 ## Require authentication
 
 Match the routes you want to protect and call `auth.protect()` — unauthenticated users are redirected to sign-in automatically.

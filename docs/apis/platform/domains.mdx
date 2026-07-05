@@ -15,6 +15,10 @@ A domain ties together the chain **domain → connection → org**: an inbound i
 domain is matched to a verified domain, which routes to the org's
 [SSO connection](./sso-connections.mdx).
 
+**Implemented in code.** Domain enforcement — rejecting any identity whose verified `hd`/email domain
+is not on the allowlist (and, when Workspace-gated, requiring a present `hd` claim) — runs at sign-in in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `finishSignIn()` (against the resolved `allowedDomains` / `requireHostedDomain` config). The SAML path's `email_verified` resolution is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts` — `validateSamlAcs()`.
+
 ## The Domain object
 
 | Field | Type | Description |

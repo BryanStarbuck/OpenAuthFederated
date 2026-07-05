@@ -19,6 +19,9 @@ would create one org per customer, each with its own connection and domains.
 > creating tenants and attaching identity configuration. Names and IDs (`org_...`) are shared
 > across both APIs.
 
+**Implemented in code.** The typed client over org/tenant create/read/update/delete and memberships is
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/client.ts` — class `OrganizationsResource` (`createOrganization()`, `getOrganization()`, `updateOrganization()`, `deleteOrganization()`, `getOrganizationMembershipList()`, `createOrganizationMembership()`).
+
 ## The Organization object
 
 | Field | Type | Description |

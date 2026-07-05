@@ -19,6 +19,9 @@ delivered to a browser SPA across the redirect, the rejection code catalog, and 
 > [sign-up](./sign-up.mdx#domain-enforcement) flows. The rejection example there is one instance
 > of the envelope described here.
 
+**Implemented in code.** The server flattens the rejection envelope into callback query params in
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `finishSignIn()` / `backToApp()`. The browser parses it into a typed `AuthRejection` in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/core.ts` — `RealAuthCore.completeRedirectCallback()`, and surfaces it via `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/components.tsx` — `readAuthError()`, `useAuthError()`, `AuthenticateWithRedirectCallback()`.
+
 ## The error envelope
 
 Every Frontend API error — whether returned directly from a JSON endpoint or carried back across
