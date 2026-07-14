@@ -189,6 +189,14 @@ export class RealAuthCore extends BaseCore {
     token = null;
     tokenExp = 0;
     inflight = null;
+    // Proactive refresh. When enabled, a timer re-mints the access token ~30s BEFORE its `exp`, so a
+    // long-lived tab never has to discover expiry the hard way — via a failed (401) request that the
+    // axios interceptor then has to reload-and-retry. That reactive "401 → reload → retry" is what
+    // surfaces as the "lots of timeouts"/stutter symptom on a 15-min token; scheduling ahead turns it
+    // into a silent renewal. The timer is armed off each mint's own `exp` and cleared on sign-out /
+    // cache invalidation. Opt-in (enableAutoRefresh) so a mock/dev core is unaffected.
+    autoRefresh = false;
+    refreshTimer = null;
     constructor(frontendApi, publishableKey, allowedDomains) {
         super();
         this.frontendApi = frontendApi;
@@ -366,6 +374,52 @@ export class RealAuthCore extends BaseCore {
         });
         return this.inflight;
     }
+    /**
+     * Enable proactive access-token refresh. Idempotent. After each mint the SDK schedules a re-mint
+     * shortly before the token's own `exp`, so an active tab keeps a valid Bearer without ever
+     * surfacing a 401. Each mint also rolls the session cookie forward (server side), so an active tab
+     * both keeps its Bearer AND slides its session ceiling. Call once after wiring the core.
+     */
+    enableAutoRefresh() {
+        if (this.autoRefresh)
+            return;
+        this.autoRefresh = true;
+        // If a token is already cached, arm now; otherwise the next mint arms it.
+        if (this.token)
+            this.scheduleRefresh();
+    }
+    /** Stop proactive refresh and cancel any pending timer (e.g. on teardown). */
+    disableAutoRefresh() {
+        this.autoRefresh = false;
+        this.cancelRefreshTimer();
+    }
+    /** Force a fresh mint now, bypassing the cache. Returns the new token (or null if signed out). */
+    async refresh() {
+        if (!this.activeSessionId)
+            return null;
+        this.clearTokenCache();
+        return this.getToken();
+    }
+    cancelRefreshTimer() {
+        if (this.refreshTimer) {
+            clearTimeout(this.refreshTimer);
+            this.refreshTimer = null;
+        }
+    }
+    /** Arm a single timer to re-mint ~30s before `exp` (never sooner than 5s out). */
+    scheduleRefresh() {
+        this.cancelRefreshTimer();
+        if (!this.autoRefresh || !this.activeSessionId)
+            return;
+        const now = Math.floor(Date.now() / 1000);
+        const secs = Math.max(5, this.tokenExp - now - 30);
+        this.refreshTimer = setTimeout(() => {
+            this.refreshTimer = null;
+            // Non-fatal: if the mint fails (backend blip), the reactive 401 path still recovers the call.
+            if (this.activeSessionId)
+                void this.refresh().catch(() => null);
+        }, secs * 1000);
+    }
     /** POST to the Frontend API to mint an access JWT. Caches the default (non-templated) token. */
     async mintToken(template) {
         if (!this.activeSessionId)
@@ -388,6 +442,8 @@ export class RealAuthCore extends BaseCore {
             this.token = jwt;
             // Time the cache off the token's own `exp`; fall back to the 60s default TTL if unreadable.
             this.tokenExp = readJwtExp(jwt) ?? Math.floor(Date.now() / 1000) + 60;
+            // Arm the next proactive re-mint (no-op unless enableAutoRefresh() was called).
+            this.scheduleRefresh();
         }
         return jwt;
     }
@@ -395,6 +451,9 @@ export class RealAuthCore extends BaseCore {
     clearTokenCache() {
         this.token = null;
         this.tokenExp = 0;
+        // A stale scheduled refresh would mint against the just-cleared grant/session — cancel it. The
+        // next mint re-arms it (scheduleRefresh in mintToken).
+        this.cancelRefreshTimer();
     }
     async setActiveOrg(orgId) {
         if (!this.activeSessionId)
