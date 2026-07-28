@@ -1,8 +1,8 @@
 ================================================================================
-SECURITY AUDIT — Philosophers Stone
+SECURITY AUDIT — Uplift
 ================================================================================
 
-Scope: /Users/bryan/BGit/Bryan_git/Philosophers_Stone/code
+Scope: /Users/bryan/BGit/Bryan_git/uplift/code
        NestJS backend (packages/backend), Vite/React frontend (packages/frontend),
        shared zod schemas (packages/shared), the `phil` CLI, and the app's use of
        the OpenAuthFederated library (@auth/backend + @auth/react, linked from
@@ -82,12 +82,12 @@ REPRO STEPS
 3. curl -X DELETE http://<host>:9333/api/communities/charlie_kirk → 200, deleted.
 
 SOURCE FILES INVOLVED
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/auth/jwt-auth.guard.ts:29-35, 37-54, 57-60
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/main.ts:53-54
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/app.module.ts:15-17
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/shared/src/schemas.ts:14-20 (mode default "local")
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/communities/community-access.util.ts:23-30
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/community-store.ts:90-91
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/modules/auth/jwt-auth.guard.ts:29-35, 37-54, 57-60
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/main.ts:53-54
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/app.module.ts:15-17
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/shared/src/schemas.ts:14-20 (mode default "local")
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/modules/communities/community-access.util.ts:23-30
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/shared/community-store.ts:90-91
 
 CALL COUNT
 Affects every controller (all are behind the two global guards): communities,
@@ -144,9 +144,9 @@ REPRO STEPS
    OIDC layer accepts it because hd is not required.
 
 SOURCE FILES INVOLVED
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/auth/auth-frontend.ts:24-42, 55-74
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/auth/auth.strategy.ts:13-19, 33-38
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/shared/src/schemas.ts:30-37
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/modules/auth/auth-frontend.ts:24-42, 55-74
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/modules/auth/auth.strategy.ts:13-19, 33-38
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/shared/src/schemas.ts:30-37
 (library) /Users/bryan/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts:217-222, 517
 
 CALL COUNT
@@ -189,10 +189,10 @@ REPRO STEPS
 2. Observe Set-Cookie for the session lacks `Secure`.
 
 SOURCE FILES INVOLVED
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/auth/auth-frontend.ts:53, 70-71
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/main.ts:23-25 (helmet HSTS also tied to `secure`)
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/.env:11
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/.env.example:11
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/modules/auth/auth-frontend.ts:53, 70-71
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/main.ts:23-25 (helmet HSTS also tied to `secure`)
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/.env:11
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/.env.example:11
 
 CALL COUNT
 One config site; affects all cookies in server deployments.
@@ -236,9 +236,9 @@ REPRO STEPS
 3. B calls GET /api/communities → sees A's community with access "reader".
 
 SOURCE FILES INVOLVED
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/shared/src/schemas.ts:117-124
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/communities/communities.service.ts:64-72
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/community-store.ts:90-97, 265-278
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/shared/src/schemas.ts:117-124
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/modules/communities/communities.service.ts:64-72
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/shared/community-store.ts:90-97, 265-278
 
 CALL COUNT
 Default on every community creation + 2 seeded communities.
@@ -256,7 +256,7 @@ AllExceptionsFilter returns the raw Error.message to the client for any
 non-HttpException (all-exceptions.filter.ts:22-23) and serializes it into the
 response body (line 32) even for 500s. Internal errors here often contain absolute
 filesystem paths, e.g. writeYaml/writeText throw "writeYaml failed for
-/Users/<user>/T/_philosophers_stone/communities/.../decision_3.yaml: ..."
+/Users/<user>/T/_uplift/communities/.../decision_3.yaml: ..."
 (yaml-store.ts:50, text-store.ts:20).
 
 ROOT CAUSE
@@ -271,9 +271,9 @@ Information disclosure (usernames, absolute paths, internal structure) aiding fu
 attacks. Low on its own.
 
 SOURCE FILES INVOLVED
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/all-exceptions.filter.ts:12-13, 22-23, 26-32
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/yaml-store.ts:44-52
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/text-store.ts:14-22
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/shared/all-exceptions.filter.ts:12-13, 22-23, 26-32
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/shared/yaml-store.ts:44-52
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/shared/text-store.ts:14-22
 
 CALL COUNT
 Every unhandled 5xx across the API.
@@ -300,15 +300,15 @@ log file.
 SCENARIO
 Attacker POSTs {"message":"legit\n[ERROR] [Auth] admin login from 1.2.3.4"} to forge
 audit entries, or scripts thousands of large POSTs to fill the disk holding
-~/T/_philosophers_stone (which also holds all app state).
+~/T/_uplift (which also holds all app state).
 
 RISK
 Log forgery / anti-forensics and a disk-exhaustion DoS that can also break state
 writes. Low.
 
 SOURCE FILES INVOLVED
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/health/health.controller.ts:14-20
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/logging.ts:9-23
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/modules/health/health.controller.ts:14-20
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/shared/logging.ts:9-23
 
 CALL COUNT
 One public endpoint.
@@ -325,7 +325,7 @@ SITUATION / PROBLEM
 resolveStateDir() falls back to os.tmpdir() (typically /tmp) when homedir() is
 unavailable (state-dir.ts:13-19). The auth session secret is stored at
 <stateDir>/.auth_session_secret (state-dir.ts:55-57) and is the HS256 signing key
-for all tokens. On a shared multi-user host, /tmp/_philosophers_stone is a
+for all tokens. On a shared multi-user host, /tmp/_uplift is a
 predictable, world-accessible location; another local user could pre-create the
 directory (influencing permissions) or read the secret.
 
@@ -342,7 +342,7 @@ Signing-key disclosure → token forgery. Low (requires the unusual no-home fall
 and a shared host).
 
 SOURCE FILES INVOLVED
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/config/state-dir.ts:7-27, 54-57
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/config/state-dir.ts:7-27, 54-57
 
 FIX
 Fail fast (refuse to start in server mode) rather than falling back to /tmp; if a
@@ -372,7 +372,7 @@ RISK
 Low; mainly a local-dev CSRF-adjacent surface.
 
 SOURCE FILES INVOLVED
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/main.ts:27-41
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/main.ts:27-41
 
 FIX
 In server mode, restrict CORS to the explicitly configured CORS_ORIGINS only; do not
@@ -398,8 +398,8 @@ publish flag without re-checking authorization, (b) embeds JFK Social credential
 repo/logs, or (c) forwards user-controlled URLs/refs (SSRF).
 
 SOURCE FILES INVOLVED
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/decisions/decisions.service.ts:123-144
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/shared/decision-markdown.ts:67-74
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/modules/decisions/decisions.service.ts:123-144
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/shared/decision-markdown.ts:67-74
 
 FIX
 When implemented: keep JFK Social creds out of repo (out-of-repo credentials file
@@ -424,8 +424,8 @@ None currently. When the live model call is added, community writers' free-text
 that can trigger actions; treat it strictly as untrusted data.
 
 SOURCE FILES INVOLVED
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/backend/src/modules/decisions/decisions.service.ts:93-121, 147-185
-/Users/bryan/BGit/Bryan_git/Philosophers_Stone/code/packages/shared/src/schemas.ts:168-243
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/backend/src/modules/decisions/decisions.service.ts:93-121, 147-185
+/Users/bryan/BGit/Bryan_git/uplift/code/packages/shared/src/schemas.ts:168-243
 
 FIX
 When wiring the real model: sandbox the decision text as data, never as instructions;
@@ -435,7 +435,7 @@ independent server-side authorization check.
 ====
 
 ADDITIONAL NOTES (verified NON-issues / good practices)
-- Library used correctly in several respects: distinct cookiePrefix "oaf_phil"
+- Library used correctly in several respects: distinct cookiePrefix "oaf_uplift"
   (not the colliding default "oaf") — auth-frontend.ts:68; FileSessionStore supplied
   so sign-out revocation works — auth-frontend.ts:69; sessionSecret is generated
   out-of-repo via loadOrCreateSecret(<stateDir>/.auth_session_secret), not committed

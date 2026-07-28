@@ -5,7 +5,7 @@ that weakens a guarantee. Grouped by app. This is the feedback to send each app 
 the security-impacting rows also appear in `security_bugs_to_fix.md`.
 
 **Scope:** 6 consuming apps audited (Internal Web App, Marketing AI, Large File Bridge,
-Email Delivery Hero, Philosophers Stone, The Starbucks). **~22 misuse findings.**
+Email Delivery Hero, Uplift, The Starbucks). **~22 misuse findings.**
 None of the six forks the library's token verification, and five of six use a distinct
 `cookiePrefix`, an out-of-repo `sessionSecret`, and unmodified `verifyToken` — so the
 misuse is concentrated in **config that weakens defaults**, not in wrong wiring. The most
@@ -57,7 +57,7 @@ prefix, FileSessionStore revocation, no forked verification.)*
 | LOW | Token `audience` never enforced (no audience at mint or verify) | Set + enforce audience | No aud isolation | `auth.strategy.ts:65` |
 | LOW | `requireHostedDomain`/`hostedDomain` unset; hd not required, falls back to email string | `requireHostedDomain: true` + set `hostedDomain` | Non-Workspace account passes | `auth-frontend.ts:117-125`, `auth.strategy.ts:68-79` |
 
-## Philosophers Stone (`~/BGit/Bryan_git/Philosophers_Stone`)
+## Uplift (`~/BGit/Bryan_git/uplift`)
 
 | Sev | What they do wrong | Correct usage | Risk | Source + lines |
 |-----|--------------------|---------------|------|----------------|

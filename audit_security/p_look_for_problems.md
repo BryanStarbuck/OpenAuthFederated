@@ -52,7 +52,7 @@ or `OpenAuthFederated`. As of the last run the consumers were:
     APP  Marketing AI         dir ~/BGit/all/marketing/ai
     APP  Large File Bridge    dir ~/BGit/Bryan_git/LargeFileBridge
     APP  Email Delivery Hero  dir ~/BGit/Bryan_git/EmailDeliveryHero
-    APP  Philosophers Stone   dir ~/BGit/Bryan_git/Philosophers_Stone
+    APP  Uplift   dir ~/BGit/Bryan_git/uplift
     APP  The Starbucks        dir ~/BGit/Bryan_git/the_starbucks
 
 Checked and NOT consuming the library at the last run (exclude unless a rescan
@@ -77,7 +77,7 @@ Per-scope reports (plain text .txt, format defined below):
     {OUTPUT_DIR}/Marketing_AI.txt           app name in Underscore_Case, matching
     {OUTPUT_DIR}/Large_File_Bridge.txt      the CALLERS list above. Create a new
     {OUTPUT_DIR}/Email_Delivery_Hero.txt    .txt for every newly-detected caller.
-    {OUTPUT_DIR}/Philosophers_Stone.txt
+    {OUTPUT_DIR}/uplift.txt
     {OUTPUT_DIR}/The_Starbucks.txt
 
 Aggregate roll-ups (Markdown .md, format defined below):
