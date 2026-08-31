@@ -1,9 +1,13 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { SessionMembership, SessionStore } from "./session-store.js";
 import { type SamlReplayStore, type SamlSpConfig } from "./saml.js";
-/** The verified upstream identity returned by Google's OIDC id_token. */
+/**
+ * A verified upstream identity. Named for its first producer (Google's OIDC id_token); it is now
+ * also what the SAML ACS and the X sign-in path hand to {@link finishSignIn}, so that every strategy
+ * produces one identical session.
+ */
 export interface OidcIdentity {
-    /** Google's stable subject identifier. */
+    /** The provider's stable subject identifier (Google `sub`, SAML nameID, X numeric user id). */
     sub: string;
     email: string;
     emailVerified: boolean;
@@ -13,6 +17,15 @@ export interface OidcIdentity {
     givenName?: string;
     familyName?: string;
     picture?: string;
+    /**
+     * WHICH STRATEGY VERIFIED THIS HUMAN. `finishSignIn` needs it because the admission rules are not
+     * the same for all three: `requireHostedDomain` asks for a Google Workspace `hd` claim, which is a
+     * thing only Google has. Optional, and absent means `google` — so every existing call site keeps
+     * its exact behaviour.
+     */
+    provider?: "google" | "saml" | "x";
+    /** The X handle, without the `@`. Set on the X path only; nothing else populates it. */
+    username?: string;
 }
 /**
  * One organization membership. Aliased to {@link SessionMembership} (same shape) so the session
@@ -45,6 +58,26 @@ export interface GoogleConnectionConfig {
     /** Google Workspace hosted domain to hint + enforce (`hd`). Optional. */
     hostedDomain?: string;
 }
+/**
+ * An X (Twitter) OAuth 2.0 sign-in connection. `strategy` mirrors Federated's `oauth_x`.
+ *
+ * ⚠️ THE APPLICATION MUST BE REGISTERED AS A CONFIDENTIAL CLIENT ("Web App, Automated App or Bot"
+ * in the X developer portal). A "Native App" is a PUBLIC client: X issues it no secret, and the
+ * token exchange below authenticates the client with HTTP Basic.
+ */
+export interface XConnectionConfig {
+    strategy: "oauth_x";
+    /**
+     * X OAuth 2.0 client id. **Optional** (sign-in fails closed with a 503 if absent). Sourced and
+     * passed in by the embedding app, exactly as {@link GoogleConnectionConfig.clientId} is; the
+     * library reads no environment variable and no app-specific file.
+     */
+    clientId?: string;
+    /** X OAuth 2.0 client secret. **Optional** — supplied the same way as {@link clientId}. */
+    clientSecret?: string;
+    /** Must exactly match a Callback URI registered in the X app's *User authentication settings*. */
+    redirectUri: string;
+}
 /** A SAML 2.0 sign-in connection. `strategy` mirrors Federated's enterprise SSO vocabulary. */
 export type SamlConnectionConfig = {
     strategy: "saml";
@@ -54,7 +87,7 @@ export type SamlConnectionConfig = {
  * (`oauth_google`, SAML) so credentials are passed by API in a Federated-idiomatic shape rather than
  * via a provider-specific block.
  */
-export type FederatedConnectionConfig = GoogleConnectionConfig | SamlConnectionConfig;
+export type FederatedConnectionConfig = GoogleConnectionConfig | SamlConnectionConfig | XConnectionConfig;
 /** Shape of the legacy Google block (`google: { ... }`) accepted as deprecated shorthand. */
 export interface LegacyGoogleConfig {
     clientId?: string;
@@ -210,6 +243,22 @@ export interface FederatedFrontendConfig {
      * to {@link validateSamlAcs}; defaults to false (fail closed).
      */
     samlTrustAssertedEmailVerified?: boolean;
+    /**
+     * Admit an X sign-in on the strength of its `confirmed_email` alone, when
+     * {@link requireHostedDomain} is on. Defaults to false — FAIL CLOSED.
+     *
+     * WHY THIS FLAG HAS TO EXIST. `requireHostedDomain` asks for a Google Workspace `hd` claim, and
+     * its whole point is that membership of a Workspace is a stronger fact than an address that
+     * merely ends in the right domain. X has no equivalent: `confirmed_email` says X delivered mail
+     * to that address and nothing more. So an X sign-in CANNOT satisfy a hosted-domain requirement,
+     * and silently exempting it would quietly downgrade the control the deployment asked for on
+     * every account it protects. The operator says "I know, and the email is enough for X" here, in
+     * one place, or X sign-in is refused with that reason. Mirrors
+     * {@link samlTrustAssertedEmailVerified}, which exists for the same kind of reason.
+     *
+     * The {@link allowedDomains} allowlist still applies either way; this flag never bypasses it.
+     */
+    xTrustConfirmedEmail?: boolean;
     /**
      * Replay store for consumed SAML assertion ids (one-time-use enforcement). Defaults to an
      * in-process {@link InMemorySamlReplayStore}; supply a shared store for multi-process SAML.
