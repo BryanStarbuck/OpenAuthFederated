@@ -72,6 +72,7 @@ export type {
   FederatedConnectionConfig,
   GoogleConnectionConfig,
   SamlConnectionConfig,
+  XConnectionConfig,
   LegacyGoogleConfig,
   AuthFrontendConfig,
   OidcIdentity,
