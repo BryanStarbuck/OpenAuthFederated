@@ -1653,7 +1653,7 @@ function createFederatedFrontend(config) {
         return finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete);
     }
     // --- router --------------------------------------------------------------------------------
-    return (req, res, next) => {
+    const middleware = (req, res, next) => {
         const path = pathOf(req);
         const method = (req.method ?? "GET").toUpperCase();
         // Security headers + CORS on every auth-endpoint response (defense-in-depth).
@@ -1768,6 +1768,34 @@ function createFederatedFrontend(config) {
                 sendJson(res, 500, { error: "internal_error" });
         });
     };
+    /**
+     * Expose session resolution to the embedding app (see {@link FederatedFrontendMiddleware}).
+     *
+     * `readSession` is the SAME function every authenticated route in this file already calls, so a
+     * server-rendered page and the Frontend API can never disagree about who is signed in. The only
+     * transformation here is narrowing the internal record to the public {@link BrowserSession}
+     * shape — timestamps and nothing signing-related cross the boundary.
+     */
+    const withSession = middleware;
+    withSession.readBrowserSession = async (req) => {
+        const record = await readSession(req);
+        if (!record)
+            return null;
+        return {
+            sid: record.sid,
+            userId: record.userId,
+            email: record.email,
+            name: record.name,
+            firstName: record.firstName,
+            lastName: record.lastName,
+            hd: record.hd,
+            roles: record.roles,
+            permissions: record.permissions,
+            orgId: record.orgId,
+            memberships: record.memberships,
+        };
+    };
+    return withSession;
 }
 /**
  * @deprecated Use {@link createFederatedFrontend}. Alias retained so existing

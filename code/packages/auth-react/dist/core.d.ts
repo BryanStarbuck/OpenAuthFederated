@@ -37,6 +37,26 @@ export declare abstract class BaseCore implements AuthCore {
     abstract reverify(): Promise<void>;
 }
 /**
+ * Narrow a caller-supplied post-sign-in destination to one that cannot leave this origin.
+ *
+ * `redirect_url_complete` arrives on the callback URL's query string, so it is attacker-supplied by
+ * construction: anyone who can get a user to click a crafted sign-in link controls it. The value is
+ * handed straight to `window.location.assign`, which makes an unchecked one a classic
+ * post-authentication open redirect — the most convincing kind, because the victim really did just
+ * sign in successfully before being sent somewhere else.
+ *
+ * It is checked HERE, in the library, rather than in each app's callback page, for the reason the
+ * whole embedded design rests on: the app that forgets is the app that has the hole, and every app
+ * that consumes this SDK reaches this line. The server's own `safeRedirectTarget` guards
+ * `redirect_url`; this guards its sibling, which the server only ever passes through.
+ *
+ * Allowed: a root-relative path (`/oauth/cli/authorize?…`), and an absolute URL on this exact
+ * origin. Everything else — another origin, a protocol-relative `//evil.com`, a `javascript:` URL,
+ * an unparseable string — collapses to `/`. Protocol-relative is called out because it is the one
+ * that reads as a path to a human and as an origin to `new URL`.
+ */
+export declare function sameOriginRedirect(target: string | null | undefined): string;
+/**
  * Real client against the Frontend API: rehydrates the Client, mints short-lived JWTs, and
  * runs the SSO redirect handshake. Authorized with the publishable key + rotating session
  * cookie (`credentials: 'include'`). Requires a deployed OpenAuthFederated server.

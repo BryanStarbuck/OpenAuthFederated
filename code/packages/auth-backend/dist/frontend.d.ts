@@ -39,6 +39,64 @@ export interface ResolvedGrants {
     orgId: string | null;
     memberships: OrgMembership[];
 }
+/**
+ * Who is signed in on THIS request, resolved from the browser's session cookie.
+ *
+ * This is the answer a SERVER-RENDERED page needs and cannot get any other way. The SPA half of an
+ * embedding app authenticates with a short-lived Bearer minted by `fetch`, but a top-level browser
+ * navigation carries no `Authorization` header — only cookies. Any page the host renders itself (a
+ * consent screen, an approval step, a printable report) is therefore blind unless the library
+ * offers this.
+ *
+ * It is DELIBERATELY not derivable outside this module. The session cookie is signed with an HKDF
+ * subkey (`oaf:session`), not the master `sessionSecret`, precisely so that a leak of the secret
+ * used for access tokens cannot forge a session cookie — which also means `verifyToken()` cannot
+ * verify one, and a host that tried would have to re-derive the subkey and keep that derivation in
+ * step with this file forever. One implementation, exposed once, is the alternative to that drift.
+ *
+ * The shape is a deliberate SUBSET of the internal record: identity and grants, no timestamps and
+ * no signing material. A caller that needs the durable record has `sessionStore` already.
+ */
+export interface BrowserSession {
+    /** Session id (`sess_…`) — the same `sid` carried on the access token, so the two can be joined. */
+    sid: string;
+    /** Stable user id (`user_<google-sub>`), i.e. the token's `sub`. */
+    userId: string;
+    /** The verified email. */
+    email: string;
+    name?: string;
+    firstName?: string;
+    lastName?: string;
+    /** Google Workspace hosted domain (`hd`), when the identity carried one. */
+    hd?: string;
+    roles: string[];
+    permissions: string[];
+    orgId: string | null;
+    memberships: OrgMembership[];
+}
+/**
+ * What {@link createFederatedFrontend} returns: the Frontend-API middleware, with
+ * {@link BrowserSession} resolution attached.
+ *
+ * It stays CALLABLE with the exact signature it always had — `app.use("/api/v1", frontend)` is
+ * unchanged — so adding the method is not a breaking change for any existing embedder. The method
+ * hangs off the function rather than the function becoming an object because every current call
+ * site passes the return value straight to `app.use`.
+ */
+export type FederatedFrontendMiddleware = ((req: IncomingMessage, res: ServerResponse, next?: (err?: unknown) => void) => void) & {
+    /**
+     * Resolve the signed-in browser session for `req`, or `null` when nobody is signed in.
+     *
+     * Applies the FULL session policy, not just the signature: the cookie's HS256 signature and
+     * `aud`, then — when a `sessionStore` is configured — the durable record's revocation tombstone,
+     * its absolute expiry, and the inactivity timeout. A session that was signed out or offboarded
+     * therefore reads as signed-OUT here too, which is the entire point of asking the library
+     * instead of parsing the cookie.
+     *
+     * Never throws on a bad cookie: a forged, expired, or absent one is `null`.
+     */
+    readBrowserSession(req: IncomingMessage): Promise<BrowserSession | null>;
+};
 /** A Google OAuth (OIDC) sign-in connection. `strategy` mirrors Federated's `oauth_google`. */
 export interface GoogleConnectionConfig {
     strategy: "oauth_google";
@@ -287,7 +345,7 @@ export type AuthFrontendConfig = FederatedFrontendConfig;
  *   `createFederatedFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
  *     redirectUri }], allowedDomains, sessionSecret })`
  */
-export declare function createFederatedFrontend(config: FederatedFrontendConfig): (req: IncomingMessage, res: ServerResponse, next?: (err?: unknown) => void) => void;
+export declare function createFederatedFrontend(config: FederatedFrontendConfig): FederatedFrontendMiddleware;
 /**
  * @deprecated Use {@link createFederatedFrontend}. Alias retained so existing
  * `createAuthFrontend({ google: { ... } })` call sites keep working unchanged (the deprecated
