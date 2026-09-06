@@ -629,6 +629,61 @@ interface SessionRecord {
   grantsResolvedAt: number
 }
 
+/**
+ * Who is signed in on a request — the PUBLIC, read-only view of a session.
+ *
+ * This is the shape {@link FederatedFrontend.readBrowserSession} hands back to a host app. It is
+ * deliberately a subset of the library-internal `SessionRecord`: the bookkeeping field
+ * `grantsResolvedAt` exists only to schedule grant re-resolution inside the middleware, so it is not
+ * part of the contract a host app may depend on.
+ *
+ * A host app that server-renders a page (a consent screen, an admin view) must be able to answer
+ * "who is this?" from the SAME code path the Frontend API's `GET /client` uses. Reading and
+ * verifying the session cookie by hand in the host app is how the two halves drift apart — and a
+ * hand-rolled read is exactly the place where revocation, expiry and inactivity checks get skipped.
+ */
+export interface BrowserSession {
+  /** Session id (the `sid` claim); the handle the /client/sessions/:id routes address. */
+  sid: string
+  /** Stable user id (`user_<hash>`). */
+  userId: string
+  /** Verified email address of the signed-in human. */
+  email: string
+  name?: string
+  firstName?: string
+  lastName?: string
+  /** Google Workspace hosted domain, when the upstream identity carried one. */
+  hd?: string
+  roles: string[]
+  permissions: string[]
+  /** Active organization, or null when the session has not selected one. */
+  orgId: string | null
+  memberships: OrgMembership[]
+  /** When the human last proved their identity upstream (epoch seconds). */
+  lastVerifiedAt: number
+}
+
+/**
+ * What {@link createFederatedFrontend} returns: the mountable Node/Express middleware, plus the
+ * session reader the host app needs for its own server-rendered routes.
+ */
+export interface FederatedFrontend {
+  (req: IncomingMessage, res: ServerResponse, next?: (err?: unknown) => void): void
+  /**
+   * Resolve the session on a request, or `null` when signed out.
+   *
+   * Runs the identical path `GET /client` runs — cookie signature verification, then, when a
+   * `sessionStore` is configured, the durable record's revoked / expired / inactive checks and the
+   * configured fail mode. So a session that was signed out, offboarded or timed out reads as
+   * signed-OUT here too, and a server-rendered page cannot disagree with the SPA about who is
+   * signed in.
+   *
+   * Read-only: it never mints, refreshes, touches or clears anything, and writes nothing to the
+   * response — safe to call from any route, including a GET that must stay side-effect free.
+   */
+  readBrowserSession(req: IncomingMessage): Promise<BrowserSession | null>
+}
+
 /** Google config after credential resolution: id/secret are filled (possibly empty) strings. */
 interface ResolvedGoogleConfig {
   clientId: string
@@ -822,9 +877,7 @@ function normalizeConfig(config: FederatedFrontendConfig): InternalConfig {
  *   `createFederatedFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
  *     redirectUri }], allowedDomains, sessionSecret })`
  */
-export function createFederatedFrontend(
-  config: FederatedFrontendConfig,
-): (req: IncomingMessage, res: ServerResponse, next?: (err?: unknown) => void) => void {
+export function createFederatedFrontend(config: FederatedFrontendConfig): FederatedFrontend {
   const cfg = normalizeConfig(config)
 
   // Fail closed on a weak/placeholder/short secret (mirrors verify.ts, which throws). Signing real
@@ -2199,7 +2252,7 @@ export function createFederatedFrontend(
 
   // --- router --------------------------------------------------------------------------------
 
-  return (req, res, next) => {
+  const handler = ((req, res, next) => {
     const path = pathOf(req)
     const method = (req.method ?? "GET").toUpperCase()
 
@@ -2306,6 +2359,48 @@ export function createFederatedFrontend(
         cfg.log("error", "auth-frontend handler threw", err instanceof Error ? err.message : err)
         if (!res.headersSent) sendJson(res, 500, { error: "internal_error" })
       })
+  }) as FederatedFrontend
+
+  // The session reader, exposed on the middleware itself. It delegates to the SAME internal
+  // `readSession` the routes above use — that shared implementation is the point. `publicSession`
+  // strips the internal-only bookkeeping field so the contract stays the documented one.
+  handler.readBrowserSession = async (req: IncomingMessage): Promise<BrowserSession | null> => {
+    const session = await readSession(req)
+    return session ? publicSession(session) : null
+  }
+
+  return handler
+}
+
+/** Project the library-internal session record onto the public {@link BrowserSession} contract. */
+function publicSession(s: {
+  sid: string
+  userId: string
+  email: string
+  name?: string
+  firstName?: string
+  lastName?: string
+  hd?: string
+  roles: string[]
+  permissions: string[]
+  orgId: string | null
+  memberships: OrgMembership[]
+  lastVerifiedAt: number
+}): BrowserSession {
+  return {
+    sid: s.sid,
+    userId: s.userId,
+    email: s.email,
+    name: s.name,
+    firstName: s.firstName,
+    lastName: s.lastName,
+    hd: s.hd,
+    // Copy the arrays: a host app must not be able to mutate the live session record it was handed.
+    roles: [...s.roles],
+    permissions: [...s.permissions],
+    orgId: s.orgId,
+    memberships: [...s.memberships],
+    lastVerifiedAt: s.lastVerifiedAt,
   }
 }
 
