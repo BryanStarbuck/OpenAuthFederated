@@ -69,6 +69,7 @@ export type {
 export { createFederatedFrontend, createAuthFrontend } from "./frontend.js"
 export type {
   BrowserSession,
+  FederatedFrontend,
   FederatedFrontendMiddleware,
   FederatedFrontendConfig,
   FederatedConnectionConfig,

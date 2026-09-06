@@ -1653,7 +1653,7 @@ function createFederatedFrontend(config) {
         return finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete);
     }
     // --- router --------------------------------------------------------------------------------
-    const middleware = (req, res, next) => {
+    const handler = ((req, res, next) => {
         const path = pathOf(req);
         const method = (req.method ?? "GET").toUpperCase();
         // Security headers + CORS on every auth-endpoint response (defense-in-depth).
@@ -1767,35 +1767,33 @@ function createFederatedFrontend(config) {
             if (!res.headersSent)
                 sendJson(res, 500, { error: "internal_error" });
         });
+    });
+    // The session reader, exposed on the middleware itself. It delegates to the SAME internal
+    // `readSession` the routes above use — that shared implementation is the point. `publicSession`
+    // strips the internal-only bookkeeping field so the contract stays the documented one.
+    handler.readBrowserSession = async (req) => {
+        const session = await readSession(req);
+        return session ? publicSession(session) : null;
     };
-    /**
-     * Expose session resolution to the embedding app (see {@link FederatedFrontendMiddleware}).
-     *
-     * `readSession` is the SAME function every authenticated route in this file already calls, so a
-     * server-rendered page and the Frontend API can never disagree about who is signed in. The only
-     * transformation here is narrowing the internal record to the public {@link BrowserSession}
-     * shape — timestamps and nothing signing-related cross the boundary.
-     */
-    const withSession = middleware;
-    withSession.readBrowserSession = async (req) => {
-        const record = await readSession(req);
-        if (!record)
-            return null;
-        return {
-            sid: record.sid,
-            userId: record.userId,
-            email: record.email,
-            name: record.name,
-            firstName: record.firstName,
-            lastName: record.lastName,
-            hd: record.hd,
-            roles: record.roles,
-            permissions: record.permissions,
-            orgId: record.orgId,
-            memberships: record.memberships,
-        };
+    return handler;
+}
+/** Project the library-internal session record onto the public {@link BrowserSession} contract. */
+function publicSession(s) {
+    return {
+        sid: s.sid,
+        userId: s.userId,
+        email: s.email,
+        name: s.name,
+        firstName: s.firstName,
+        lastName: s.lastName,
+        hd: s.hd,
+        // Copy the arrays: a host app must not be able to mutate the live session record it was handed.
+        roles: [...s.roles],
+        permissions: [...s.permissions],
+        orgId: s.orgId,
+        memberships: [...s.memberships],
+        lastVerifiedAt: s.lastVerifiedAt,
     };
-    return withSession;
 }
 /**
  * @deprecated Use {@link createFederatedFrontend}. Alias retained so existing

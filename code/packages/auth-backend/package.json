@@ -21,7 +21,8 @@
     "test:saml": "node test/saml-roundtrip.cjs",
     "test:creds": "node test/credentials.cjs",
     "test:noverify": "node test/no-dev-mock.cjs",
-    "test": "node test/credentials.cjs && node test/saml-roundtrip.cjs && node test/no-dev-mock.cjs"
+    "test": "node test/credentials.cjs && node test/saml-roundtrip.cjs && node test/no-dev-mock.cjs && node test/read-browser-session.cjs",
+    "test:session": "node test/read-browser-session.cjs"
   },
   "dependencies": {
     "@node-saml/node-saml": "^5.1.0",

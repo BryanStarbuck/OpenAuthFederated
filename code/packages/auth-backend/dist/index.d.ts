@@ -11,7 +11,7 @@ export type { AuthRequestLike, RouteMatcher, RequestAuth, AuthObject, RequestSta
 export { federatedMiddleware, requireAuth, getAuth } from "./express.js";
 export type { FederatedMiddlewareOptions, ExpressLikeRequest, ExpressLikeResponse, } from "./express.js";
 export { createFederatedFrontend, createAuthFrontend } from "./frontend.js";
-export type { BrowserSession, FederatedFrontendMiddleware, FederatedFrontendConfig, FederatedConnectionConfig, GoogleConnectionConfig, SamlConnectionConfig, XConnectionConfig, LegacyGoogleConfig, AuthFrontendConfig, OidcIdentity, OrgMembership, ResolvedGrants, } from "./frontend.js";
+export type { BrowserSession, FederatedFrontend, FederatedFrontendMiddleware, FederatedFrontendConfig, FederatedConnectionConfig, GoogleConnectionConfig, SamlConnectionConfig, XConnectionConfig, LegacyGoogleConfig, AuthFrontendConfig, OidcIdentity, OrgMembership, ResolvedGrants, } from "./frontend.js";
 export { FileSessionStore, InMemorySessionStore, loadOrCreateSecret, } from "./session-store.js";
 export type { SessionStore, StoredSession, SessionMembership } from "./session-store.js";
 export { buildSamlClient, samlLoginRedirectUrl, samlSpMetadata, validateSamlAcs, InMemorySamlReplayStore, } from "./saml.js";
