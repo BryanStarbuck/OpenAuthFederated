@@ -29,9 +29,6 @@ importers:
 
   packages/auth-react:
     dependencies:
-      jose:
-        specifier: ^5.9.6
-        version: 5.10.0
       react-dom:
         specifier: '>=18'
         version: 19.2.7(react@19.2.7)
