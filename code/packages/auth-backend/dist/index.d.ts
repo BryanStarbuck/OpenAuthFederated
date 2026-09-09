@@ -3,7 +3,7 @@ import type { CreateFederatedClientOptions } from "./types.js";
 export { AuthClient, AuthClient as FederatedClient, verifyWebhook } from "./client.js";
 export type { User, Session, Organization, OrganizationMembership, Invitation, JwtTemplate, PaginatedResourceResponse, AuthUser, AuthSession, AuthOrganization, AuthMembership, AuthInvitation, AuthJwtTemplate, ListResponse, } from "./client.js";
 export type { TokenClaims, MachineClaims, PermissionCheck, CreateFederatedClientOptions, CreateAuthClientOptions, } from "./types.js";
-export { verifyToken, verifyMachineToken, hasScope, configureEmbeddedVerification, } from "./verify.js";
+export { verifyToken, verifyMachineToken, hasScope, configureEmbeddedVerification, createEmbeddedVerifier, jwksCacheSize, } from "./verify.js";
 export type { VerifyTokenOptions } from "./verify.js";
 export { requirePermission, requireRole, hasPermission, hasRole, checkClaims, } from "./permissions.js";
 export { authMiddleware, createRouteMatcher, getRequestAuth, authenticateRequest, bearerToken, AuthError, } from "./middleware.js";
@@ -11,7 +11,7 @@ export type { AuthRequestLike, RouteMatcher, RequestAuth, AuthObject, RequestSta
 export { federatedMiddleware, requireAuth, getAuth } from "./express.js";
 export type { FederatedMiddlewareOptions, ExpressLikeRequest, ExpressLikeResponse, } from "./express.js";
 export { createFederatedFrontend, createAuthFrontend } from "./frontend.js";
-export type { BrowserSession, FederatedFrontend, FederatedFrontendMiddleware, FederatedFrontendConfig, FederatedConnectionConfig, GoogleConnectionConfig, SamlConnectionConfig, XConnectionConfig, LegacyGoogleConfig, AuthFrontendConfig, OidcIdentity, OrgMembership, ResolvedGrants, } from "./frontend.js";
+export type { BrowserSession, FederatedFrontend, FederatedFrontendMiddleware, FederatedFrontendConfig, FederatedConnectionConfig, GoogleConnectionConfig, SamlConnectionConfig, XConnectionConfig, LegacyGoogleConfig, AuthFrontendConfig, OidcIdentity, OrgMembership, ResolvedGrants, RateLimitContext, } from "./frontend.js";
 export { FileSessionStore, InMemorySessionStore, loadOrCreateSecret, } from "./session-store.js";
 export type { SessionStore, StoredSession, SessionMembership } from "./session-store.js";
 export { buildSamlClient, samlLoginRedirectUrl, samlSpMetadata, validateSamlAcs, InMemorySamlReplayStore, } from "./saml.js";

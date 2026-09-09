@@ -250,6 +250,7 @@ export declare class AuthClient {
     private readonly jwtKey?;
     private readonly audience?;
     private readonly authorizedParties?;
+    private readonly timeoutMs;
     constructor(opts?: CreateFederatedClientOptions);
     /** Networkless JWT verification (JWKS in production, HS256 `sessionSecret` when embedded). */
     verifyToken(token: string): Promise<TokenClaims>;
@@ -259,7 +260,14 @@ export declare class AuthClient {
     requireRole(token: string, role: string): Promise<TokenClaims>;
     /** Verify a machine (M2M / API-key) token for server-to-server calls (spec §15). */
     verifyMachineToken(token: string): Promise<MachineClaims>;
-    /** Low-level authorized request to the Backend API. */
+    /**
+     * Low-level authorized request to the Backend API.
+     *
+     * Bounded in time: these calls run inside the host's own request handlers, so an unbounded fetch
+     * against a slow upstream is a held socket and a held request in the host app, not just a slow
+     * SDK call. A caller-supplied `signal` still wins — a host that manages its own cancellation is
+     * not overridden.
+     */
     request<T>(path: string, init?: RequestInit): Promise<T>;
     /**
      * List request that normalizes the wire envelope to Federated's

@@ -1,4 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { type VerifyTokenOptions } from "./verify.js";
+import type { TokenClaims } from "./types.js";
 import type { SessionMembership, SessionStore } from "./session-store.js";
 import { type SamlReplayStore, type SamlSpConfig } from "./saml.js";
 /**
@@ -274,6 +276,78 @@ export interface FederatedFrontendConfig {
     /** Map a verified identity to roles/permissions/orgs. Defaults to a least-privilege grant. */
     resolveGrants?: (identity: OidcIdentity) => ResolvedGrants;
     logger?: (level: "info" | "warn" | "error", message: string, meta?: unknown) => void;
+    /**
+     * Admit a SAML sign-in under {@link requireHostedDomain} when the IdP asserts no hosted-domain
+     * attribute. Defaults to false — FAIL CLOSED.
+     *
+     * `requireHostedDomain` asks for a Google Workspace `hd` claim, which is a Google concept. A SAML
+     * IdP may assert an equivalent attribute (`hd` / `hostedDomain` / `domain`), and when it does the
+     * assertion satisfies the requirement on its own — this flag is not needed. Many IdPs assert
+     * nothing of the kind while nonetheless being scoped to exactly one verified company directory;
+     * an operator says so HERE, in one place, rather than the library quietly exempting every SAML
+     * sign-in from a control the deployment explicitly asked for. Mirrors {@link xTrustConfirmedEmail}.
+     *
+     * {@link allowedDomains} still applies either way; this flag never bypasses it.
+     */
+    samlSatisfiesHostedDomain?: boolean;
+    /**
+     * Scope the minted user id to the strategy that authenticated it — `user_google_<sub>`,
+     * `user_saml_<nameID>`, `user_x_<id>` — instead of the flat `user_<sub>`. Defaults to **false**
+     * for back-compat.
+     *
+     * WHY IT MATTERS: without it, three strategies write into one identifier namespace. Google `sub`
+     * and X account id are both numeric strings, and a SAML `persistent` NameID is an
+     * operator-chosen opaque string, so nothing structurally prevents two different humans at two
+     * different IdPs from resolving to the same `user_…`. It also means one human who signs in via
+     * SAML on Monday and Google on Tuesday is silently two users with two grant sets.
+     *
+     * TURNING THIS ON IS A MIGRATION: every existing user id changes, so anything the host app
+     * persisted against the old id must be migrated with it. New deployments should set it true.
+     */
+    namespaceUserIds?: boolean;
+    /**
+     * What a THROWN {@link revalidateGrants} does (only when `reresolveGrantsEverySeconds` is set).
+     *   - `"keep"` (DEFAULT): keep the existing grants for this mint and retry next window —
+     *     availability first, matching the historical behaviour.
+     *   - `"closed"`: treat the failure as a loss of authorization and sign the session out.
+     *
+     * The default is the riskier one on purpose (it is the pre-existing behaviour), but note what it
+     * means: if the resolver fails BECAUSE the upstream directory is unreachable — exactly when
+     * someone may have just been offboarded — deprovision latency silently reverts to the full
+     * session lifetime. Deployments that would rather sign a user out than carry stale grants through
+     * a directory outage set `"closed"`.
+     */
+    revalidateFailMode?: "keep" | "closed";
+    /**
+     * Timeout, in milliseconds, for every outbound call this middleware makes to an upstream IdP
+     * (Google's token endpoint, X's token and user endpoints). Defaults to 20000. A hung upstream
+     * otherwise holds the request, its socket and its closure open with the human watching a spinner.
+     */
+    upstreamTimeoutMs?: number;
+    /**
+     * Per-request gate, consulted BEFORE any handler runs. Return false (or a rejected/false promise)
+     * to answer `429` and stop.
+     *
+     * The library cannot own a rate limiter — it is mounted middleware with no store and no view of
+     * the deployment — but it must expose the seam, because the routes that most need one are the
+     * ones it owns: `/saml/acs` does XML signature work before it can cheaply refuse anything, and
+     * `/oauth_callback/x` makes two outbound calls to X per unauthenticated request, which makes this
+     * library an amplifier against a third party's limits. Every refusal also writes a log line, so an
+     * unauthenticated flood is a log-volume DoS.
+     *
+     * A hook that THROWS is treated as a refusal (429): a limiter outage is not a reason to drop the
+     * limit on the auth endpoints.
+     */
+    rateLimit?: (ctx: RateLimitContext) => boolean | Promise<boolean>;
+}
+/** What {@link FederatedFrontendConfig.rateLimit} is told about the request it is gating. */
+export interface RateLimitContext {
+    /** Upper-cased HTTP method. */
+    method: string;
+    /** Path within the mount point, e.g. `/client/sessions/sess_1/tokens`. */
+    path: string;
+    /** The raw request, for a limiter that keys on a header or the socket address. */
+    req: IncomingMessage;
 }
 /**
  * @deprecated Use {@link FederatedFrontendConfig}. Alias retained so older imports resolve unchanged.
@@ -343,6 +417,17 @@ export interface FederatedFrontend {
      * response — safe to call from any route, including a GET that must stay side-effect free.
      */
     readBrowserSession(req: IncomingMessage): Promise<BrowserSession | null>;
+    /**
+     * Verify an access token THIS frontend minted, using THIS frontend's secret, issuer and audience.
+     *
+     * Prefer it over the module-level `verifyToken()` in any process that mounts more than one
+     * frontend. `configureEmbeddedVerification()` writes one process-global variable, so a second
+     * `createFederatedFrontend()` would otherwise repoint the global at the second app — quietly
+     * verifying app A's requests against app B's secret and destroying the per-app `aud` isolation
+     * the config promises. This method reads no global state, so two apps in one process each keep
+     * their own verifier.
+     */
+    verifyToken(token: string, opts?: VerifyTokenOptions): Promise<TokenClaims>;
 }
 /**
  * Alias for {@link FederatedFrontend}, kept because the callable-plus-method shape reads as a

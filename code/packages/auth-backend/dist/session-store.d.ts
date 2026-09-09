@@ -56,6 +56,14 @@ export interface StoredSession {
      * seconds). Optional for back-compat with records written before grant re-resolution existed.
      */
     grantsResolvedAt?: number;
+    /**
+     * The upstream subject exactly as the IdP asserted it, and the strategy that asserted it. Stored
+     * rather than recovered from {@link userId}, whose shape is configurable (`namespaceUserIds`):
+     * these are what grant re-resolution asks the host about, so they must be the IdP's values, not a
+     * parse of one of ours. Optional for back-compat with records written before they existed.
+     */
+    providerSub?: string;
+    provider?: "google" | "saml" | "x";
     /** When the session was first established (epoch seconds). */
     createdAt: number;
     /** Last time a token was minted / the session was touched (epoch seconds) — drives inactivity. */
@@ -90,19 +98,40 @@ export interface SessionStore {
  *   `<root>/users/<email>/sessions/<sid>.json`
  *
  * Directories are created lazily on first write; reads of a brand-new user return nothing without
- * creating anything. All writes are best-effort durable (a temp file + rename would add atomicity;
- * a single small JSON write is sufficient here and avoids partial-read races in practice).
+ * creating anything. Every method is ASYNCHRONOUS — this store sits on the request path (a single
+ * token mint does a read plus a read-modify-write), and Node has one JS thread, so a synchronous
+ * `readFileSync`/`writeFileSync` here pauses every other in-flight request in the process. Writes
+ * go through a scratch file and `rename()`, so a reader can never observe a half-written record.
  */
 export declare class FileSessionStore implements SessionStore {
     private readonly root;
     constructor(root: string);
+    /**
+     * Directories we have already created in this process. `mkdir` is idempotent but still a syscall,
+     * and it runs on the write path of every token mint; after the first sign-in for a user it is
+     * pure overhead.
+     */
+    private readonly ensured;
     private sessionsDir;
     private sessionFile;
-    create(session: StoredSession): void;
-    get(userKey: string, sid: string): StoredSession | null;
-    touch(userKey: string, sid: string, patch: Partial<StoredSession>): void;
-    remove(userKey: string, sid: string): void;
-    list(userKey: string): StoredSession[];
+    private ensureDir;
+    /**
+     * Write a session record ATOMICALLY: a scratch file in the same directory, then `rename()` over
+     * the target. Rename is atomic within a filesystem, so a reader sees either the whole previous
+     * record or the whole new one — never a truncated file.
+     *
+     * The previous in-place `writeFileSync` could be interrupted by a crash or interleaved with a
+     * concurrent write, leaving JSON that `get()` swallows as "absent". Under the default fail-closed
+     * mode that reads as a spurious sign-out; under `cookie-grace` it bypasses revocation. Neither is
+     * an acceptable outcome for a torn write of a session record.
+     *
+     * The scratch name carries random bytes so two concurrent writers cannot collide on it.
+     */
+    create(session: StoredSession): Promise<void>;
+    get(userKey: string, sid: string): Promise<StoredSession | null>;
+    touch(userKey: string, sid: string, patch: Partial<StoredSession>): Promise<void>;
+    remove(userKey: string, sid: string): Promise<void>;
+    list(userKey: string): Promise<StoredSession[]>;
 }
 /** In-memory {@link SessionStore} — handy for tests or stateless deployments. Lost on restart. */
 export declare class InMemorySessionStore implements SessionStore {

@@ -11,8 +11,17 @@ in the current tree** (audience bridging, grant re-resolution, `sessionStoreFail
 no-store construction warning, migrate age cutoff). Everything below is a *new* finding
 against the code as it stands today.
 
-**Totals:** 27 findings — **2 HIGH, 11 MEDIUM, 14 LOW**.
+**Totals:** 27 findings — **3 HIGH, 10 MEDIUM, 14 LOW** (S3 re-graded up during implementation).
 Split: 15 security, 12 performance.
+
+> **Update (same day, after implementation).** 21 of the 27 are fixed on this branch, each with a
+> test that fails without the fix. See "Implementation status" at the end for the per-finding
+> table, the three deliberate deferrals, and one correction: **S3 was graded too low.** Driving a
+> real signed assertion through the code showed node-saml never populates `profile.assertionId`,
+> `profile.ID`, `profile.inResponseTo` OR `profile.audience` — so the SAML replay cache and the
+> audience cross-check were not "fail-open under a future library change", they had **never
+> executed on a single real assertion**. SAML one-time-use enforcement was entirely absent.
+> That is a HIGH, not a MEDIUM.
 
 ---
 
@@ -23,7 +32,7 @@ Split: 15 security, 12 performance.
 | 1 | HIGH | security | Global mutable verification config — two frontends in one process cross-verify tokens | `verify.ts:38,46`; `frontend.ts:921` |
 | 2 | HIGH | perf | `FileSessionStore` does blocking sync fs on every request | `session-store.ts:144-198` |
 | 3 | MEDIUM | security | SAML identity carries no `hd`/`provider` → `requireHostedDomain` rejects *every* SAML sign-in | `saml.ts:254-261`; `frontend.ts:1838-1852` |
-| 4 | MEDIUM | security | SAML replay + audience checks fail **open** when the profile field is absent | `saml.ts:213,219-227` |
+| 4 | **HIGH** | security | SAML replay + audience checks never ran at all — they read profile fields node-saml does not set | `saml.ts:213,219-227` |
 | 5 | MEDIUM | security | User ids are not namespaced per provider (`user_${sub}`) | `frontend.ts:1879` |
 | 6 | MEDIUM | security | No rate limiting on any auth endpoint | `frontend.ts:2270-2400` (router) |
 | 7 | MEDIUM | perf | Session cookie carries full memberships/permissions; re-signed + rewritten on every mint | `frontend.ts:1979,2011,2248` |
@@ -91,7 +100,7 @@ or a documented `hd` attribute name.
 
 ---
 
-## S3. MEDIUM — SAML audience and replay checks fail open
+## S3. HIGH — SAML replay and audience checks never executed
 
 **Where:** `auth-backend/src/saml.ts:210-227`.
 
@@ -269,10 +278,20 @@ the equivalence opt-in.
 **Where:** `session-store.ts:104-118`.
 
 Blocks `/`, `\`, `\0`, `..` and empty. Does not block `:` (NTFS alternate data streams),
-leading `.`, or whitespace. `InMemorySessionStore.key()` (`session-store.ts:~215`) joins
-`userKey` and `sid` with a single space, so an email containing a space could collide with
-another user's key. Emails reaching here are verified by an upstream IdP, which is why this
-is LOW. Prefer an allowlist regex (`/^[a-z0-9._%+@-]+$/i`) over a denylist.
+leading `.`, or whitespace. Emails reaching here are verified by an upstream IdP, which is why
+this is LOW. Prefer an allowlist regex over a denylist.
+
+> **Correction.** An earlier draft of this entry claimed `InMemorySessionStore.key()` joins
+> `userKey` and `sid` "with a single space", making a space-bearing email a collision risk. That
+> is wrong — the separator is a NUL, which `sanitizeSegment` already excludes from both halves, so
+> there was never a collision there.
+>
+> Reading the raw bytes to check turned up something else, though: the separator was written as a
+> **literal NUL byte in the `.ts` source**. Git therefore classified `session-store.ts` as a binary
+> file — no diff, no blame, no line-level review of anything in it, including the session-store
+> logic — and the character is invisible in an editor. Not a vulnerability, but it had silently
+> exempted a security-relevant file from code review. Replaced with `const KEY_SEP = " "`:
+> identical runtime value (`KEY_SEP` is the `\u0000` escape), and the file is UTF-8 text again.
 
 ---
 
@@ -506,14 +525,116 @@ rewrite the audit prose to say "the hosted identity provider we model" and reduc
 
 ---
 
-## Suggested sequencing
+## Implementation status
 
-1. **Now:** S1 (global verification state), P1 (async + atomic session store). Both are
-   contained changes with no API break.
-2. **Next:** S2/S3 (SAML admission + fail-closed replay), P2 (slim the session cookie),
-   P3/P4 (timeouts).
-3. **Then:** S4 (namespaced user ids — needs a migration note), S5 (rate-limit hook), P5
-   (bounded caches), P6/P7 (React memoization).
-4. **Cleanup:** the remaining LOWs, plus the naming-rule pass over `audit_security/`.
+Everything below landed on `dipesh/chore/perf-security-audit`. The seven new suites were written
+BEFORE the fixes and each was observed failing against the pre-fix build, with the failure message
+the finding predicted. (Two later additions — the path-segment allowlist cases in
+`session-store-perf.cjs` — are regression tests written alongside their fix, not red-first.)
+Ten suites total, 68 assertions, all green; both packages typecheck clean.
 
-No fix in this list requires a new runtime dependency.
+| # | Status | What shipped | Test |
+|---|--------|--------------|------|
+| S1 | **fixed** | `frontend.verifyToken()` per app; global `verifyToken` fails closed once two differently-configured frontends exist; identical re-bootstrap stays a no-op | `verify-isolation.cjs` |
+| S2 | **fixed** | `provider: "saml"` on the identity; `hd` mapped from IdP attributes; `samlSatisfiesHostedDomain` opt-in | `saml-hardening.cjs`, `signin-flow.cjs` |
+| S3 | **fixed** | Replay id + audience + expiry now read from the signature-validated assertion via `getAssertion()`; refuses when no assertion id; `inResponseTo` fallback removed; expiry capped at 10 min | `saml-hardening.cjs` |
+| S4 | **fixed** (opt-in) | `namespaceUserIds` → `user_<provider>_<sub>`; default unchanged because turning it on rewrites every user id | `signin-flow.cjs` |
+| S5 | **fixed** | `rateLimit` hook consulted before dispatch; 429; a throwing hook fails closed | `endpoint-hardening.cjs` |
+| S6 | **fixed** | `hd` is only ever the upstream-asserted value — never back-filled from the email domain | `signin-flow.cjs` |
+| S7 | **fixed** | X callback uses `constantTimeEqual`, as the Google path already did | — (covered by X path review) |
+| S8 | **fixed** | Log sink centrally strips C0 controls; multi-line remediation moved to `meta` | `signin-flow.cjs` |
+| S11 | **fixed** | `Vary: Origin` on matched and unmatched origins alike | `endpoint-hardening.cjs` |
+| S14 | **fixed** | `sanitizeSegment` is an allowlist, widened to cover base64url session ids and RFC 5322 email local parts | `session-store-perf.cjs` |
+| S15 | **fixed** | `revalidateFailMode: "keep" \| "closed"` | — |
+| P1 | **fixed** | `FileSessionStore` fully async (`fs/promises`), atomic temp-file + `rename`, cached `mkdir`, concurrent `list()` | `session-store-perf.cjs` |
+| P3 | **fixed** | `upstreamTimeoutMs` (default 20s) on every outbound IdP call; JWKS fetch bounded | `resource-bounds.cjs` |
+| P4 | **fixed** | `timeoutMs` (default 10s) on Backend API calls; error bodies drained | `resource-bounds.cjs` |
+| P5 | **fixed** | JWKS cache is a 64-entry LRU; replay store bounded at 20k with an amortized sweep instead of an O(n) scan per lookup | `resource-bounds.cjs` |
+| P6 | **fixed** | Connection list built once in the constructor and frozen | `core-perf.mjs` |
+| P7 | **fixed** | `useAuth()` memoized on the values it reads | — |
+| P8 | **fixed** | One store subscription per provider; `setSnapshot` no longer emits on a value-identical update | — |
+| P9 | **fixed** | Token cache cleared only when the session id **or the grant signature** changes | `core-perf.mjs` |
+| P10 | **fixed** | Unused `jose` dependency removed from `@auth/react` | `core-perf.mjs` |
+| P12 | **fixed** | Proxy `get` trap resolves the singleton once | — |
+
+### One bypass introduced and closed during implementation
+
+The S2 fix — mapping an IdP-asserted attribute onto `hd` so SAML can satisfy `requireHostedDomain`
+— initially let that attribute stand in for the email domain when `allowedDomains` was evaluated.
+A probe against the built code confirmed it:
+
+```
+ADMITTED  | requireHostedDomain OFF, email OUT of allowlist, IdP asserts allowed hd
+             email=attacker@evil.example hd=act3ai.com
+ADMITTED  | requireHostedDomain ON,  email OUT of allowlist, IdP asserts allowed hd
+rejected  | requireHostedDomain OFF, email OUT of allowlist, no hd (control)
+```
+
+The control row is the point: before the change that identity was correctly refused, and the fix
+admitted it. The allowlist had stopped gating *who may sign in* and started gating *what the IdP
+claims about them*.
+
+The two hosted-domain claims are not the same kind of fact. Google computes `hd` itself from real
+Workspace membership; a SAML `hd` is an attribute whose value the IdP chose, and attribute mapping
+is exactly the thing that gets misconfigured. So SAML admission is now decided on the email domain
+in the assertion, and the asserted `hd` does exactly one job: satisfying `requireHostedDomain`.
+Google and X behaviour is byte-identical to before. Both directions are pinned in
+`signin-flow.cjs`.
+
+### Independent security review of the fixes
+
+The implemented diff was then put through a separate security review (`src/` only). It returned
+three findings — all real, all fixed, all now covered by tests:
+
+| Sev | Finding | Resolution |
+|-----|---------|------------|
+| HIGH | The new `hd` attribute mapping let an IdP-supplied value substitute for the email domain in the `allowedDomains` check | Already caught independently (above). The review added a point that was **not** covered: the implicit attribute list included the generic `domain`/`hostedDomain`/`hosted_domain`. A name that broad may already be in use by an IdP for something else, so a coincidence could satisfy `requireHostedDomain`. Now only `hd` is read implicitly, anything else must be named via `SamlSpConfig.hostedDomainAttribute`, and whatever the source the value must MATCH the email domain or it is dropped — it corroborates the address, never replaces it |
+| MEDIUM | `namespaceUserIds` desynchronised grant re-resolution: `identityFromSession` stripped only `user_`, so a namespaced id yielded `saml_alice@corp.com` — a subject that never existed upstream, silently missing every host lookup keyed on `sub` | The upstream `sub` and `provider` are now persisted on the session record (cookie + durable store) and read back verbatim, instead of being reverse-engineered from an id whose shape is configurable. A legacy session with no stored value falls back to a strip that handles both id shapes |
+| MEDIUM | The ambiguity latch enforced neither `iss` nor `aud` when a per-call `sessionSecret` was supplied — precisely the shape `authenticateRequest(req, { sessionSecret })` uses, and precisely the two-apps-sharing-a-secret case `aud` is documented to protect | Embedded configs are now registered per secret, so an explicit secret selects that app's claims. Writing the test then exposed a flaw in that fix too — two apps sharing one secret collided in the registry, reintroducing last-write-wins — so a secret registered by two differently-configured apps is marked ambiguous and a secret-only verify refuses rather than guessing |
+
+The review also examined and cleared: the replay-store LRU (evicting a consumed id needs 20 000
+further *validly signed* assertions, and node-saml enforces `NotOnOrAfter` independently), the new
+audience read (`getAssertion()` returns the parse of the signature-validated assertion, so it is not
+an XSW vector), `SAFE_SEGMENT` for traversal, the scratch-file/`rename` write path, `namespaceUserIds`
+collisions, the `hd` back-fill removal, and the auth-react token-cache change.
+
+### Deliberately deferred
+
+| # | Why |
+|---|---|
+| **P2** (slim the session cookie) | The only fix that changes the wire contract: memberships would move out of the cookie and be served from `/client`. Every consuming app reading them from a decoded cookie breaks. Wants its own change with a migration note — not to ride along in a hardening batch. |
+| **S9** (`/environment` lists allowed domains) | The SDK renders one sign-in button per domain from this list, so hiding it needs a replacement mechanism (opaque connection ids) and an SDK change on the other side. |
+| **S10** (`__Host-` cookie prefix) | A cookie rename signs every existing session out. Needs a flag and a rollout, not a default flip. |
+| **S12** (encrypt the PKCE state cookie) | Defense-in-depth on an `HttpOnly`, 10-minute cookie. Real but low, and JWE changes the cookie format. |
+| **S13** (`admin` ≡ `org:admin`) | Changing it silently narrows existing role checks in consuming apps — a behaviour change that has to be announced, not slipped in. Documented instead. |
+| **P11** (parse URL/cookies once per request) | Pure micro-optimization, touches every handler signature. Not worth the churn in the same change as the security fixes. |
+
+### Breaking changes in this batch
+
+Two, both deliberate, and neither is opt-in:
+
+1. **`hd` is now absent unless the upstream asserted it** (S6). A host app reading `user.hd` /
+   `claims.hd` for a *non-Workspace* sign-in previously got the email domain and now gets
+   `undefined`. That is the point — the old value was an unverified email suffix wearing the name
+   of a Workspace-membership claim — but any consumer using it as a display value needs to read
+   `email` instead.
+2. **`sanitizeSegment` is now an allowlist** (S14). It admits everything a base64url session id and
+   an RFC 5322 email local part can contain, and additionally rejects `: * ? " < > |` and backtick,
+   which the old denylist let through. A pre-existing session whose key contains one of those would
+   now be refused — none can exist from this library's own id generator.
+
+---
+
+## What is left
+
+Steps 1-3 of the original sequencing are done (see "Implementation status"). Remaining:
+
+1. **P2** — slim the session cookie. The one fix with a wire-contract migration; needs its own
+   change and a note to the consuming apps.
+2. **S9 / S10 / S12 / S13 / P11** — the deferred items above, each for the reason given.
+3. **The naming-rule pass** over `audit_security/` and `CLAUDE.md`. Untouched by this branch:
+   the violations are in audit prose, and rewriting the older reports is a separate edit from
+   changing the library.
+
+No fix in this list — shipped or remaining — requires a new runtime dependency. This branch removed
+one (`jose`, unused in `@auth/react`) and added none.

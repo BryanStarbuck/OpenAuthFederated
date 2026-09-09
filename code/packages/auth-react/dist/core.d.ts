@@ -64,13 +64,23 @@ export declare function sameOriginRedirect(target: string | null | undefined): s
 export declare class RealAuthCore extends BaseCore {
     private readonly frontendApi;
     private readonly publishableKey;
-    private readonly allowedDomains;
     private activeSessionId;
     private token;
     private tokenExp;
     private inflight;
     private autoRefresh;
     private refreshTimer;
+    /**
+     * The connection list, built ONCE.
+     *
+     * It is derived entirely from a constructor argument, so it can never change — but `connections()`
+     * used to rebuild it with `.map` on every call, and the provider calls it inside a `useMemo` that
+     * lists `snapshot` as a dependency. Every auth state change therefore handed every consumer of the
+     * auth context a brand-new array with brand-new objects, re-rendering `<SignIn>`, `<SignInButton>`
+     * and `<SignUpButton>` for a value that had not moved. Frozen so a stable reference cannot become
+     * a shared mutable one.
+     */
+    private readonly connectionList;
     constructor(frontendApi: string, publishableKey: string, allowedDomains: string[]);
     private base;
     private headers;

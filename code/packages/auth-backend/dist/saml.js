@@ -10,6 +10,24 @@ const node_saml_2 = require("@node-saml/node-saml");
 // SAML 2.0 nameid-format URN (the charter mandates SAML 2.0 exclusively; the 1.1-namespaced URN is
 // not used).
 const DEFAULT_NAMEID_FORMAT = "urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress";
+/**
+ * Longest a consumed assertion id is retained for replay detection, regardless of what the
+ * assertion's own `NotOnOrAfter` claims. The expiry is IdP-supplied; without a cap one assertion
+ * can pin a cache entry indefinitely.
+ */
+const REPLAY_RETENTION_MAX_MS = 10 * 60_000;
+/**
+ * Attribute names read, in order, as an IdP's hosted-domain assertion.
+ *
+ * DELIBERATELY NARROW. An earlier version of this list also accepted `hostedDomain`,
+ * `hosted_domain` and `domain` — and `domain` in particular is a name generic enough that an IdP
+ * may well already emit it for something else entirely (a directory column, a tenant label). Since
+ * this value is what satisfies `requireHostedDomain`, a coincidental match would silently satisfy
+ * the deployment's strongest admission control with an attribute nobody chose for that purpose.
+ * `hd` is Google's own unambiguous name; anything else must be named explicitly by the operator via
+ * {@link SamlSpConfig.hostedDomainAttribute}.
+ */
+const HOSTED_DOMAIN_ATTRIBUTES = ["hd"];
 /** Build a configured node-saml `SAML` instance for SP-initiated SSO against the IdP. */
 function buildSamlClient(cfg) {
     return new node_saml_1.SAML({
@@ -55,15 +73,40 @@ function buildSamlClient(cfg) {
  */
 class InMemorySamlReplayStore {
     seenIds = new Map();
+    /** Hard ceiling on retained ids. Beyond this the oldest are evicted (Map is insertion-ordered). */
+    static MAX_ENTRIES = 20_000;
+    /** Sweep expired entries at most this often, instead of on every lookup. */
+    static SWEEP_INTERVAL_MS = 30_000;
+    lastSweep = 0;
+    /** How many consumed ids are currently retained. Diagnostics (and a bound the tests assert). */
+    get size() {
+        return this.seenIds.size;
+    }
     seen(assertionId) {
-        this.prune();
+        // Amortized: sweeping on EVERY lookup made this an O(n) scan per SAML login. A lookup is O(1)
+        // and correctness does not depend on the sweep — an entry that outlives its window is only ever
+        // stricter than required, never weaker.
+        this.maybeSweep();
         return this.seenIds.has(assertionId);
     }
     record(assertionId, notOnOrAfter) {
         this.seenIds.set(assertionId, notOnOrAfter);
+        this.maybeSweep();
+        // The expiry comes from the IdP, so a far-future value would otherwise pin an entry for as long
+        // as the IdP says. Evict oldest-first once the ceiling is reached: bounded memory, and an
+        // evicted id is one whose window has already been outlived by MAX_ENTRIES newer sign-ins.
+        while (this.seenIds.size > InMemorySamlReplayStore.MAX_ENTRIES) {
+            const oldest = this.seenIds.keys().next().value;
+            if (oldest === undefined)
+                break;
+            this.seenIds.delete(oldest);
+        }
     }
-    prune() {
+    maybeSweep() {
         const now = Date.now();
+        if (now - this.lastSweep < InMemorySamlReplayStore.SWEEP_INTERVAL_MS)
+            return;
+        this.lastSweep = now;
         for (const [id, exp] of this.seenIds)
             if (exp <= now)
                 this.seenIds.delete(id);
@@ -80,6 +123,55 @@ async function samlLoginRedirectUrl(saml, relayState) {
 }
 function str(v) {
     return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+/** The domain half of an email address, lowercased. Empty when there is no `@`. */
+function emailDomainOf(email) {
+    const at = email.lastIndexOf("@");
+    return at < 0 ? "" : email.slice(at + 1).trim().toLowerCase();
+}
+/**
+ * Facts read from the assertion node that node-saml ITSELF selected and signature-validated.
+ *
+ * These do not appear on the flat `profile` at all — no `assertionId`, no `ID`, no `notOnOrAfter`,
+ * no `audience` — which is why the checks that read them from there were dead code: for every real
+ * assertion they were `undefined`, so the guards were skipped silently and one-time-use was never
+ * actually enforced.
+ *
+ * Reading them from `getAssertion()` rather than re-parsing the raw SAMLResponse is deliberate: the
+ * raw response may contain several Assertion elements, and picking one ourselves is precisely the
+ * ambiguity XML Signature Wrapping exploits. This returns facts about the ONE assertion whose
+ * signature was verified.
+ */
+function assertionFacts(profile) {
+    const getter = profile?.getAssertion;
+    if (typeof getter !== "function")
+        return { audiences: [] };
+    let parsed;
+    try {
+        parsed = getter.call(profile);
+    }
+    catch {
+        return { audiences: [] };
+    }
+    const node = parsed?.Assertion;
+    if (!node)
+        return { audiences: [] };
+    const conditions = node.Conditions?.[0];
+    const rawNotOnOrAfter = conditions?.$?.NotOnOrAfter;
+    const parsedExpiry = rawNotOnOrAfter ? Date.parse(rawNotOnOrAfter) : Number.NaN;
+    const audiences = [];
+    for (const restriction of conditions?.AudienceRestriction ?? []) {
+        for (const entry of restriction?.Audience ?? []) {
+            const value = typeof entry === "string" ? entry : entry?._;
+            if (typeof value === "string" && value.length > 0)
+                audiences.push(value);
+        }
+    }
+    return {
+        id: str(node.$?.ID),
+        notOnOrAfter: Number.isFinite(parsedExpiry) ? parsedExpiry : undefined,
+        audiences,
+    };
 }
 /** Coerce a SAML boolean-ish attribute (`true`/`false`/`1`/`0`) to a boolean. */
 function asBool(v) {
@@ -106,21 +198,43 @@ async function validateSamlAcs(saml, body, cfg, replayStore) {
     if (!profile)
         throw new Error("SAML response contained no profile");
     const profileRec = profile;
+    // Everything the one signature-validated assertion actually says about itself.
+    const facts = assertionFacts(profile);
     // Audience restriction: the assertion's AudienceRestriction/Audience MUST name this SP's Entity
     // ID, otherwise an assertion minted for a *different* SP could be replayed here. node-saml
-    // surfaces the audience on the profile; compare it exactly to the configured spEntityId.
-    const audience = str(profileRec.audience) ?? str(profileRec.audienceRestriction);
-    if (audience !== undefined && audience !== cfg.spEntityId) {
+    // enforces this itself (it is configured with `audience: spEntityId`); this is the independent
+    // second reading, taken straight off the validated assertion node.
+    //
+    // It used to read `profileRec.audience`, which node-saml never sets — so the check was skipped on
+    // every real assertion.
+    if (facts.audiences.length > 0 && !facts.audiences.includes(cfg.spEntityId)) {
         throw new Error("SAML assertion audience does not match the SP Entity ID");
     }
     // Assertion-id replay defense: reject an assertion id we have already consumed within its
     // validity window (one-time use).
-    const assertionId = str(profileRec.assertionId) ?? str(profileRec.ID) ?? str(profileRec.inResponseTo);
-    if (replayStore && assertionId) {
+    //
+    // FAILS CLOSED. This used to read `if (replayStore && assertionId)`, so a profile that surfaced
+    // no id simply skipped one-time-use enforcement, silently — and whether node-saml surfaces the id
+    // is a shape detail of a third-party library that a minor upgrade can change. Every SAML 2.0
+    // Assertion carries a required `ID` attribute, so an absent one means we are not reading what we
+    // think we are reading; that is a reason to refuse, not to continue unprotected.
+    //
+    // `inResponseTo` is deliberately NOT a fallback: it is the AuthnRequest id, so keying the cache on
+    // it collides distinct assertions answering one request while letting genuine replays of
+    // different requests through — worse than no key at all.
+    const assertionId = facts.id ?? str(profileRec.assertionId) ?? str(profileRec.ID);
+    if (replayStore) {
+        if (!assertionId) {
+            throw new Error("SAML assertion carried no assertion id, so one-time use cannot be enforced — refusing");
+        }
         if (await replayStore.seen(assertionId)) {
             throw new Error("SAML assertion replay detected");
         }
-        const notOnOrAfter = Date.parse(String(profileRec.notOnOrAfter ?? "")) || Date.now() + 5 * 60_000;
+        // The expiry is IdP-supplied, so cap it: an assertion claiming a year-long window must not pin
+        // a replay-cache entry for a year. The cap only ever shortens retention, and the assertion is
+        // long dead by then anyway — node-saml has already enforced NotOnOrAfter above.
+        const ceiling = Date.now() + REPLAY_RETENTION_MAX_MS;
+        const notOnOrAfter = facts.notOnOrAfter !== undefined ? Math.min(facts.notOnOrAfter, ceiling) : ceiling;
         await replayStore.record(assertionId, notOnOrAfter);
     }
     // Google's NameID is the user's email. Fall back to common email attributes if a different
@@ -144,13 +258,42 @@ async function validateSamlAcs(saml, body, cfg, replayStore) {
     const verifiedAttr = attrs["email_verified"] ??
         attrs["emailVerified"];
     const emailVerified = verifiedAttr !== undefined ? asBool(verifiedAttr) : cfg.trustAssertedEmailVerified === true;
+    // The hosted domain, ONLY when the (signed) assertion actually asserts one. It is never derived
+    // from the email address: `hd` means "the IdP vouches for this subject's membership of that
+    // organization", and an address that merely ends in the right domain is not that fact.
+    //
+    // It must also CORROBORATE the address rather than replace it. A Google `hd` is computed by
+    // Google from real Workspace membership; a SAML one is an attribute whose value the IdP chose, so
+    // an assertion for `mallory@contractors.example` carrying `hd: company.com` says two things that
+    // do not agree. Keeping the value in that case would let a tenant-wide attribute admit every
+    // subject in a multi-domain directory. When the two disagree, the attribute is dropped: the
+    // identity then simply has no hosted domain, and `requireHostedDomain` refuses it with the
+    // ordinary message.
+    const hostedDomainAttributes = cfg.hostedDomainAttribute
+        ? [cfg.hostedDomainAttribute, ...HOSTED_DOMAIN_ATTRIBUTES]
+        : HOSTED_DOMAIN_ATTRIBUTES;
+    let hd;
+    for (const attr of hostedDomainAttributes) {
+        const v = first(attr);
+        if (v) {
+            hd = v.trim().toLowerCase();
+            break;
+        }
+    }
+    if (hd && hd !== emailDomainOf(email))
+        hd = undefined;
     const identity = {
         sub: profile.nameID,
         email,
         emailVerified,
+        hd,
         name: first("displayName") ?? first("name"),
         givenName: first("firstName") ?? first("givenName") ?? first("urn:oid:2.5.4.42"),
         familyName: first("lastName") ?? first("surname") ?? first("urn:oid:2.5.4.4"),
+        // WHICH STRATEGY VERIFIED THIS HUMAN. Without it `finishSignIn` reads a SAML identity as a
+        // Google one (`identity.provider ?? "google"`), which both mislabels every SAML line in the
+        // audit trail and puts SAML under a Google-only admission rule it can never satisfy.
+        provider: "saml",
     };
     return {
         identity,

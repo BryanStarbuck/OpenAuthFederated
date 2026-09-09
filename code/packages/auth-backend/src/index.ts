@@ -33,6 +33,11 @@ export {
   verifyMachineToken,
   hasScope,
   configureEmbeddedVerification,
+  // Build a verifier bound to ONE app's config — the multi-frontend-safe alternative to the
+  // process-global `verifyToken`. `createFederatedFrontend()` returns one as `frontend.verifyToken`.
+  createEmbeddedVerifier,
+  // Diagnostics: how many issuers the (bounded) JWKS cache currently holds.
+  jwksCacheSize,
 } from "./verify.js"
 export type { VerifyTokenOptions } from "./verify.js"
 export {
@@ -81,6 +86,7 @@ export type {
   OidcIdentity,
   OrgMembership,
   ResolvedGrants,
+  RateLimitContext,
 } from "./frontend.js"
 // Persistent, server-side session store (the stateful half of the session model).
 // Pass a store to createFederatedFrontend({ sessionStore }) to make sessions survive app restarts
@@ -142,8 +148,12 @@ function instance(): AuthClient {
  */
 export const federatedClient: AuthClient = new Proxy({} as AuthClient, {
   get(_target, prop, receiver) {
-    const value = Reflect.get(instance(), prop, receiver)
-    return typeof value === "function" ? value.bind(instance()) : value
+    // Resolve the singleton ONCE per access: `instance()` was called twice on every property read
+    // (once for the lookup, once to bind), which is a lazy-init check and a call per access on a
+    // proxy that fronts every backend API call.
+    const client = instance()
+    const value = Reflect.get(client, prop, receiver)
+    return typeof value === "function" ? value.bind(client) : value
   },
 })
 

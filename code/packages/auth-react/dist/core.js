@@ -7,6 +7,39 @@ function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 /**
+ * Everything about a snapshot that a minted access token's claims depend on.
+ *
+ * Used to decide whether a rehydrate invalidates the cached token: identical grants mean the cached
+ * token is still an accurate statement of the user's authority, so it can be kept. Any difference —
+ * a role change, a membership added or removed, a different active org — means it is not.
+ */
+/**
+ * Value equality for a snapshot, so an update that changes nothing does not force a re-render.
+ * Compares exactly the fields the snapshot carries — a JSON round-trip is enough here because every
+ * field is a primitive, an array of primitives, or a plain object of those.
+ */
+function snapshotsEqual(a, b) {
+    if (a.isSignedIn !== b.isSignedIn)
+        return false;
+    if (a.userId !== b.userId || a.sessionId !== b.sessionId || a.orgId !== b.orgId)
+        return false;
+    if (a.lastVerifiedAt !== b.lastVerifiedAt)
+        return false;
+    return JSON.stringify(a.user) === JSON.stringify(b.user) &&
+        JSON.stringify(a.memberships) === JSON.stringify(b.memberships);
+}
+function grantSignature(s) {
+    if (!s.isSignedIn || !s.user)
+        return "";
+    return JSON.stringify([
+        s.userId,
+        s.orgId,
+        s.user.roles,
+        s.user.permissions,
+        s.memberships.map((m) => [m.id, m.organization.id, m.role, m.permissions]),
+    ]);
+}
+/**
  * Shared subscribe/emit plumbing for the external store. Exported so a consuming app can build its
  * OWN {@link AuthCore} (e.g. a localhost-only dev core) on top of it and inject it via
  * `<FederatedProvider core={...}>`. OpenAuthFederated itself ships only {@link RealAuthCore} — it
@@ -34,6 +67,12 @@ export class BaseCore {
         return () => this.listeners.delete(listener);
     }
     setSnapshot(next) {
+        // A no-op update still woke every subscriber and re-rendered every consumer — e.g. switching to
+        // the organization that is already active, or a `reloadSession()` that found nothing changed.
+        // `useSyncExternalStore` compares by reference, so emitting an equal-but-new object is a
+        // guaranteed re-render for a state that did not move.
+        if (snapshotsEqual(this.snapshot, next))
+            return;
         this.snapshot = next;
         for (const listener of this.listeners)
             listener();
@@ -217,7 +256,6 @@ function readJwtExp(jwt) {
 export class RealAuthCore extends BaseCore {
     frontendApi;
     publishableKey;
-    allowedDomains;
     activeSessionId = null;
     // Cached access token + its `exp` (epoch seconds), and a single in-flight mint so a page-load
     // fan-out of queries triggers one network mint, not one per request. Without this the SDK
@@ -234,11 +272,24 @@ export class RealAuthCore extends BaseCore {
     // cache invalidation. Opt-in (enableAutoRefresh) so a mock/dev core is unaffected.
     autoRefresh = false;
     refreshTimer = null;
-    constructor(frontendApi, publishableKey, allowedDomains) {
+    /**
+     * The connection list, built ONCE.
+     *
+     * It is derived entirely from a constructor argument, so it can never change — but `connections()`
+     * used to rebuild it with `.map` on every call, and the provider calls it inside a `useMemo` that
+     * lists `snapshot` as a dependency. Every auth state change therefore handed every consumer of the
+     * auth context a brand-new array with brand-new objects, re-rendering `<SignIn>`, `<SignInButton>`
+     * and `<SignUpButton>` for a value that had not moved. Frozen so a stable reference cannot become
+     * a shared mutable one.
+     */
+    connectionList;
+    constructor(frontendApi, publishableKey, 
+    // Not retained: it is consumed once, below, to build the frozen connection list.
+    allowedDomains) {
         super();
         this.frontendApi = frontendApi;
         this.publishableKey = publishableKey;
-        this.allowedDomains = allowedDomains;
+        this.connectionList = Object.freeze(allowedDomains.map((domain) => Object.freeze({ id: `conn_${domainSlug(domain)}`, domain, label: domain })));
     }
     base() {
         return `${this.frontendApi.replace(/\/+$/, "")}/v1`;
@@ -247,11 +298,7 @@ export class RealAuthCore extends BaseCore {
         return { Authorization: `Bearer ${this.publishableKey}` };
     }
     connections() {
-        return this.allowedDomains.map((domain) => ({
-            id: `conn_${domainSlug(domain)}`,
-            domain,
-            label: domain,
-        }));
+        return this.connectionList;
     }
     // Backoff schedule (ms) for retrying a transient /client failure. Tuned so a page load that
     // races a backend RESTART keeps trying for ~15s instead of giving up on the first miss and
@@ -317,42 +364,54 @@ export class RealAuthCore extends BaseCore {
         });
     }
     applyClient(client) {
-        // Session identity may have changed — never serve a token cached against a prior session.
-        this.clearTokenCache();
         const activeId = client.last_active_session_id;
         const session = (client.sessions ?? []).find((s) => s.id === activeId && s.status === "active");
+        let next;
         if (!session) {
-            this.activeSessionId = null;
-            this.setSnapshot(EMPTY_SNAPSHOT);
-            return;
+            next = EMPTY_SNAPSHOT;
         }
-        const user = (session.user ?? {});
-        this.activeSessionId = session.id;
-        const memberships = this.parseMemberships(client.organization_memberships);
-        // Prefer a per-tab active org if it is still valid; otherwise the server's org_id.
-        const serverOrg = client.org_id ?? null;
-        const storedOrg = this.readActiveOrg();
-        const orgId = storedOrg && memberships.some((m) => m.organization.id === storedOrg)
-            ? storedOrg
-            : serverOrg;
-        const verifiedAt = (session.last_verified_at ?? session.last_active_at);
-        this.setSnapshot({
-            isSignedIn: true,
-            userId: session.user_id,
-            sessionId: session.id,
-            orgId,
-            user: {
-                id: session.user_id,
-                firstName: user.first_name,
-                lastName: user.last_name,
-                primaryEmailAddress: user.primary_email_address,
-                roles: user.roles ?? [],
-                permissions: user.permissions ?? [],
-                hd: user.hd,
-            },
-            memberships,
-            lastVerifiedAt: verifiedAt != null ? Math.floor(verifiedAt / 1000) : null,
-        });
+        else {
+            const user = (session.user ?? {});
+            const memberships = this.parseMemberships(client.organization_memberships);
+            // Prefer a per-tab active org if it is still valid; otherwise the server's org_id.
+            const serverOrg = client.org_id ?? null;
+            const storedOrg = this.readActiveOrg();
+            const orgId = storedOrg && memberships.some((m) => m.organization.id === storedOrg)
+                ? storedOrg
+                : serverOrg;
+            const verifiedAt = (session.last_verified_at ?? session.last_active_at);
+            next = {
+                isSignedIn: true,
+                userId: session.user_id,
+                sessionId: session.id,
+                orgId,
+                user: {
+                    id: session.user_id,
+                    firstName: user.first_name,
+                    lastName: user.last_name,
+                    primaryEmailAddress: user.primary_email_address,
+                    roles: user.roles ?? [],
+                    permissions: user.permissions ?? [],
+                    hd: user.hd,
+                },
+                memberships,
+                lastVerifiedAt: verifiedAt != null ? Math.floor(verifiedAt / 1000) : null,
+            };
+        }
+        // Invalidate the cached access token when the session identity OR the grants it was minted
+        // against have moved. Clearing it unconditionally meant `reloadSession()` — whose whole job is
+        // recovering from a transient 401 without signing anyone out — threw away a perfectly valid
+        // token and forced an extra /tokens round trip every time.
+        //
+        // Grants are part of the test, not just the session id: a token minted before a role change
+        // carries the OLD roles/permissions in its claims, so keying only on the session id would keep
+        // serving stale authority until that token expired. The backend re-checks on every mint and the
+        // TTL is short, but the SDK must not be the thing that widens the window.
+        if (next.sessionId !== this.activeSessionId || grantSignature(this.snapshot) !== grantSignature(next)) {
+            this.clearTokenCache();
+        }
+        this.activeSessionId = next.sessionId;
+        this.setSnapshot(next);
     }
     async authenticateWithRedirect(params) {
         const conn = this.connections().find((c) => c.id === params.connectionId) ?? this.connections()[0];

@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.authClient = exports.federatedClient = exports.createAuthClient = exports.OAuthCredentialsError = exports.credentialsRemediation = exports.assertGoogleCredentials = exports.loadGoogleCredentials = exports.InMemorySamlReplayStore = exports.validateSamlAcs = exports.samlSpMetadata = exports.samlLoginRedirectUrl = exports.buildSamlClient = exports.loadOrCreateSecret = exports.InMemorySessionStore = exports.FileSessionStore = exports.createAuthFrontend = exports.createFederatedFrontend = exports.getAuth = exports.requireAuth = exports.federatedMiddleware = exports.AuthError = exports.bearerToken = exports.authenticateRequest = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.configureEmbeddedVerification = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.verifyWebhook = exports.FederatedClient = exports.AuthClient = void 0;
+exports.authClient = exports.federatedClient = exports.createAuthClient = exports.OAuthCredentialsError = exports.credentialsRemediation = exports.assertGoogleCredentials = exports.loadGoogleCredentials = exports.InMemorySamlReplayStore = exports.validateSamlAcs = exports.samlSpMetadata = exports.samlLoginRedirectUrl = exports.buildSamlClient = exports.loadOrCreateSecret = exports.InMemorySessionStore = exports.FileSessionStore = exports.createAuthFrontend = exports.createFederatedFrontend = exports.getAuth = exports.requireAuth = exports.federatedMiddleware = exports.AuthError = exports.bearerToken = exports.authenticateRequest = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.jwksCacheSize = exports.createEmbeddedVerifier = exports.configureEmbeddedVerification = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.verifyWebhook = exports.FederatedClient = exports.AuthClient = void 0;
 exports.createFederatedClient = createFederatedClient;
 const client_js_1 = require("./client.js");
 // The backend client. `FederatedClient` is the primary name; `AuthClient` is kept as an alias so
@@ -14,6 +14,11 @@ Object.defineProperty(exports, "verifyToken", { enumerable: true, get: function 
 Object.defineProperty(exports, "verifyMachineToken", { enumerable: true, get: function () { return verify_js_1.verifyMachineToken; } });
 Object.defineProperty(exports, "hasScope", { enumerable: true, get: function () { return verify_js_1.hasScope; } });
 Object.defineProperty(exports, "configureEmbeddedVerification", { enumerable: true, get: function () { return verify_js_1.configureEmbeddedVerification; } });
+// Build a verifier bound to ONE app's config — the multi-frontend-safe alternative to the
+// process-global `verifyToken`. `createFederatedFrontend()` returns one as `frontend.verifyToken`.
+Object.defineProperty(exports, "createEmbeddedVerifier", { enumerable: true, get: function () { return verify_js_1.createEmbeddedVerifier; } });
+// Diagnostics: how many issuers the (bounded) JWKS cache currently holds.
+Object.defineProperty(exports, "jwksCacheSize", { enumerable: true, get: function () { return verify_js_1.jwksCacheSize; } });
 var permissions_js_1 = require("./permissions.js");
 Object.defineProperty(exports, "requirePermission", { enumerable: true, get: function () { return permissions_js_1.requirePermission; } });
 Object.defineProperty(exports, "requireRole", { enumerable: true, get: function () { return permissions_js_1.requireRole; } });
@@ -83,8 +88,12 @@ function instance() {
  */
 exports.federatedClient = new Proxy({}, {
     get(_target, prop, receiver) {
-        const value = Reflect.get(instance(), prop, receiver);
-        return typeof value === "function" ? value.bind(instance()) : value;
+        // Resolve the singleton ONCE per access: `instance()` was called twice on every property read
+        // (once for the lookup, once to bind), which is a lazy-init check and a call per access on a
+        // proxy that fronts every backend API call.
+        const client = instance();
+        const value = Reflect.get(client, prop, receiver);
+        return typeof value === "function" ? value.bind(client) : value;
     },
 });
 /**

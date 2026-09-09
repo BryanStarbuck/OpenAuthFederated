@@ -277,6 +277,7 @@ class AuthClient {
     jwtKey;
     audience;
     authorizedParties;
+    timeoutMs;
     constructor(opts = {}) {
         // Config comes from the API caller only — the library reads no environment variables.
         this.secretKey = opts.secretKey ?? "";
@@ -300,6 +301,8 @@ class AuthClient {
         this.jwtKey = opts.jwtKey;
         this.audience = opts.audience;
         this.authorizedParties = opts.authorizedParties;
+        this.timeoutMs =
+            typeof opts.timeoutMs === "number" && opts.timeoutMs > 0 ? opts.timeoutMs : 10_000;
     }
     /** Networkless JWT verification (JWKS in production, HS256 `sessionSecret` when embedded). */
     verifyToken(token) {
@@ -328,17 +331,40 @@ class AuthClient {
             authorizedParties: this.authorizedParties,
         });
     }
-    /** Low-level authorized request to the Backend API. */
+    /**
+     * Low-level authorized request to the Backend API.
+     *
+     * Bounded in time: these calls run inside the host's own request handlers, so an unbounded fetch
+     * against a slow upstream is a held socket and a held request in the host app, not just a slow
+     * SDK call. A caller-supplied `signal` still wins — a host that manages its own cancellation is
+     * not overridden.
+     */
     async request(path, init = {}) {
-        const res = await fetch(`${this.apiUrl.replace(/\/+$/, "")}${path}`, {
-            ...init,
-            headers: {
-                Authorization: `Bearer ${this.secretKey}`,
-                "Content-Type": "application/json",
-                ...(init.headers ?? {}),
-            },
-        });
+        let res;
+        try {
+            res = await fetch(`${this.apiUrl.replace(/\/+$/, "")}${path}`, {
+                ...init,
+                signal: init.signal ?? AbortSignal.timeout(this.timeoutMs),
+                headers: {
+                    Authorization: `Bearer ${this.secretKey}`,
+                    "Content-Type": "application/json",
+                    ...(init.headers ?? {}),
+                },
+            });
+        }
+        catch (err) {
+            // A timeout surfaces from fetch as a bare TimeoutError/AbortError, which says nothing about
+            // which call gave up. Name the request; never include the secret key.
+            const name = err instanceof Error ? err.name : "";
+            if (name === "TimeoutError" || name === "AbortError") {
+                throw new Error(`@auth/backend: ${init.method ?? "GET"} ${path} timed out after ${this.timeoutMs}ms`);
+            }
+            throw err;
+        }
         if (!res.ok) {
+            // Drain the body before discarding it. An undrained response body holds its socket out of the
+            // connection pool until the GC gets to it, so a run of API errors slowly starves the pool.
+            await res.text().catch(() => "");
             throw new Error(`@auth/backend: ${init.method ?? "GET"} ${path} → ${res.status}`);
         }
         return (await res.json());
