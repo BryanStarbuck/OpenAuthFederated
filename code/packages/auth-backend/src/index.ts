@@ -68,6 +68,9 @@ export type {
 // `createAuthFrontend` is the kept alias (also accepts the deprecated google/saml shorthand).
 export { createFederatedFrontend, createAuthFrontend } from "./frontend.js"
 export type {
+  BrowserSession,
+  FederatedFrontend,
+  FederatedFrontendMiddleware,
   FederatedFrontendConfig,
   FederatedConnectionConfig,
   GoogleConnectionConfig,
