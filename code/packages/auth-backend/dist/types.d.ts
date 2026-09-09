@@ -64,6 +64,13 @@ export interface CreateFederatedClientOptions {
     audience?: string | string[];
     /** Authorized parties (azp) accepted on tokens. Accepted for Federated parity. */
     authorizedParties?: string[];
+    /**
+     * Per-request timeout in milliseconds for Backend API calls. Defaults to 10000.
+     *
+     * Without one, a slow or hung Backend API stalls the caller indefinitely — and these calls run
+     * inside request handlers, so the stall is a held socket and a held request in the host app too.
+     */
+    timeoutMs?: number;
 }
 /**
  * @deprecated Use {@link CreateFederatedClientOptions}. Retained as an alias so existing

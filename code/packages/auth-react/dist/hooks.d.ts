@@ -1,5 +1,12 @@
 import type { AuthenticateWithRedirectParams, PermissionCheck, SdkMembership, SdkOrganization } from "./types.js";
-/** Auth state + tokens without hydrating the full profile. Mirrors Federated's `useAuth()`. */
+/**
+ * Auth state + tokens without hydrating the full profile. Mirrors Federated's `useAuth()`.
+ *
+ * Memoized on the values it actually reads. Without this the hook allocated a fresh result object
+ * and fresh `getToken`/`has`/`signOut`/`reloadSession` closures on EVERY render, so any component
+ * passing them down as props defeated `React.memo` on its children — the hook itself became the
+ * reason the subtree re-rendered.
+ */
 export declare function useAuth(): {
     isLoaded: boolean;
     /**

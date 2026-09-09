@@ -75,6 +75,19 @@ export interface SamlSpConfig {
     spPrivateKey?: string;
     /** Optional SP signing certificate (PEM) advertised in SP metadata when `spPrivateKey` is set. */
     spCertificate?: string;
+    /**
+     * Name of the assertion attribute carrying this IdP's hosted/organization domain, when it is not
+     * the default `hd`.
+     *
+     * Only `hd` is read implicitly, because this value is what satisfies `requireHostedDomain` and a
+     * generically-named attribute (`domain`, say) may already be in use for something unrelated —
+     * satisfying the deployment's strongest admission control by coincidence. Name yours here
+     * instead.
+     *
+     * Whatever the source, the value must MATCH the email domain in the assertion or it is ignored:
+     * a hosted-domain claim corroborates the address, it never substitutes for it.
+     */
+    hostedDomainAttribute?: string;
 }
 /** Build a configured node-saml `SAML` instance for SP-initiated SSO against the IdP. */
 export declare function buildSamlClient(cfg: SamlSpConfig): SAML;
@@ -95,9 +108,16 @@ export interface SamlReplayStore {
  */
 export declare class InMemorySamlReplayStore implements SamlReplayStore {
     private readonly seenIds;
+    /** Hard ceiling on retained ids. Beyond this the oldest are evicted (Map is insertion-ordered). */
+    private static readonly MAX_ENTRIES;
+    /** Sweep expired entries at most this often, instead of on every lookup. */
+    private static readonly SWEEP_INTERVAL_MS;
+    private lastSweep;
+    /** How many consumed ids are currently retained. Diagnostics (and a bound the tests assert). */
+    get size(): number;
     seen(assertionId: string): boolean;
     record(assertionId: string, notOnOrAfter: number): void;
-    private prune;
+    private maybeSweep;
 }
 /**
  * Build the SP-initiated login redirect URL (HTTP-Redirect binding). `relayState` is our own

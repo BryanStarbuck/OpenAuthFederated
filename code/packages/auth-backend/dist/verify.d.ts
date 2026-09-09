@@ -1,5 +1,10 @@
 import type { MachineClaims, TokenClaims } from "./types.js";
 /**
+ * How many issuers the JWKS cache currently holds. Diagnostics only — exposed so a host (and the
+ * test suite) can assert the cache stays bounded under multi-tenant load.
+ */
+export declare function jwksCacheSize(): number;
+/**
  * Embedded-mode verification config — supplied by the HOST application through the library's API
  * (see {@link configureEmbeddedVerification}, called by `createFederatedFrontend()`), NEVER read
  * from `process.env`. OpenAuthFederated is an embedded library: the apps that consume it own their
@@ -26,8 +31,18 @@ interface EmbeddedVerificationConfig {
  * app's `createFederatedFrontend()` with the SAME `sessionSecret`/`issuer` it mints with — so token
  * minting and token verification share one source of truth and the library reads no environment.
  * Apps that only verify (no in-process minting) may call this directly.
+ *
+ * Calling it again with an IDENTICAL configuration is a no-op (an idempotent bootstrap). Calling it
+ * with a DIFFERENT one marks the global verifier ambiguous — see {@link embeddedAmbiguous}. Prefer
+ * the per-frontend `frontend.verifyToken()` in any process that mounts more than one app.
  */
 export declare function configureEmbeddedVerification(cfg: EmbeddedVerificationConfig): void;
+/**
+ * Build a verifier bound to ONE app's configuration, ignoring the process-global state entirely.
+ * `createFederatedFrontend()` uses this for its own `verifyToken()` method, so a host that mounts
+ * two frontends gets two independent verifiers instead of whichever one was constructed last.
+ */
+export declare function createEmbeddedVerifier(cfg: EmbeddedVerificationConfig): (token: string, opts?: VerifyTokenOptions) => Promise<TokenClaims>;
 /**
  * Options for {@link verifyToken} — `verifyToken(token, options)`. Embedded mode honours `issuer`;
  * the remaining keys are accepted for source-compatibility and applied where they have meaning in

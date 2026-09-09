@@ -1,6 +1,8 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+exports.jwksCacheSize = jwksCacheSize;
 exports.configureEmbeddedVerification = configureEmbeddedVerification;
+exports.createEmbeddedVerifier = createEmbeddedVerifier;
 exports.verifyToken = verifyToken;
 exports.verifyMachineToken = verifyMachineToken;
 exports.hasScope = hasScope;
@@ -11,17 +13,116 @@ const jose_1 = require("jose");
 // `import("jose")` here — under any vm-based module loader without `importModuleDynamically`
 // (notably jest/ts-jest's CJS sandbox), a runtime `import()` throws
 // ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG.
-/** Per-issuer remote JWKS set, cached so verification is networkless after the first call. */
+/**
+ * Per-issuer remote JWKS set, cached so verification is networkless after the first call.
+ *
+ * BOUNDED: the key is the issuer, and in a multi-tenant host the issuer is per-tenant, so an
+ * unbounded map would grow with the tenant count and pin a `createRemoteJWKSet` closure (with its
+ * own cached keys) per entry. Least-recently-used eviction at {@link JWKS_CACHE_MAX} keeps the hot
+ * issuers resident; an evicted issuer costs one extra JWKS fetch, never a failure.
+ */
 const jwksCache = new Map();
+const JWKS_CACHE_MAX = 64;
+/** Timeouts for the outbound JWKS fetch, so a hung key server cannot hold a request open. */
+const JWKS_TIMEOUT_MS = 5_000;
+const JWKS_COOLDOWN_MS = 30_000;
+function jwksFor(issuer) {
+    const hit = jwksCache.get(issuer);
+    if (hit) {
+        // Re-insert to mark it most-recently-used (Map iterates in insertion order).
+        jwksCache.delete(issuer);
+        jwksCache.set(issuer, hit);
+        return hit;
+    }
+    const url = new URL(`${issuer.replace(/\/+$/, "")}/.well-known/jwks.json`);
+    const created = (0, jose_1.createRemoteJWKSet)(url, {
+        timeoutDuration: JWKS_TIMEOUT_MS,
+        cooldownDuration: JWKS_COOLDOWN_MS,
+    });
+    jwksCache.set(issuer, created);
+    while (jwksCache.size > JWKS_CACHE_MAX) {
+        const oldest = jwksCache.keys().next().value;
+        if (oldest === undefined)
+            break;
+        jwksCache.delete(oldest);
+    }
+    return created;
+}
+/**
+ * How many issuers the JWKS cache currently holds. Diagnostics only — exposed so a host (and the
+ * test suite) can assert the cache stays bounded under multi-tenant load.
+ */
+function jwksCacheSize() {
+    return jwksCache.size;
+}
 let embeddedVerification = null;
+/**
+ * Set once a SECOND, differently-configured frontend has been constructed in this process.
+ *
+ * The module-level `embeddedVerification` is one variable, so two frontends in one process would
+ * otherwise be last-write-wins: app A's `verifyToken()` would start validating against app B's
+ * secret, issuer and audience — silently destroying the per-app `aud` isolation the config
+ * documents, and breaking app A's own tokens. There is no correct value to keep here once two apps
+ * disagree, so the global stops guessing: it fails closed and names the fix. Per-frontend
+ * verification (`frontend.verifyToken`) and per-call `opts.sessionSecret` are unaffected.
+ */
+let embeddedAmbiguous = false;
+/** Identity of a configuration, so an idempotent re-bootstrap is not mistaken for a conflict. */
+function fingerprint(cfg) {
+    const aud = Array.isArray(cfg.audience) ? [...cfg.audience].sort().join(",") : (cfg.audience ?? "");
+    return JSON.stringify([cfg.sessionSecret, cfg.issuer ?? "", aud]);
+}
 /**
  * Tell the verifier how to validate embedded-mode tokens. Called once, at bootstrap, by the host
  * app's `createFederatedFrontend()` with the SAME `sessionSecret`/`issuer` it mints with — so token
  * minting and token verification share one source of truth and the library reads no environment.
  * Apps that only verify (no in-process minting) may call this directly.
+ *
+ * Calling it again with an IDENTICAL configuration is a no-op (an idempotent bootstrap). Calling it
+ * with a DIFFERENT one marks the global verifier ambiguous — see {@link embeddedAmbiguous}. Prefer
+ * the per-frontend `frontend.verifyToken()` in any process that mounts more than one app.
  */
 function configureEmbeddedVerification(cfg) {
+    // Registered per secret, so a caller that later supplies an explicit `sessionSecret` can still be
+    // given THAT app's issuer and audience. Without this the ambiguity latch below would let such a
+    // call through with both undefined — checking the signature but enforcing neither claim, which is
+    // exactly the isolation the audience is documented to provide "even if a secret is shared".
+    if (bySecret.has(cfg.sessionSecret)) {
+        const prior = bySecret.get(cfg.sessionSecret);
+        // Two apps registered DIFFERENT claims under the SAME secret. Picking either would be the same
+        // last-write-wins guess this whole mechanism exists to stop, so the secret itself becomes
+        // ambiguous and a secret-only verify refuses.
+        if (prior && fingerprint(prior) !== fingerprint(cfg))
+            bySecret.set(cfg.sessionSecret, null);
+    }
+    else {
+        bySecret.set(cfg.sessionSecret, { ...cfg });
+    }
+    if (embeddedVerification && fingerprint(embeddedVerification) !== fingerprint(cfg)) {
+        embeddedAmbiguous = true;
+        return;
+    }
     embeddedVerification = { ...cfg };
+}
+/**
+ * Every embedded config registered in this process, keyed by its signing secret. `null` marks a
+ * secret that two differently-configured apps both registered — see {@link
+ * configureEmbeddedVerification}.
+ */
+const bySecret = new Map();
+/**
+ * Build a verifier bound to ONE app's configuration, ignoring the process-global state entirely.
+ * `createFederatedFrontend()` uses this for its own `verifyToken()` method, so a host that mounts
+ * two frontends gets two independent verifiers instead of whichever one was constructed last.
+ */
+function createEmbeddedVerifier(cfg) {
+    return (token, opts = {}) => verifyToken(token, {
+        ...opts,
+        embedded: opts.embedded ?? true,
+        sessionSecret: opts.sessionSecret ?? cfg.sessionSecret,
+        issuer: opts.issuer ?? cfg.issuer,
+        audience: opts.audience ?? cfg.audience,
+    });
 }
 /**
  * Embedded mode: OpenAuthFederated runs in-process as a library (no deployed server, no JWKS
@@ -157,13 +258,46 @@ async function verifyToken(token, opts = {}) {
     if (!token)
         throw new Error("verifyToken: empty token");
     if (isEmbedded(opts)) {
+        // Two differently-configured frontends live in this process, so "the" embedded config no longer
+        // identifies an app. Verifying under either one would be a guess — and a wrong guess here means
+        // accepting a token minted for a DIFFERENT app. Fail closed and name the fix. A caller that
+        // knows which app it means still gets through, via an explicit per-call secret (below) or the
+        // per-frontend `frontend.verifyToken()`.
+        if (embeddedAmbiguous && opts.sessionSecret === undefined) {
+            throw new Error("verifyToken: embedded verification is ambiguous — more than one differently-configured " +
+                "createFederatedFrontend() exists in this process, so the process-global config no longer " +
+                "identifies an app. Use the per-app `frontend.verifyToken(token)` returned by " +
+                "createFederatedFrontend(), or pass an explicit { sessionSecret, issuer, audience }.");
+        }
         // Pin HS256 for the embedded symmetric path (no algorithm agility), and enforce the issuer
         // when one is configured so a token from a different deployment is not accepted on a shared
         // secret. Audience is enforced when the caller supplies one OR when one was configured via
         // configureEmbeddedVerification() — so per-app `aud` isolation holds by default, not only when
         // each verify call remembers to pass it.
-        const issuer = opts.issuer ?? embeddedVerification?.issuer;
-        const audience = opts.audience ?? embeddedVerification?.audience;
+        //
+        // Which config supplies the fallback claims:
+        //   - a per-call `sessionSecret` selects the app registered under THAT secret, so an explicit
+        //     secret still gets its own issuer/audience enforced. Dropping to `undefined` here would
+        //     verify the signature and check neither claim — the one case where two apps share a secret
+        //     and differ only by audience is precisely where that matters;
+        //   - otherwise the single global config, unless it has gone ambiguous, in which case nothing
+        //     is consulted (and the guard above has already refused).
+        let fallback;
+        if (opts.sessionSecret !== undefined) {
+            fallback = bySecret.get(opts.sessionSecret);
+            // The secret alone does not identify an app, and this call named neither claim — so there is
+            // nothing to enforce beyond the signature, which two apps sharing this secret both satisfy.
+            if (fallback === null && opts.issuer === undefined && opts.audience === undefined) {
+                throw new Error("verifyToken: this sessionSecret is registered by more than one differently-configured " +
+                    "app in this process, so it does not identify which issuer/audience to enforce. Use " +
+                    "the per-app `frontend.verifyToken(token)`, or pass an explicit { issuer, audience }.");
+            }
+        }
+        else {
+            fallback = embeddedAmbiguous ? undefined : embeddedVerification;
+        }
+        const issuer = opts.issuer ?? fallback?.issuer;
+        const audience = opts.audience ?? fallback?.audience;
         const verifyOpts = {
             algorithms: opts.algorithms ?? ["HS256"],
         };
@@ -182,12 +316,7 @@ async function verifyToken(token, opts = {}) {
     // SSRF guard: the issuer becomes an outbound JWKS fetch URL, so validate it (https + host
     // allowlist) before constructing the remote key set.
     assertSafeIssuer(issuer, opts.jwksAllowedHosts ?? embeddedVerification?.jwksAllowedHosts ?? []);
-    let jwks = jwksCache.get(issuer);
-    if (!jwks) {
-        const url = new URL(`${issuer.replace(/\/+$/, "")}/.well-known/jwks.json`);
-        jwks = (0, jose_1.createRemoteJWKSet)(url);
-        jwksCache.set(issuer, jwks);
-    }
+    const jwks = jwksFor(issuer);
     const jwksOpts = {
         issuer,
         algorithms: opts.algorithms ?? ["RS256"],

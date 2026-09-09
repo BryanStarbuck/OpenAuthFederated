@@ -1,43 +1,52 @@
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { useAuthContext } from "./context.js";
-/** Auth state + tokens without hydrating the full profile. Mirrors Federated's `useAuth()`. */
+/**
+ * Auth state + tokens without hydrating the full profile. Mirrors Federated's `useAuth()`.
+ *
+ * Memoized on the values it actually reads. Without this the hook allocated a fresh result object
+ * and fresh `getToken`/`has`/`signOut`/`reloadSession` closures on EVERY render, so any component
+ * passing them down as props defeated `React.memo` on its children — the hook itself became the
+ * reason the subtree re-rendered.
+ */
 export function useAuth() {
     const { core, snapshot, isLoaded, loadState } = useAuthContext();
-    const activeMembership = snapshot.memberships.find((m) => m.organization.id === snapshot.orgId) ?? null;
-    return {
-        isLoaded,
-        /**
-         * Raw load state: "loading" | "loaded" | "degraded" | "failed". A route guard should treat
-         * "failed"/"degraded" as "backend unreachable, keep waiting" — NOT as "signed out" — so a
-         * server restart never bounces an already-signed-in user to the sign-in page.
-         */
-        loadState,
-        /**
-         * Re-fetch the Client from the Frontend API (rehydrate the session from the still-valid
-         * session cookie) and report whether a session is now active. Non-destructive — unlike
-         * signOut() it never revokes the server session. Use it to recover from a transient 401
-         * before deciding the user is really signed out.
-         */
-        reloadSession: async () => {
-            await core.load();
-            return core.getSnapshot().isSignedIn;
-        },
-        isSignedIn: snapshot.isSignedIn,
-        userId: snapshot.userId,
-        sessionId: snapshot.sessionId,
-        orgId: snapshot.orgId,
-        /** Active-org role (Federated parity). Null when there is no active org. */
-        orgRole: activeMembership?.role ?? null,
-        /** Active-org slug (Federated parity). Null when there is no active org. */
-        orgSlug: activeMembership?.organization.slug ?? null,
-        /** Raw session claims are not exposed to the browser in embedded mode; always null. */
-        sessionClaims: null,
-        /** Impersonation actor (Federated parity); unused here, always null. */
-        actor: null,
-        getToken: (opts) => core.getToken(opts),
-        has: (check) => core.has(check),
-        signOut: (opts) => core.signOut(opts),
-    };
+    return useMemo(() => {
+        const activeMembership = snapshot.memberships.find((m) => m.organization.id === snapshot.orgId) ?? null;
+        return {
+            isLoaded,
+            /**
+             * Raw load state: "loading" | "loaded" | "degraded" | "failed". A route guard should treat
+             * "failed"/"degraded" as "backend unreachable, keep waiting" — NOT as "signed out" — so a
+             * server restart never bounces an already-signed-in user to the sign-in page.
+             */
+            loadState,
+            /**
+             * Re-fetch the Client from the Frontend API (rehydrate the session from the still-valid
+             * session cookie) and report whether a session is now active. Non-destructive — unlike
+             * signOut() it never revokes the server session. Use it to recover from a transient 401
+             * before deciding the user is really signed out.
+             */
+            reloadSession: async () => {
+                await core.load();
+                return core.getSnapshot().isSignedIn;
+            },
+            isSignedIn: snapshot.isSignedIn,
+            userId: snapshot.userId,
+            sessionId: snapshot.sessionId,
+            orgId: snapshot.orgId,
+            /** Active-org role (Federated parity). Null when there is no active org. */
+            orgRole: activeMembership?.role ?? null,
+            /** Active-org slug (Federated parity). Null when there is no active org. */
+            orgSlug: activeMembership?.organization.slug ?? null,
+            /** Raw session claims are not exposed to the browser in embedded mode; always null. */
+            sessionClaims: null,
+            /** Impersonation actor (Federated parity); unused here, always null. */
+            actor: null,
+            getToken: (opts) => core.getToken(opts),
+            has: (check) => core.has(check),
+            signOut: (opts) => core.signOut(opts),
+        };
+    }, [core, snapshot, isLoaded, loadState]);
 }
 /** The current user's profile data. */
 export function useUser() {
@@ -94,18 +103,16 @@ export function useSignUp() {
 /** Access the active organization/tenant and the current user's membership in it. */
 export function useOrganization() {
     const { snapshot, isLoaded } = useAuthContext();
-    const membership = snapshot.memberships.find((m) => m.organization.id === snapshot.orgId) ?? null;
-    return { isLoaded, organization: membership?.organization ?? null, membership };
+    return useMemo(() => {
+        const membership = snapshot.memberships.find((m) => m.organization.id === snapshot.orgId) ?? null;
+        return { isLoaded, organization: membership?.organization ?? null, membership };
+    }, [snapshot, isLoaded]);
 }
 /** List the organizations the user belongs to and switch the active one (tab-scoped). */
 export function useOrganizationList(_opts = {}) {
     const { core, snapshot, isLoaded } = useAuthContext();
     const setActive = useCallback((p) => core.setActiveOrg(p.organization), [core]);
-    return {
-        isLoaded,
-        userMemberships: { data: snapshot.memberships },
-        setActive,
-    };
+    return useMemo(() => ({ isLoaded, userMemberships: { data: snapshot.memberships }, setActive }), [isLoaded, snapshot.memberships, setActive]);
 }
 /**
  * Wrap a sensitive action so a freshly-verified session is required before it runs
@@ -129,15 +136,17 @@ export function useReverification(action, opts = {}) {
  */
 export function useFederated() {
     const { core, snapshot, isLoaded } = useAuthContext();
-    const organization = snapshot.memberships.find((m) => m.organization.id === snapshot.orgId)?.organization ?? null;
-    return {
-        loaded: isLoaded,
-        user: snapshot.user,
-        session: snapshot.isSignedIn ? { id: snapshot.sessionId } : null,
-        organization,
-        setActive: (p) => core.setActiveOrg(p.organization),
-        signOut: (opts) => core.signOut(opts),
-    };
+    return useMemo(() => {
+        const organization = snapshot.memberships.find((m) => m.organization.id === snapshot.orgId)?.organization ?? null;
+        return {
+            loaded: isLoaded,
+            user: snapshot.user,
+            session: snapshot.isSignedIn ? { id: snapshot.sessionId } : null,
+            organization,
+            setActive: (p) => core.setActiveOrg(p.organization),
+            signOut: (opts) => core.signOut(opts),
+        };
+    }, [core, snapshot, isLoaded]);
 }
 /**
  * @deprecated Use {@link useFederated}. Alias retained so existing `useOpenAuth()` call sites keep

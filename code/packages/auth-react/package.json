@@ -1,7 +1,7 @@
 {
   "name": "@auth/react",
   "version": "0.2.0",
-  "description": "OpenAuthFederated React SDK — a Federated-compatible drop-in: FederatedProvider, useAuth/useUser/useFederated hooks, and SignIn/SignedIn/Protect/UserButton components for a React SPA.",
+  "description": "OpenAuthFederated React SDK \u2014 a Federated-compatible drop-in: FederatedProvider, useAuth/useUser/useFederated hooks, and SignIn/SignedIn/Protect/UserButton components for a React SPA.",
   "license": "MIT",
   "type": "module",
   "main": "dist/index.js",
@@ -14,19 +14,19 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json"
+    "build": "tsc -p tsconfig.json",
+    "test": "node test/core-perf.mjs"
   },
   "peerDependencies": {
     "react": ">=18",
     "react-dom": ">=18"
-  },
-  "dependencies": {
-    "jose": "^5.9.6"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",

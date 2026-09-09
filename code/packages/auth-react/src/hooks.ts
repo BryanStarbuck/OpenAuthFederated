@@ -1,4 +1,4 @@
-import { useCallback } from "react"
+import { useCallback, useMemo } from "react"
 import { useAuthContext } from "./context.js"
 import type {
   AuthenticateWithRedirectParams,
@@ -7,9 +7,17 @@ import type {
   SdkOrganization,
 } from "./types.js"
 
-/** Auth state + tokens without hydrating the full profile. Mirrors Federated's `useAuth()`. */
+/**
+ * Auth state + tokens without hydrating the full profile. Mirrors Federated's `useAuth()`.
+ *
+ * Memoized on the values it actually reads. Without this the hook allocated a fresh result object
+ * and fresh `getToken`/`has`/`signOut`/`reloadSession` closures on EVERY render, so any component
+ * passing them down as props defeated `React.memo` on its children — the hook itself became the
+ * reason the subtree re-rendered.
+ */
 export function useAuth() {
   const { core, snapshot, isLoaded, loadState } = useAuthContext()
+  return useMemo(() => {
   const activeMembership =
     snapshot.memberships.find((m) => m.organization.id === snapshot.orgId) ?? null
   return {
@@ -46,6 +54,7 @@ export function useAuth() {
     has: (check?: PermissionCheck) => core.has(check),
     signOut: (opts?: { redirectUrl?: string }) => core.signOut(opts),
   }
+  }, [core, snapshot, isLoaded, loadState])
 }
 
 /** The current user's profile data. */
@@ -116,9 +125,11 @@ export function useOrganization(): {
   membership: SdkMembership | null
 } {
   const { snapshot, isLoaded } = useAuthContext()
-  const membership =
-    snapshot.memberships.find((m) => m.organization.id === snapshot.orgId) ?? null
-  return { isLoaded, organization: membership?.organization ?? null, membership }
+  return useMemo(() => {
+    const membership =
+      snapshot.memberships.find((m) => m.organization.id === snapshot.orgId) ?? null
+    return { isLoaded, organization: membership?.organization ?? null, membership }
+  }, [snapshot, isLoaded])
 }
 
 /** List the organizations the user belongs to and switch the active one (tab-scoped). */
@@ -132,11 +143,10 @@ export function useOrganizationList(_opts: { userMemberships?: boolean } = {}): 
     (p: { organization: string | null }) => core.setActiveOrg(p.organization),
     [core],
   )
-  return {
-    isLoaded,
-    userMemberships: { data: snapshot.memberships },
-    setActive,
-  }
+  return useMemo(
+    () => ({ isLoaded, userMemberships: { data: snapshot.memberships }, setActive }),
+    [isLoaded, snapshot.memberships, setActive],
+  )
 }
 
 /**
@@ -168,16 +178,18 @@ export function useReverification<Args extends unknown[], R>(
  */
 export function useFederated() {
   const { core, snapshot, isLoaded } = useAuthContext()
-  const organization =
-    snapshot.memberships.find((m) => m.organization.id === snapshot.orgId)?.organization ?? null
-  return {
-    loaded: isLoaded,
-    user: snapshot.user,
-    session: snapshot.isSignedIn ? { id: snapshot.sessionId } : null,
-    organization,
-    setActive: (p: { organization: string | null }) => core.setActiveOrg(p.organization),
-    signOut: (opts?: { redirectUrl?: string }) => core.signOut(opts),
-  }
+  return useMemo(() => {
+    const organization =
+      snapshot.memberships.find((m) => m.organization.id === snapshot.orgId)?.organization ?? null
+    return {
+      loaded: isLoaded,
+      user: snapshot.user,
+      session: snapshot.isSignedIn ? { id: snapshot.sessionId } : null,
+      organization,
+      setActive: (p: { organization: string | null }) => core.setActiveOrg(p.organization),
+      signOut: (opts?: { redirectUrl?: string }) => core.signOut(opts),
+    }
+  }, [core, snapshot, isLoaded])
 }
 
 /**

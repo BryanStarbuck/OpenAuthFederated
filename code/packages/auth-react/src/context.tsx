@@ -99,17 +99,24 @@ export function FederatedProvider(props: FederatedProviderProps): ReactNode {
     }
   }, [core])
 
+  // ONE subscription, not two. Subscribing separately for `snapshot` and `loadState` registered two
+  // listeners per provider and walked the listener set twice on every emit, for two values that
+  // always change together and always come from the same store.
+  const subscribe = useMemo(() => (cb: () => void) => core.subscribe(cb), [core])
   const snapshot = useSyncExternalStore(
-    (cb) => core.subscribe(cb),
+    subscribe,
     () => core.getSnapshot(),
     () => core.getSnapshot(),
+  )
+  const loadState = useSyncExternalStore(
+    subscribe,
+    () => core.loadState(),
+    () => core.loadState(),
   )
 
-  const loadState = useSyncExternalStore(
-    (cb) => core.subscribe(cb),
-    () => core.loadState(),
-    () => core.loadState(),
-  )
+  // `connections` is derived from a constructor argument and never changes, so it is read once and
+  // kept out of the value memo below — which re-runs on every snapshot change.
+  const connections = useMemo(() => core.connections(), [core])
 
   const value = useMemo<AuthContextValue>(
     () => ({
@@ -117,7 +124,7 @@ export function FederatedProvider(props: FederatedProviderProps): ReactNode {
       snapshot,
       isLoaded,
       loadState,
-      connections: core.connections(),
+      connections,
       config: {
         signInUrl: props.signInUrl ?? "/sign-in",
         signUpUrl: props.signUpUrl ?? "/sign-up",
@@ -130,6 +137,7 @@ export function FederatedProvider(props: FederatedProviderProps): ReactNode {
       snapshot,
       isLoaded,
       loadState,
+      connections,
       props.signInUrl,
       props.signUpUrl,
       props.afterSignOutUrl,

@@ -1,7 +1,7 @@
 {
   "name": "@auth/backend",
   "version": "0.3.0",
-  "description": "OpenAuthFederated Backend SDK — a Federated-compatible drop-in: createFederatedClient, federatedClient (users/sessions/organizations), authenticateRequest, verifyToken, federatedMiddleware/requireAuth/getAuth, and the embedded createFederatedFrontend.",
+  "description": "OpenAuthFederated Backend SDK \u2014 a Federated-compatible drop-in: createFederatedClient, federatedClient (users/sessions/organizations), authenticateRequest, verifyToken, federatedMiddleware/requireAuth/getAuth, and the embedded createFederatedFrontend.",
   "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -12,7 +12,9 @@
       "default": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -21,8 +23,14 @@
     "test:saml": "node test/saml-roundtrip.cjs",
     "test:creds": "node test/credentials.cjs",
     "test:noverify": "node test/no-dev-mock.cjs",
-    "test": "node test/credentials.cjs && node test/saml-roundtrip.cjs && node test/no-dev-mock.cjs && node test/read-browser-session.cjs",
-    "test:session": "node test/read-browser-session.cjs"
+    "test": "node test/credentials.cjs && node test/saml-roundtrip.cjs && node test/no-dev-mock.cjs && node test/read-browser-session.cjs && node test/verify-isolation.cjs && node test/saml-hardening.cjs && node test/signin-flow.cjs && node test/endpoint-hardening.cjs && node test/session-store-perf.cjs && node test/resource-bounds.cjs",
+    "test:session": "node test/read-browser-session.cjs",
+    "test:isolation": "node test/verify-isolation.cjs",
+    "test:saml-hardening": "node test/saml-hardening.cjs",
+    "test:signin": "node test/signin-flow.cjs",
+    "test:endpoints": "node test/endpoint-hardening.cjs",
+    "test:store": "node test/session-store-perf.cjs",
+    "test:bounds": "node test/resource-bounds.cjs"
   },
   "dependencies": {
     "@node-saml/node-saml": "^5.1.0",
