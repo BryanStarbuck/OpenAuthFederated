@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.authClient = exports.federatedClient = exports.createAuthClient = exports.OAuthCredentialsError = exports.credentialsRemediation = exports.assertGoogleCredentials = exports.loadGoogleCredentials = exports.InMemorySamlReplayStore = exports.validateSamlAcs = exports.samlSpMetadata = exports.samlLoginRedirectUrl = exports.buildSamlClient = exports.loadOrCreateSecret = exports.InMemorySessionStore = exports.FileSessionStore = exports.createAuthFrontend = exports.createFederatedFrontend = exports.getAuth = exports.requireAuth = exports.federatedMiddleware = exports.AuthError = exports.bearerToken = exports.authenticateRequest = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.jwksCacheSize = exports.createEmbeddedVerifier = exports.configureEmbeddedVerification = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.verifyWebhook = exports.FederatedClient = exports.AuthClient = void 0;
+exports.authClient = exports.federatedClient = exports.createAuthClient = exports.OAuthCredentialsError = exports.credentialsRemediation = exports.assertGoogleCredentials = exports.loadGoogleCredentials = exports.InMemorySamlReplayStore = exports.validateSamlAcs = exports.samlSpMetadata = exports.samlLoginRedirectUrl = exports.buildSamlClient = exports.loadOrCreateSecret = exports.InMemorySessionStore = exports.FileSessionStore = exports.X_SCOPES = exports.GOOGLE_ISSUERS = exports.OAuthExchangeError = exports.exchangeXCode = exports.xAuthorizeUrl = exports.exchangeGoogleCode = exports.googleAuthorizeUrl = exports.randomUrlToken = exports.pkceChallenge = exports.createPkcePair = exports.createAuthFrontend = exports.createFederatedFrontend = exports.getAuth = exports.requireAuth = exports.federatedMiddleware = exports.AuthError = exports.bearerToken = exports.authenticateRequest = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.jwksCacheSize = exports.createEmbeddedVerifier = exports.configureEmbeddedVerification = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.verifyWebhook = exports.FederatedClient = exports.AuthClient = void 0;
 exports.createFederatedClient = createFederatedClient;
 const client_js_1 = require("./client.js");
 // The backend client. `FederatedClient` is the primary name; `AuthClient` is kept as an alias so
@@ -42,6 +42,20 @@ Object.defineProperty(exports, "getAuth", { enumerable: true, get: function () {
 var frontend_js_1 = require("./frontend.js");
 Object.defineProperty(exports, "createFederatedFrontend", { enumerable: true, get: function () { return frontend_js_1.createFederatedFrontend; } });
 Object.defineProperty(exports, "createAuthFrontend", { enumerable: true, get: function () { return frontend_js_1.createAuthFrontend; } });
+// The provider protocols on their own (authorize URL, PKCE, code exchange, verified identity), with
+// no session, cookie or domain policy. createFederatedFrontend() is built on these; an app that keeps
+// its own session model (its own accounts service) calls them directly.
+var oauth_providers_js_1 = require("./oauth-providers.js");
+Object.defineProperty(exports, "createPkcePair", { enumerable: true, get: function () { return oauth_providers_js_1.createPkcePair; } });
+Object.defineProperty(exports, "pkceChallenge", { enumerable: true, get: function () { return oauth_providers_js_1.pkceChallenge; } });
+Object.defineProperty(exports, "randomUrlToken", { enumerable: true, get: function () { return oauth_providers_js_1.randomUrlToken; } });
+Object.defineProperty(exports, "googleAuthorizeUrl", { enumerable: true, get: function () { return oauth_providers_js_1.googleAuthorizeUrl; } });
+Object.defineProperty(exports, "exchangeGoogleCode", { enumerable: true, get: function () { return oauth_providers_js_1.exchangeGoogleCode; } });
+Object.defineProperty(exports, "xAuthorizeUrl", { enumerable: true, get: function () { return oauth_providers_js_1.xAuthorizeUrl; } });
+Object.defineProperty(exports, "exchangeXCode", { enumerable: true, get: function () { return oauth_providers_js_1.exchangeXCode; } });
+Object.defineProperty(exports, "OAuthExchangeError", { enumerable: true, get: function () { return oauth_providers_js_1.OAuthExchangeError; } });
+Object.defineProperty(exports, "GOOGLE_ISSUERS", { enumerable: true, get: function () { return oauth_providers_js_1.GOOGLE_ISSUERS; } });
+Object.defineProperty(exports, "X_SCOPES", { enumerable: true, get: function () { return oauth_providers_js_1.X_SCOPES; } });
 // Persistent, server-side session store (the stateful half of the session model).
 // Pass a store to createFederatedFrontend({ sessionStore }) to make sessions survive app restarts
 // and support revocation / listing / inactivity timeout.

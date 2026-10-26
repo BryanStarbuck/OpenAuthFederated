@@ -26,7 +26,10 @@ const {
 async function main() {
   // --- P3: every outbound fetch in the frontend must carry an abort signal ---------------------
   {
-    const src = await readFile(join(__dirname, "..", "dist", "frontend.js"), "utf8")
+    // The Google and X exchanges live in oauth-providers.js since 2026-10-26; frontend.js calls them.
+    const src =
+      (await readFile(join(__dirname, "..", "dist", "frontend.js"), "utf8")) +
+      (await readFile(join(__dirname, "..", "dist", "oauth-providers.js"), "utf8"))
     const unbounded = []
     for (const m of src.matchAll(/\bfetch\s*\(/g)) {
       // Look at the call's own argument list — a signal must appear before the next statement.

@@ -88,6 +88,32 @@ export type {
   ResolvedGrants,
   RateLimitContext,
 } from "./frontend.js"
+// The provider protocols on their own (authorize URL, PKCE, code exchange, verified identity), with
+// no session, cookie or domain policy. createFederatedFrontend() is built on these; an app that keeps
+// its own session model (its own accounts service) calls them directly.
+export {
+  createPkcePair,
+  pkceChallenge,
+  randomUrlToken,
+  googleAuthorizeUrl,
+  exchangeGoogleCode,
+  xAuthorizeUrl,
+  exchangeXCode,
+  OAuthExchangeError,
+  GOOGLE_ISSUERS,
+  X_SCOPES,
+} from "./oauth-providers.js"
+export type {
+  PkcePair,
+  GoogleAuthorizeOptions,
+  GoogleExchangeOptions,
+  GoogleEndpoints,
+  XAuthorizeOptions,
+  XExchangeOptions,
+  XExchangeResult,
+  XEndpoints,
+  OAuthExchangeErrorKind,
+} from "./oauth-providers.js"
 // Persistent, server-side session store (the stateful half of the session model).
 // Pass a store to createFederatedFrontend({ sessionStore }) to make sessions survive app restarts
 // and support revocation / listing / inactivity timeout.

@@ -2,33 +2,38 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { type VerifyTokenOptions } from "./verify.js";
 import type { TokenClaims } from "./types.js";
 import type { SessionMembership, SessionStore } from "./session-store.js";
+import { type OidcIdentity } from "./oauth-providers.js";
 import { type SamlReplayStore, type SamlSpConfig } from "./saml.js";
 /**
- * A verified upstream identity. Named for its first producer (Google's OIDC id_token); it is now
- * also what the SAML ACS and the X sign-in path hand to {@link finishSignIn}, so that every strategy
- * produces one identical session.
+ * In-process Frontend API — the embedded counterpart to a deployed OpenAuthFederated server.
+ *
+ * `createAuthFrontend()` returns an Express/Node-compatible middleware that the host app mounts
+ * (e.g. `app.use('/api/v1', createAuthFrontend(cfg))`). It implements exactly the endpoints the
+ * `@auth/react` `RealAuthCore` calls, so a SPA gets a *real* Google Workspace sign-in with no
+ * separate auth server process:
+ *
+ *   GET  /sign_in/sso                         → 302 to Google's OAuth 2.0 / OIDC authorize URL
+ *   GET  /sign_in/sso?strategy=x              → 302 to X's OAuth 2.0 authorize URL (PKCE, no OIDC)
+ *   GET  /oauth_callback/x                    → code→token exchange, then GET /2/users/me for the
+ *                                               identity, then the same finishSignIn() tail
+ *   GET  /oauth_callback                      → code→token exchange, id_token + hd verification,
+ *                                               establishes the session cookie, 302 back to the SPA
+ *   GET  /environment                         → instance configuration (hosted-IdP-style, secret-free)
+ *   GET  /client                              → rehydrate the current session (signed-out = empty)
+ *   POST /client/sessions/:id/tokens          → mint a short-lived access JWT for API calls
+ *   POST /client/sessions/:id/tokens/:tmpl    → templated token mint (same path, tagged)
+ *   POST /client/sessions/:id/touch           → set the session's active organization
+ *   GET  /client/sessions/:id/reverify        → step-up: refresh the session's verified-at time
+ *   POST /client/sessions/:id/remove          → sign out (clear the session cookie)
+ *
+ * Everything runs in the host's own process. The human is authenticated by Google (real OIDC
+ * round-trip, real id_token signature check against Google's JWKS, real `hd`/`email_verified`
+ * enforcement). The app *session* and the short-lived access tokens are signed with a single
+ * in-process HS256 secret (`sessionSecret`) — the same secret `verifyToken()` checks in embedded
+ * mode — so there is no JWKS endpoint and no second service to run.
  */
-export interface OidcIdentity {
-    /** The provider's stable subject identifier (Google `sub`, SAML nameID, X numeric user id). */
-    sub: string;
-    email: string;
-    emailVerified: boolean;
-    /** Hosted-domain claim (Google Workspace). Absent for consumer gmail.com accounts. */
-    hd?: string;
-    name?: string;
-    givenName?: string;
-    familyName?: string;
-    picture?: string;
-    /**
-     * WHICH STRATEGY VERIFIED THIS HUMAN. `finishSignIn` needs it because the admission rules are not
-     * the same for all three: `requireHostedDomain` asks for a Google Workspace `hd` claim, which is a
-     * thing only Google has. Optional, and absent means `google` — so every existing call site keeps
-     * its exact behaviour.
-     */
-    provider?: "google" | "saml" | "x";
-    /** The X handle, without the `@`. Set on the X path only; nothing else populates it. */
-    username?: string;
-}
+/** @see oauth-providers.ts — re-exported here so existing `import { OidcIdentity } from "./frontend.js"` keeps working. */
+export type { OidcIdentity };
 /**
  * One organization membership. Aliased to {@link SessionMembership} (same shape) so the session
  * store and the session model share a single type and can never drift apart.
@@ -434,14 +439,6 @@ export interface FederatedFrontend {
  * "middleware" at the call sites that mount it. Both names describe the same value.
  */
 export type FederatedFrontendMiddleware = FederatedFrontend;
-/**
- * Create the embedded Frontend API middleware. Mount it where the SDK's `frontendApi` + `/v1`
- * resolves to — e.g. `app.use('/api/v1', createFederatedFrontend(cfg))` with `frontendApi: '/api'`.
- *
- * Pass connections the Federated-idiomatic way:
- *   `createFederatedFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
- *     redirectUri }], allowedDomains, sessionSecret })`
- */
 export declare function createFederatedFrontend(config: FederatedFrontendConfig): FederatedFrontend;
 /**
  * @deprecated Use {@link createFederatedFrontend}. Alias retained so existing

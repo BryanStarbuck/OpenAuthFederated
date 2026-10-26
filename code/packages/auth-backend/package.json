@@ -23,14 +23,15 @@
     "test:saml": "node test/saml-roundtrip.cjs",
     "test:creds": "node test/credentials.cjs",
     "test:noverify": "node test/no-dev-mock.cjs",
-    "test": "node test/credentials.cjs && node test/saml-roundtrip.cjs && node test/no-dev-mock.cjs && node test/read-browser-session.cjs && node test/verify-isolation.cjs && node test/saml-hardening.cjs && node test/signin-flow.cjs && node test/endpoint-hardening.cjs && node test/session-store-perf.cjs && node test/resource-bounds.cjs",
+    "test": "node test/credentials.cjs && node test/saml-roundtrip.cjs && node test/no-dev-mock.cjs && node test/read-browser-session.cjs && node test/verify-isolation.cjs && node test/saml-hardening.cjs && node test/signin-flow.cjs && node test/endpoint-hardening.cjs && node test/session-store-perf.cjs && node test/resource-bounds.cjs && node test/oauth-providers.cjs",
     "test:session": "node test/read-browser-session.cjs",
     "test:isolation": "node test/verify-isolation.cjs",
     "test:saml-hardening": "node test/saml-hardening.cjs",
     "test:signin": "node test/signin-flow.cjs",
     "test:endpoints": "node test/endpoint-hardening.cjs",
     "test:store": "node test/session-store-perf.cjs",
-    "test:bounds": "node test/resource-bounds.cjs"
+    "test:bounds": "node test/resource-bounds.cjs",
+    "test:providers": "node test/oauth-providers.cjs"
   },
   "dependencies": {
     "@node-saml/node-saml": "^5.1.0",

@@ -6,69 +6,8 @@ const node_crypto_1 = require("node:crypto");
 const jose_1 = require("jose");
 const credentials_js_1 = require("./credentials.js");
 const verify_js_1 = require("./verify.js");
+const oauth_providers_js_1 = require("./oauth-providers.js");
 const saml_js_1 = require("./saml.js");
-/**
- * In-process Frontend API — the embedded counterpart to a deployed OpenAuthFederated server.
- *
- * `createAuthFrontend()` returns an Express/Node-compatible middleware that the host app mounts
- * (e.g. `app.use('/api/v1', createAuthFrontend(cfg))`). It implements exactly the endpoints the
- * `@auth/react` `RealAuthCore` calls, so a SPA gets a *real* Google Workspace sign-in with no
- * separate auth server process:
- *
- *   GET  /sign_in/sso                         → 302 to Google's OAuth 2.0 / OIDC authorize URL
- *   GET  /sign_in/sso?strategy=x              → 302 to X's OAuth 2.0 authorize URL (PKCE, no OIDC)
- *   GET  /oauth_callback/x                    → code→token exchange, then GET /2/users/me for the
- *                                               identity, then the same finishSignIn() tail
- *   GET  /oauth_callback                      → code→token exchange, id_token + hd verification,
- *                                               establishes the session cookie, 302 back to the SPA
- *   GET  /environment                         → instance configuration (hosted-IdP-style, secret-free)
- *   GET  /client                              → rehydrate the current session (signed-out = empty)
- *   POST /client/sessions/:id/tokens          → mint a short-lived access JWT for API calls
- *   POST /client/sessions/:id/tokens/:tmpl    → templated token mint (same path, tagged)
- *   POST /client/sessions/:id/touch           → set the session's active organization
- *   GET  /client/sessions/:id/reverify        → step-up: refresh the session's verified-at time
- *   POST /client/sessions/:id/remove          → sign out (clear the session cookie)
- *
- * Everything runs in the host's own process. The human is authenticated by Google (real OIDC
- * round-trip, real id_token signature check against Google's JWKS, real `hd`/`email_verified`
- * enforcement). The app *session* and the short-lived access tokens are signed with a single
- * in-process HS256 secret (`sessionSecret`) — the same secret `verifyToken()` checks in embedded
- * mode — so there is no JWKS endpoint and no second service to run.
- */
-const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const GOOGLE_ISSUERS = ["https://accounts.google.com", "accounts.google.com"];
-// --- X (Twitter) OAuth 2.0 -----------------------------------------------------------------------
-//
-// X IS NOT AN OIDC PROVIDER. There is no id_token, no JWKS and no signature to verify, so the
-// identity cannot be read out of the token response the way Google's is. It is read from the API
-// under the freshly minted access token instead (`fetchXIdentity`), which is why the X path has one
-// more network hop than the Google path and why that hop is not optional.
-const X_AUTH_URL = "https://x.com/i/oauth2/authorize";
-const X_TOKEN_URL = "https://api.x.com/2/oauth2/token";
-const X_ME_URL = "https://api.x.com/2/users/me";
-// `users.email` is what makes `confirmed_email` come back from /2/users/me. X refuses the scope
-// unless the application has "Request email from users" enabled in the developer portal, and an
-// account with no confirmed email address still answers without the field — so a missing email is a
-// NORMAL outcome here, not an error, and `finishSignIn` is what decides whether it is admissible.
-const X_SCOPES = "tweet.read users.read users.email";
-// `jose` v5 is a dual ESM/CJS package (its package.json `exports` has a `require` entry), so the
-// static import above is safe from a CommonJS host (NestJS): NodeNext compiles it to
-// `require("jose")`, resolving to jose's CJS build. We deliberately do NOT use a dynamic
-// `import("jose")` — under any vm-based module loader without `importModuleDynamically` (notably
-// jest/ts-jest's CJS sandbox), a runtime `import()` throws
-// ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG. Mirrors verify.ts.
-let googleJwks = null;
-function googleKeySet() {
-    if (!googleJwks) {
-        googleJwks = (0, jose_1.createRemoteJWKSet)(new URL("https://www.googleapis.com/oauth2/v3/certs"), {
-            // A hung key server must not hold a sign-in open either.
-            timeoutDuration: 5_000,
-            cooldownDuration: 30_000,
-        });
-    }
-    return googleJwks;
-}
 const STATE_TTL_SECONDS = 600;
 // --- small Node http helpers (no express dependency) ---------------------------------------
 function base64url(buf) {
@@ -449,6 +388,39 @@ function normalizeConfig(config) {
  *   `createFederatedFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
  *     redirectUri }], allowedDomains, sessionSecret })`
  */
+/**
+ * The log line and the human's sentence for a failed provider exchange. The sentences are the ones
+ * this middleware has always used: "complete" when the provider refused the code, "reach" when the
+ * request itself failed, "verify" when the identity did not check out.
+ */
+function describeExchangeFailure(err, who) {
+    if (!(err instanceof oauth_providers_js_1.OAuthExchangeError)) {
+        return {
+            log: `${who} sign-in threw`,
+            meta: err instanceof Error ? err.message : err,
+            message: `Could not reach ${who} to complete sign-in.`,
+        };
+    }
+    if (err.stage === "identity") {
+        return {
+            log: who === "Google" ? "id_token verification failed" : "reading the signed-in X account failed",
+            meta: err.message,
+            message: `Could not verify your ${who} identity.`,
+        };
+    }
+    if (err.kind === "unreachable") {
+        return {
+            log: `${who} token exchange threw`,
+            meta: err.message,
+            message: `Could not reach ${who} to complete sign-in.`,
+        };
+    }
+    // Never the body: a token error response can quote the code, or the token itself.
+    return {
+        log: `${who} token exchange failed (${err.status ?? "?"})`,
+        message: `Could not complete sign-in with ${who}.`,
+    };
+}
 function createFederatedFrontend(config) {
     const cfg = normalizeConfig(config);
     // Fail closed on a weak/placeholder/short secret (mirrors verify.ts, which throws). Signing real
@@ -874,9 +846,8 @@ function createFederatedFrontend(config) {
         const q = queryOf(req);
         const redirectUrl = q.get("redirect_url") || "/sso-callback";
         const redirectUrlComplete = q.get("redirect_url_complete") || "/";
-        const state = base64url((0, node_crypto_1.randomBytes)(24));
-        const codeVerifier = base64url((0, node_crypto_1.randomBytes)(32));
-        const codeChallenge = base64url((0, node_crypto_1.createHash)("sha256").update(codeVerifier).digest());
+        const state = (0, oauth_providers_js_1.randomUrlToken)();
+        const { codeVerifier, codeChallenge } = (0, oauth_providers_js_1.createPkcePair)();
         const stateJwt = await signState({
             state,
             nonce: "",
@@ -889,15 +860,7 @@ function createFederatedFrontend(config) {
             maxAgeSeconds: STATE_TTL_SECONDS,
             secure: cfg.cookieSecure,
         });
-        const authUrl = new URL(X_AUTH_URL);
-        authUrl.searchParams.set("response_type", "code");
-        authUrl.searchParams.set("client_id", cfg.x.clientId);
-        authUrl.searchParams.set("redirect_uri", cfg.x.redirectUri);
-        authUrl.searchParams.set("scope", X_SCOPES);
-        authUrl.searchParams.set("state", state);
-        authUrl.searchParams.set("code_challenge", codeChallenge);
-        authUrl.searchParams.set("code_challenge_method", "S256");
-        redirect(res, authUrl.toString());
+        redirect(res, (0, oauth_providers_js_1.xAuthorizeUrl)({ clientId: cfg.x.clientId, redirectUri: cfg.x.redirectUri, state, codeChallenge }));
     }
     /**
      * GET /oauth_callback/x — exchange the code, read who signed in, then join the shared tail.
@@ -938,118 +901,29 @@ function createFederatedFrontend(config) {
                 redirect_url_complete: redirectUrlComplete,
             });
         }
-        let accessToken;
-        // X returns the scopes it ACTUALLY granted, which is not always what we asked for: a citizen can
-        // clear a checkbox on the consent screen, and an app without "Request email from users" is
-        // silently refused `users.email` altogether. That string is the difference between "this person
-        // has no confirmed email" and "this app was never allowed to ask", and nothing else distinguishes
-        // them — so it is captured here and named in the log line below.
-        let grantedScopes = "";
-        try {
-            // A confidential client authenticates with HTTP Basic. `client_id` also rides in the body,
-            // which X accepts and which keeps the request valid if the app is ever re-registered public.
-            const basic = Buffer.from(`${cfg.x.clientId}:${cfg.x.clientSecret}`).toString("base64");
-            const tokenRes = await fetch(X_TOKEN_URL, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    Authorization: `Basic ${basic}`,
-                },
-                body: new URLSearchParams({
-                    grant_type: "authorization_code",
-                    code,
-                    client_id: cfg.x.clientId,
-                    redirect_uri: cfg.x.redirectUri,
-                    code_verifier: saved.codeVerifier,
-                }),
-                signal: AbortSignal.timeout(cfg.upstreamTimeoutMs),
-            });
-            if (!tokenRes.ok) {
-                // Never log the body: a token error response can quote the code, or the token itself.
-                cfg.log("error", `X token exchange failed (${tokenRes.status})`);
-                return backToApp(res, fallbackRedirect, {
-                    error: "sign_in_not_completed",
-                    error_message: "Could not complete sign-in with X.",
-                    redirect_url_complete: redirectUrlComplete,
-                });
-            }
-            const tokenJson = (await tokenRes.json());
-            if (!tokenJson.access_token)
-                throw new Error("no access_token in token response");
-            accessToken = tokenJson.access_token;
-            grantedScopes = typeof tokenJson.scope === "string" ? tokenJson.scope : "";
-        }
-        catch (err) {
-            cfg.log("error", "X token exchange threw", err instanceof Error ? err.message : err);
-            return backToApp(res, fallbackRedirect, {
-                error: "sign_in_not_completed",
-                error_message: "Could not reach X to complete sign-in.",
-                redirect_url_complete: redirectUrlComplete,
-            });
-        }
         let identity;
         try {
-            identity = await fetchXIdentity(accessToken, grantedScopes);
+            ;
+            ({ identity } = await (0, oauth_providers_js_1.exchangeXCode)({
+                clientId: cfg.x.clientId,
+                clientSecret: cfg.x.clientSecret,
+                redirectUri: cfg.x.redirectUri,
+                code,
+                codeVerifier: saved.codeVerifier,
+                timeoutMs: cfg.upstreamTimeoutMs,
+                log: cfg.log,
+            }));
         }
         catch (err) {
-            cfg.log("error", "reading the signed-in X account failed", err instanceof Error ? err.message : err);
+            const failure = describeExchangeFailure(err, "X");
+            cfg.log("error", failure.log, failure.meta);
             return backToApp(res, fallbackRedirect, {
                 error: "sign_in_not_completed",
-                error_message: "Could not verify your X identity.",
+                error_message: failure.message,
                 redirect_url_complete: redirectUrlComplete,
             });
         }
         return finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete);
-    }
-    /**
-     * GET /2/users/me under the citizen's own access token — the whole of what X tells us about them.
-     *
-     * `confirmed_email` is the reason `users.email` is in the scope list. It comes back only when the
-     * application has "Request email from users" enabled AND the account has a confirmed address, so
-     * its ABSENCE IS ORDINARY and is not treated as a failure here: the identity is returned with an
-     * empty email and `finishSignIn` refuses it with the same sentence any unverified identity gets.
-     * Deciding admissibility in the one place that decides it for every strategy is the point.
-     */
-    async function fetchXIdentity(accessToken, grantedScopes = "") {
-        const url = new URL(X_ME_URL);
-        url.searchParams.set("user.fields", "confirmed_email,profile_image_url,username");
-        const res = await fetch(url.toString(), {
-            headers: { Authorization: `Bearer ${accessToken}` },
-            signal: AbortSignal.timeout(cfg.upstreamTimeoutMs),
-        });
-        if (!res.ok)
-            throw new Error(`X answered HTTP ${res.status} for /2/users/me`);
-        const body = (await res.json());
-        const sub = typeof body.data?.id === "string" ? body.data.id : "";
-        if (!sub)
-            throw new Error("X answered without an account id");
-        const email = typeof body.data?.confirmed_email === "string" ? body.data.confirmed_email : "";
-        if (!email) {
-            // THE NAMED GAP. Never the address itself — only whether one arrived, what X was willing to
-            // grant, and X's own words about the field it withheld. Without this line the citizen is told
-            // "a verified email is required" and the operator has nothing at all to act on.
-            const said = (body.errors ?? [])
-                .map((e) => [e.title, e.parameter, e.detail].filter((v) => typeof v === "string").join(": "))
-                .filter(Boolean)
-                .join(" | ");
-            cfg.log("warn", "X returned no confirmed_email, so this sign-in cannot be admitted. " +
-                `Scopes X actually granted: "${grantedScopes || "(none reported)"}". ` +
-                (said ? `X said: ${said}. ` : "X reported no error on the field. ") +
-                "If `users.email` is missing from the granted scopes, enable \"Request email from users\" " +
-                "in the X developer portal (it needs the app's privacy-policy and terms URLs) and have the " +
-                "citizen re-authorize. If it IS granted, the account has no confirmed email address on X.");
-        }
-        return {
-            sub,
-            email,
-            // X's own word for the field is "confirmed". There is no separate verification flag to read,
-            // so the presence of the address IS the assertion — and an absent one stays unverified.
-            emailVerified: Boolean(email),
-            name: typeof body.data?.name === "string" ? body.data.name : undefined,
-            username: typeof body.data?.username === "string" ? body.data.username : undefined,
-            picture: typeof body.data?.profile_image_url === "string" ? body.data.profile_image_url : undefined,
-            provider: "x",
-        };
     }
     async function handleSsoStart(req, res) {
         const q = queryOf(req);
@@ -1064,10 +938,9 @@ function createFederatedFrontend(config) {
             : undefined;
         const hostedDomain = cfg.google.hostedDomain ??
             (domainFromConn && cfg.allowedDomains.includes(domainFromConn) ? domainFromConn : undefined);
-        const state = base64url((0, node_crypto_1.randomBytes)(24));
-        const nonce = base64url((0, node_crypto_1.randomBytes)(24));
-        const codeVerifier = base64url((0, node_crypto_1.randomBytes)(32));
-        const codeChallenge = base64url((0, node_crypto_1.createHash)("sha256").update(codeVerifier).digest());
+        const state = (0, oauth_providers_js_1.randomUrlToken)();
+        const nonce = (0, oauth_providers_js_1.randomUrlToken)();
+        const { codeVerifier, codeChallenge } = (0, oauth_providers_js_1.createPkcePair)();
         const stateJwt = await signState({
             state,
             nonce,
@@ -1082,28 +955,18 @@ function createFederatedFrontend(config) {
             maxAgeSeconds: STATE_TTL_SECONDS,
             secure: cfg.cookieSecure,
         });
-        const authUrl = new URL(GOOGLE_AUTH_URL);
-        authUrl.searchParams.set("client_id", cfg.google.clientId);
-        authUrl.searchParams.set("redirect_uri", cfg.google.redirectUri);
-        authUrl.searchParams.set("response_type", "code");
-        authUrl.searchParams.set("scope", "openid email profile");
-        authUrl.searchParams.set("state", state);
-        authUrl.searchParams.set("nonce", nonce);
-        authUrl.searchParams.set("code_challenge", codeChallenge);
-        authUrl.searchParams.set("code_challenge_method", "S256");
-        // Step-up: force a fresh IdP authentication (prompt=login + max_age=0) so reverify is real
-        // re-authentication, not a silent re-assertion. Normal sign-in just lets the user pick account.
-        if (reverify) {
-            authUrl.searchParams.set("prompt", "login");
-            authUrl.searchParams.set("max_age", "0");
-        }
-        else {
-            authUrl.searchParams.set("prompt", "select_account");
-        }
-        authUrl.searchParams.set("access_type", "online");
-        if (hostedDomain)
-            authUrl.searchParams.set("hd", hostedDomain);
-        redirect(res, authUrl.toString());
+        redirect(res, (0, oauth_providers_js_1.googleAuthorizeUrl)({
+            clientId: cfg.google.clientId,
+            redirectUri: cfg.google.redirectUri,
+            state,
+            nonce,
+            codeChallenge,
+            // Step-up: force a fresh IdP authentication (prompt=login + max_age=0) so reverify is real
+            // re-authentication, not a silent re-assertion. Normal sign-in just lets the user pick account.
+            prompt: reverify ? "login" : "select_account",
+            maxAge: reverify ? 0 : undefined,
+            hostedDomain,
+        }));
     }
     /**
      * Normalize a caller-supplied redirect target to a SAFE value (open-redirect defense). An
@@ -1183,78 +1046,26 @@ function createFederatedFrontend(config) {
                 redirect_url_complete: redirectUrlComplete,
             });
         }
-        // Exchange the authorization code for tokens (PKCE).
-        let idToken;
-        try {
-            const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
-                method: "POST",
-                headers: { "Content-Type": "application/x-www-form-urlencoded" },
-                body: new URLSearchParams({
-                    grant_type: "authorization_code",
-                    code,
-                    client_id: cfg.google.clientId,
-                    client_secret: cfg.google.clientSecret,
-                    redirect_uri: cfg.google.redirectUri,
-                    code_verifier: saved.codeVerifier,
-                }),
-                // Bounded like the X exchange below. Without this a hung connection to Google holds the
-                // request, its socket and this closure until Node's default socket timeout, and the human
-                // just watches a spinner.
-                signal: AbortSignal.timeout(cfg.upstreamTimeoutMs),
-            });
-            if (!tokenRes.ok) {
-                // Do NOT log the raw provider error body — it can carry sensitive request detail. The
-                // status code alone is enough to diagnose.
-                cfg.log("error", `Google token exchange failed (${tokenRes.status})`);
-                return backToApp(res, fallbackRedirect, {
-                    error: "sign_in_not_completed",
-                    error_message: "Could not complete sign-in with Google.",
-                    redirect_url_complete: redirectUrlComplete,
-                });
-            }
-            const tokenJson = (await tokenRes.json());
-            if (!tokenJson.id_token)
-                throw new Error("no id_token in token response");
-            idToken = tokenJson.id_token;
-        }
-        catch (err) {
-            cfg.log("error", "Google token exchange threw", err instanceof Error ? err.message : err);
-            return backToApp(res, fallbackRedirect, {
-                error: "sign_in_not_completed",
-                error_message: "Could not reach Google to complete sign-in.",
-                redirect_url_complete: redirectUrlComplete,
-            });
-        }
-        // Verify the id_token signature against Google's JWKS and check the standard claims.
+        // Exchange the authorization code (PKCE), then verify the id_token signature against Google's
+        // JWKS and check the standard claims and the nonce (oauth-providers.ts).
         let identity;
         try {
-            const jwks = googleKeySet();
-            const { payload } = await (0, jose_1.jwtVerify)(idToken, jwks, {
-                issuer: GOOGLE_ISSUERS,
-                audience: cfg.google.clientId,
-                // Pin RS256 (Google signs id_tokens with RSA) — consistent with every other verify path in
-                // the library and closes any RS/HS algorithm-confusion agility on this call.
-                algorithms: ["RS256"],
+            identity = await (0, oauth_providers_js_1.exchangeGoogleCode)({
+                clientId: cfg.google.clientId,
+                clientSecret: cfg.google.clientSecret,
+                redirectUri: cfg.google.redirectUri,
+                code,
+                codeVerifier: saved.codeVerifier,
+                nonce: saved.nonce || undefined,
+                timeoutMs: cfg.upstreamTimeoutMs,
             });
-            if (saved.nonce && payload.nonce !== saved.nonce) {
-                throw new Error("nonce mismatch");
-            }
-            identity = {
-                sub: String(payload.sub ?? ""),
-                email: String(payload.email ?? ""),
-                emailVerified: payload.email_verified === true || payload.email_verified === "true",
-                hd: typeof payload.hd === "string" ? payload.hd : undefined,
-                name: typeof payload.name === "string" ? payload.name : undefined,
-                givenName: typeof payload.given_name === "string" ? payload.given_name : undefined,
-                familyName: typeof payload.family_name === "string" ? payload.family_name : undefined,
-                picture: typeof payload.picture === "string" ? payload.picture : undefined,
-            };
         }
         catch (err) {
-            cfg.log("error", "id_token verification failed", err instanceof Error ? err.message : err);
+            const failure = describeExchangeFailure(err, "Google");
+            cfg.log("error", failure.log, failure.meta);
             return backToApp(res, fallbackRedirect, {
                 error: "sign_in_not_completed",
-                error_message: "Could not verify your Google identity.",
+                error_message: failure.message,
                 redirect_url_complete: redirectUrlComplete,
             });
         }
