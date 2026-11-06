@@ -122,8 +122,27 @@ export interface FederatedFrontendConfig {
      * *same* session as the OIDC path. All SAML XML handling lives in `saml.ts`.
      */
     saml?: SamlSpConfig;
-    /** Email/`hd` domains permitted to complete sign-in. Anything else is rejected. */
+    /**
+     * Email/`hd` domains permitted to complete sign-in. Anything else is rejected — unless
+     * {@link allowAnyDomain} is on, in which case this list is not consulted for admission.
+     */
     allowedDomains: string[];
+    /**
+     * Admit a VERIFIED email on ANY domain, skipping the {@link allowedDomains} check. Defaults to
+     * false — FAIL CLOSED.
+     *
+     * WHY THIS FLAG HAS TO EXIST. The library was written for company apps, where "who may sign in"
+     * is a list of domains. A public, consumer-facing app has no such list: its users arrive with
+     * gmail.com, outlook.com, icloud.com and every other mailbox there is, and enumerating them is
+     * not a control, it is a bug report waiting to be filed by whoever has the next domain.
+     *
+     * WHAT IT DOES NOT LOOSEN. The provider must still assert a VERIFIED email — an identity without
+     * one is refused exactly as before. {@link requireHostedDomain} still applies on its own terms,
+     * so an operator who wants "any Workspace, any domain" can set both. And `allowedDomains` keeps
+     * its other job: deciding which `hd` a connection may pre-select. Authorization (who is an admin,
+     * what a user may do) is the host app's job and is untouched by this flag.
+     */
+    allowAnyDomain?: boolean;
     /**
      * HS256 secret used to sign the session cookie + access tokens. The SAME value is used to verify
      * those tokens (this function calls configureEmbeddedVerification with it). Supplied by the caller.

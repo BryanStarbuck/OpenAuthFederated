@@ -192,6 +192,35 @@ async function main() {
     console.log(`  ✓ ${label}: an asserted hd cannot substitute for the email domain`)
   }
 
+  // --- allowAnyDomain: a public app admits a verified email on any domain ----------------------
+  // Off by default (the loop above proves an out-of-list address is refused). On, the same
+  // out-of-list address is admitted — and requireHostedDomain still applies on its own terms.
+  {
+    const app = await startApp({ allowAnyDomain: true })
+    try {
+      const res = await samlSignIn(app, { email: "citizen@personal.example" })
+      assert.strictEqual(rejectionCode(res), null, "allowAnyDomain must admit a verified email on any domain")
+      assert.ok(cookieValue(res.setCookie, "oaf_session"), "an admitted sign-in must set the session cookie")
+      console.log("  ✓ allowAnyDomain admits a verified email outside allowedDomains")
+    } finally {
+      await app.close()
+    }
+  }
+  {
+    const app = await startApp({ allowAnyDomain: true, requireHostedDomain: true })
+    try {
+      const res = await samlSignIn(app, { email: "citizen@personal.example" })
+      assert.strictEqual(
+        rejectionCode(res),
+        "identity_domain_not_allowed",
+        "allowAnyDomain must not switch off requireHostedDomain",
+      )
+      console.log("  ✓ allowAnyDomain leaves requireHostedDomain in force")
+    } finally {
+      await app.close()
+    }
+  }
+
   // --- Grant re-resolution must be asked about the subject the IdP actually named ---------------
   // `userId` is a value WE mint and its shape is configurable, so recovering the upstream subject by
   // stripping a prefix desynchronises the moment the minting rule changes. That matters here
