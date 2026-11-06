@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.createAuthFrontend = void 0;
+exports.trustedSessionHd = trustedSessionHd;
 exports.createFederatedFrontend = createFederatedFrontend;
 const node_crypto_1 = require("node:crypto");
 const jose_1 = require("jose");
@@ -622,6 +623,25 @@ function describeExchangeFailure(err, who) {
         message: `Could not complete sign-in with ${who}.`,
     };
 }
+/**
+ * The `hd` of a session read back from its cookie or the durable store, or `undefined` when it cannot
+ * be trusted.
+ *
+ * WHY: before 2026-09-09 (commit 3c961ca) a session's `hd` fell back to the presented email domain
+ * whenever the upstream asserted none, so an old session can carry `hd: "corp.example"` for an account
+ * Google never called a Workspace member. That same commit started recording `provider` on every
+ * session. So a record WITH `provider` carries only an upstream-asserted `hd`, and a record WITHOUT it
+ * may not. Dropping the legacy value keeps the documented contract ("`hd` is Google's verified claim")
+ * true everywhere a session's `hd` leaves the library: access-token claims, the `revalidateGrants`
+ * identity, `/client`, `readBrowserSession()`. An app that gates on `hd` then signs that old session out
+ * (fail closed) and the person's next sign-in records a verified one. Nothing else about the session
+ * changes.
+ */
+function trustedSessionHd(hd, provider) {
+    if (typeof hd !== "string" || hd === "")
+        return undefined;
+    return typeof provider === "string" && provider !== "" ? hd : undefined;
+}
 function createFederatedFrontend(config) {
     const cfg = normalizeConfig(config);
     // Fail closed on a weak/placeholder/short secret (mirrors verify.ts, which throws). Signing real
@@ -1066,7 +1086,7 @@ function createFederatedFrontend(config) {
             name: s.name,
             firstName: s.firstName,
             lastName: s.lastName,
-            hd: s.hd,
+            hd: trustedSessionHd(s.hd, s.provider),
             roles: s.roles ?? [],
             permissions: s.permissions ?? [],
             orgId: s.orgId ?? null,
@@ -1101,7 +1121,7 @@ function createFederatedFrontend(config) {
             name: payload.name,
             firstName: payload.first_name,
             lastName: payload.last_name,
-            hd: payload.hd,
+            hd: trustedSessionHd(payload.hd, payload.prv),
             roles: Array.isArray(payload.roles) ? payload.roles : [],
             permissions: Array.isArray(payload.permissions) ? payload.permissions : [],
             orgId: payload.org_id ?? null,

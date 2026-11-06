@@ -148,6 +148,15 @@ sign-in from sign-up and treats the attempt as a sign-up (fail closed). That is 
 Every field of `ctx.identity` (`ActionIdentity`) is **trusted**: `provider`, `sub` (key app
 identities on `(provider, sub)`), the lowercased `email`, `emailVerified: true`, `hd` (Google's
 verified claim or the corroborated SAML attribute; never for X), `name`, `username` (X).
+
+A session's `hd` is held to the same standard after sign-in. Before 2026-09-09 a session's `hd` fell
+back to the email domain when the upstream asserted none, and those sessions also lack a recorded
+`provider`. So when a session is read back from its cookie or the store without a `provider`, its `hd`
+is dropped: the access token's `hd` claim, the `revalidateGrants` identity, `/client` and
+`readBrowserSession()` all see none. An app that gates on `hd` signs such a session out, and the
+person's next sign-in records a verified `hd` — implemented in:
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `trustedSessionHd()`, used by `recordFromStored()` and `readSession()`.
+
 `ctx.untrusted` holds what the browser or network sent (`connectionId`, `requestedMode`,
 `ipAddress`, `userAgent`). It is never a security input. `ctx.id` is also sent as `trace_id`.
 

@@ -71,7 +71,7 @@ export type {
 } from "./express.js"
 // Embedded Frontend API. `createFederatedFrontend` is the Federated-idiomatic name (connections[]);
 // `createAuthFrontend` is the kept alias (also accepts the deprecated google/saml shorthand).
-export { createFederatedFrontend, createAuthFrontend } from "./frontend.js"
+export { createFederatedFrontend, createAuthFrontend, trustedSessionHd } from "./frontend.js"
 export type {
   BrowserSession,
   FederatedFrontend,

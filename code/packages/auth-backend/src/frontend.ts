@@ -1476,6 +1476,25 @@ function describeExchangeFailure(
   }
 }
 
+/**
+ * The `hd` of a session read back from its cookie or the durable store, or `undefined` when it cannot
+ * be trusted.
+ *
+ * WHY: before 2026-09-09 (commit 3c961ca) a session's `hd` fell back to the presented email domain
+ * whenever the upstream asserted none, so an old session can carry `hd: "corp.example"` for an account
+ * Google never called a Workspace member. That same commit started recording `provider` on every
+ * session. So a record WITH `provider` carries only an upstream-asserted `hd`, and a record WITHOUT it
+ * may not. Dropping the legacy value keeps the documented contract ("`hd` is Google's verified claim")
+ * true everywhere a session's `hd` leaves the library: access-token claims, the `revalidateGrants`
+ * identity, `/client`, `readBrowserSession()`. An app that gates on `hd` then signs that old session out
+ * (fail closed) and the person's next sign-in records a verified one. Nothing else about the session
+ * changes.
+ */
+export function trustedSessionHd(hd: unknown, provider: unknown): string | undefined {
+  if (typeof hd !== "string" || hd === "") return undefined
+  return typeof provider === "string" && provider !== "" ? hd : undefined
+}
+
 export function createFederatedFrontend(config: FederatedFrontendConfig): FederatedFrontend {
   const cfg = normalizeConfig(config)
 
@@ -2043,7 +2062,7 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
       name: s.name,
       firstName: s.firstName,
       lastName: s.lastName,
-      hd: s.hd,
+      hd: trustedSessionHd(s.hd, s.provider),
       roles: s.roles ?? [],
       permissions: s.permissions ?? [],
       orgId: s.orgId ?? null,
@@ -2076,7 +2095,7 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
       name: payload.name as string | undefined,
       firstName: payload.first_name as string | undefined,
       lastName: payload.last_name as string | undefined,
-      hd: payload.hd as string | undefined,
+      hd: trustedSessionHd(payload.hd, payload.prv),
       roles: Array.isArray(payload.roles) ? (payload.roles as string[]) : [],
       permissions: Array.isArray(payload.permissions) ? (payload.permissions as string[]) : [],
       orgId: (payload.org_id as string | null) ?? null,
