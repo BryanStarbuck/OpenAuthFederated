@@ -141,6 +141,12 @@ curl -X DELETE https://api.whitehatengineering.com/v1/domains/dmn_71be0c \
 
 ## Domain enforcement
 
+> **Embedded mode (the shipped library)** has no per-org domain records: an app expresses "only
+> this domain" through its own admission policy — `restrictions: { allowlist: true }` with
+> `allowlistIdentifiers: ['*@corp.example']`, plus `allowedHostedDomains: ['corp.example']` on the
+> Google or SAML connection for the verified hosted-domain requirement. See
+> [Admission](../frontend/admission.mdx).
+
 When the org's [`enforce_domain`](./organizations.mdx#organization-settings) setting is on,
 OpenAuthFederated validates **every** inbound identity against the org's verified domains
 *after* the IdP assertion is validated but *before* a session is issued.

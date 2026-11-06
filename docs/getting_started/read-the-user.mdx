@@ -59,7 +59,7 @@ export default async function Page() {
   if (!isAuthenticated) return redirectToSignIn()
 
   const token = await getToken()
-  const res = await fetch('https://api.whitehatengineering.com/v1/reports', {
+  const res = await fetch('https://api.example.com/v1/reports', {
     headers: { Authorization: `Bearer ${token}` },
   })
   const reports = await res.json()
@@ -127,7 +127,7 @@ export default function ProtectedPanel() {
 
   const fetchProtectedData = async () => {
     const token = await getToken()
-    const res = await fetch('https://api.whitehatengineering.com/v1/data', {
+    const res = await fetch('https://api.example.com/v1/data', {
       headers: { Authorization: `Bearer ${token}` },
     })
     return res.json()

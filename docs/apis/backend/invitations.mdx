@@ -151,6 +151,13 @@ Returns the [Invitation object](#the-invitation-object) with `"status": "revoked
 
 ## Allowlist and blocklist identifiers
 
+> **Embedded mode (the shipped library): there is no REST identifier resource.** The lists are
+> in-process configuration passed to `createFederatedFrontend()` as `allowlistIdentifiers` /
+> `blocklistIdentifiers` (static, or `Live` functions re-read on every sign-in), engaged by
+> `restrictions`. The grammar is `ann@example.com`, `*@example.com`, `*@*.example.com`, and the
+> more specific match wins. See [Admission](../frontend/admission.mdx). The REST endpoints below
+> describe a hosted Backend API that embedded mode does not run; they are kept as a reference shape only.
+
 Identifiers are explicit allow or deny rules evaluated at sign-in. An **allowlist identifier**
 permits a specific email or domain pattern; a **blocklist identifier** rejects one. They layer on
 top of domain enforcement to handle exceptions (a single contractor outside your domain, or one
@@ -230,13 +237,19 @@ Returns the deleted [Identifier object](#the-identifier-object) with `"deleted":
 
 ## How identifiers interact with domain enforcement
 
+> **Embedded mode** evaluates the pipeline documented in [Admission](../frontend/admission.mdx#the-pipeline):
+> verified email → (legacy domain gate) → connection requirements → `users.lookup` → allowlist /
+> blocklist with most-specific-wins precedence → sign-up mode (an allowlist match counts as a
+> standing invitation in `restricted` mode) → the app's admission actions. The order below is the
+> hosted-style reference.
+
 OpenAuthFederated evaluates a sign-in attempt in this order:
 
 1. **Blocklist** — if the identity matches a blocklist identifier, reject immediately.
 2. **Domain enforcement** — if the identity's verified domain (the OIDC `hd` claim, with
    `email_verified: true`) is an allowed company domain, **auto-accept**. This is the primary path
-   for the Google Workspace reference deployment: any active `@whitehatengineering.com` account is
-   admitted without a per-user invitation.
+   for an organization-only deployment: any active `@corp.example` account is admitted without a
+   per-user invitation.
 3. **Allowlist** — if the identity is outside the allowed domains but matches an allowlist
    identifier (a specific contractor email), admit it as an explicit exception.
 4. **Pending invitation** — if there is a `pending` invitation for the email, consume it and

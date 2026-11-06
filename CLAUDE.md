@@ -103,6 +103,61 @@ canonical example of how the platform is used:
 * **Offboarding:** suspend/delete the Google account → SCIM deprovision + short token lifetimes
   → access is revoked promptly; admins can force-revoke sessions.
 
+## Governing design principle: platform-agnostic, parameter-driven (MANDATORY)
+
+OpenAuthFederated is a **neutral, open platform**. Rafin and the rest of the team treat this as
+the governing design principle:
+
+* **Platform agnosticism** — OpenAuthFederated never contains hardcoded policies, group limits,
+  or lockouts for any one consumer (e.g. the ACT3 work group). No app-specific business logic
+  in the library.
+* **Consumer-side enforcement** — if the ACT3 internal web app must restrict access to internal
+  company accounts only, **that policy is enforced by the ACT3 internal app itself**, not baked
+  into OpenAuthFederated. (The Google Workspace reference deployment above is one consumer's
+  configuration, not platform behavior.)
+* **Parameter-driven** — consumer products (ACT3 TV, We The Citizens, internal tools, …) call
+  OpenAuthFederated and **pass their own rules and parameters** (allowed domains, IdPs, role
+  maps, etc.). The platform simply executes the federated-authentication goals described by
+  those parameters.
+
+This keeps OpenAuthFederated a truly reusable platform for any consumer or internal app.
+
+## Industry landscape: learn from their APIs
+
+Many companies sell authentication-as-a-platform. **When we design our APIs, study theirs**
+(endpoint shapes, SDK ergonomics, webhook/event models, org/RBAC models, session handling) and
+borrow the best patterns — while keeping the naming rule above.
+
+* **WorkOS**
+* **Auth0** — acquired by Okta; widely considered the pioneer of the developer-friendly auth
+  library model. The closest reference for drop-in libraries handling OAuth2, Google auth and
+  federated identity for web apps.
+* **Stytch**
+* **Frontegg**
+* **Descope**
+* **Kinde**
+* **PropelAuth**
+* **FusionAuth**
+* **SuperTokens**
+* **Ory**
+* **Keycloak** (maintained by Red Hat)
+* **Authentik**
+* **Zitadel**
+* **Authelia**
+* **Logto**
+* **Authgear**
+* **Ping Identity**
+* **ForgeRock**
+* **Amazon Cognito**
+* **Okta** (enterprise parent company of Auth0)
+
+### The "SSO Tax" — why SAML 2.0 matters
+
+The protocol that famously costs a premium is **SAML 2.0**. Charging heavily to unlock SAML is
+known in the industry as the **"SSO Tax"**: providers lock SAML behind expensive enterprise tiers
+because B2B customers need it to integrate with corporate identity providers. Offering SAML 2.0
+openly is a core part of OpenAuthFederated's value.
+
 ## Engineering stack
 
 OpenAuthFederated follows our standard Node + TypeScript stack (derived from the ACT3 and

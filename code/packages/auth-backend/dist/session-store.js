@@ -169,6 +169,16 @@ class FileSessionStore {
         }));
         return records.filter((r) => r !== null && !r.revoked);
     }
+    /** Tombstone every non-revoked session under `users/<email>/sessions/`. */
+    async revokeAllForUser(userKey) {
+        const active = await this.list(userKey);
+        let count = 0;
+        for (const s of active) {
+            await this.create({ ...s, revoked: true });
+            count++;
+        }
+        return count;
+    }
 }
 exports.FileSessionStore = FileSessionStore;
 /** In-memory {@link SessionStore} — handy for tests or stateless deployments. Lost on restart. */
@@ -199,13 +209,26 @@ class InMemorySessionStore {
             .filter(([k, v]) => k.startsWith(prefix) && !v.revoked)
             .map(([, v]) => ({ ...v }));
     }
+    /** Delete every session of one user (an in-memory store has no lingering cookie to out-live). */
+    revokeAllForUser(userKey) {
+        const prefix = `${userFolderKey(userKey)}${KEY_SEP}`;
+        let count = 0;
+        for (const [k, v] of [...this.map.entries()]) {
+            if (!k.startsWith(prefix))
+                continue;
+            if (!v.revoked)
+                count++;
+            this.map.delete(k);
+        }
+        return count;
+    }
 }
 exports.InMemorySessionStore = InMemorySessionStore;
 /**
  * Load a stable HS256 signing secret from disk, creating one (cryptographically random, 0600) on
- * first run. Use this when no `AUTH_SESSION_SECRET` is provided so the secret is BOTH strong AND
- * stable across restarts — a random per-process secret would silently invalidate every session on
- * every restart. An explicit env secret should still win over this; callers pass it as a fallback.
+ * first run. Use this when the embedding app has no explicitly supplied secret, so the secret is
+ * BOTH strong AND stable across restarts — a random per-process secret would silently invalidate
+ * every session on every restart. A secret the app supplies explicitly should still win over this.
  *
  * NOTE: only adopt this where the signing secret is not also shared with another process (e.g. a
  * frontend dev-core that signs tokens with a known shared default) — in that case keep the shared

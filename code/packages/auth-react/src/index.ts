@@ -44,12 +44,20 @@ export {
   OrganizationProfile,
   CreateOrganization,
 } from "./components.js"
-export { hasPermission, hasRole, EMPTY_SNAPSHOT, domainSlug } from "./types.js"
+export {
+  hasPermission,
+  hasRole,
+  EMPTY_SNAPSHOT,
+  domainSlug,
+  connectionIdForDomain,
+  GENERIC_GOOGLE_CONNECTION,
+} from "./types.js"
 export type {
   Appearance,
   AuthCore,
   AuthenticateWithRedirectParams,
   AuthRejection,
+  AuthRejectionCode,
   AuthRejectionMeta,
   Connection,
   LoadState,

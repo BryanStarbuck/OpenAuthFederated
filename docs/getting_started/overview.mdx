@@ -5,7 +5,7 @@ description: What OpenAuthFederated is, its mental model, and how federated sign
 
 OpenAuthFederated is an open-source, self-hosted authentication and identity platform — an open-source equivalent of hosted identity providers. You put it in front of your application and it handles federated sign-in, user provisioning, organizations, role-based authorization, sessions, and the security around them. Your app trusts an identity asserted by OpenAuthFederated and never touches the user's upstream password.
 
-The first real consumer of the platform is an internal company web app gated to a Google Workspace domain: only an active employee in the `whitehatengineering.com` Google Workspace can sign in. No app-specific passwords, no social logins, no anonymous access.
+OpenAuthFederated ships no domains, no people and no app names. **The platform executes, the app decides**: the library enforces protocol hygiene (a verified email, `state`, PKCE, signatures) and then runs whatever admission policy the embedding app states through the API — a public consumer app that admits any verified email, an organization-only app restricted to one Workspace domain, or anything in between. See [Admission](../apis/frontend/admission.mdx).
 
 ## The mental model
 
@@ -30,14 +30,14 @@ Step by step:
 1. **App → OpenAuthFederated.** An unauthenticated request hits a protected route; the middleware redirects the browser to the OpenAuthFederated sign-in page.
 2. **OpenAuthFederated → Google Workspace.** The platform starts an SP-initiated SAML 2.0 (or OIDC) flow against the configured Google Workspace connection.
 3. **Google Workspace authenticates the human.** The user signs in (MFA is inherited from the upstream IdP) and Google returns a **signed SAML assertion** or **OIDC ID token**.
-4. **Validate + enforce domain.** OpenAuthFederated validates the signature and enforces domain rules — on the OIDC path it checks the hosted-domain (`hd`) claim and `email_verified`, rejecting any identity outside `whitehatengineering.com`.
+4. **Validate + run the app's admission policy.** OpenAuthFederated validates the signature, requires a verified email, and then runs the app's stated policy: sign-up mode, allowlist / blocklist identifiers, per-connection hosted-domain requirements and the app's own admission actions ([Admission](../apis/frontend/admission.mdx)). A refused identity gets no session.
 5. **JIT provisioning.** On first valid sign-in the user is created Just-In-Time. SCIM 2.0 keeps the directory in sync for the full lifecycle (provision / update / deprovision).
 6. **Map groups → roles.** Upstream Google Workspace groups map to roles, and roles map to `<feature>:<action>` permissions (e.g. `code:read`, `jfk:write`, `*:read`). The IdP's groups are inputs; the authoritative authorization model lives in our own backend/DB.
 7. **Establish a session.** A server-side session record is created and a **hybrid session** is issued: a short-lived JWT access token (Bearer) plus a rotating, HttpOnly refresh cookie. The session record enables immediate revocation despite short token lifetimes.
 8. **App receives a short-lived JWT.** Your app verifies the JWT statelessly and the user is in.
 
 **Implemented in code.** The SP-initiated federation flow above (steps 1-8) is implemented in
-`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()` (`handleSsoStart` starts the redirect; `handleCallback` / `handleSamlAcs` validate, enforce domain via `emailDomain()`, JIT-resolve via `defaultResolveGrants()`, and issue the session). Group→role→permission mapping is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts` — `checkClaims()`, and stateless JWT verification (step 8) is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts` — `verifyToken()`.
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()` (`handleSsoStart` starts the redirect; `handleCallback` / `handleSamlAcs` validate, run the admission pipeline via the inner `admit()`, resolve grants via the app's `resolveGrants` (default `defaultResolveGrants()`), and issue the session). Group→role→permission mapping is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts` — `checkClaims()`, and stateless JWT verification (step 8) is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/verify.ts` — `verifyToken()`.
 
 ## Architecture overview
 
@@ -49,8 +49,8 @@ Step by step:
        │                                            │ SAML 2.0 / OIDC
        │ Backend API (sk_…)                         ▼
        │ users, sessions, RBAC          ┌────────────────────────┐
-       └──────────────────────────────▶ │   Google Workspace IdP │
-                                         │  whitehatengineering.com│
+       └──────────────────────────────▶ │  Google / X / SAML IdP │
+                                         │   (verified identity)  │
                                          └────────────────────────┘
 ```
 
@@ -62,6 +62,7 @@ Security properties carried through every layer: HTTPS only, `SameSite` + `HttpO
 - [Environment variables](./environment-variables.mdx) — every key and URL you need.
 - [Protect routes](./protect-routes.mdx) — gate pages and APIs by auth, role, and permission.
 - [Read the user](./read-the-user.mdx) — access the current user on the server and client.
-- [Deploy](./deploy.mdx) — go to production with Google Workspace and domain enforcement.
+- [Deploy](./deploy.mdx) — go to production with your connections and a stated admission policy.
+- [Admission](../apis/frontend/admission.mdx) — who may sign in and sign up, stated by the app.
 - [SDK overview](../sdk/overview.mdx)
 - [Frontend API](../apis/frontend/overview.mdx) · [Backend API](../apis/backend/overview.mdx) · [Platform API](../apis/platform/overview.mdx)

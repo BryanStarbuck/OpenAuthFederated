@@ -56,7 +56,7 @@ export interface OidcIdentity {
   sub: string
   email: string
   emailVerified: boolean
-  /** Hosted-domain claim (Google Workspace). Absent for consumer gmail.com accounts. */
+  /** Hosted-domain claim (Google Workspace). Absent for consumer (non-organization) accounts. */
   hd?: string
   name?: string
   givenName?: string

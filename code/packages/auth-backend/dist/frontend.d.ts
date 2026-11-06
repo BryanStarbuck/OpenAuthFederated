@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { type VerifyTokenOptions } from "./verify.js";
 import type { TokenClaims } from "./types.js";
+import { type ActionIdentity, type AdmissionActions, type AdmissionErrorCode, type AdmissionMessage, type AdmissionPhase, type AdmissionResult, type AdmissionUsers, type Identifier, type IdentityProvider, type Live, type Restrictions, type SignUpMode } from "./admission.js";
 import type { SessionMembership, SessionStore } from "./session-store.js";
 import { type OidcIdentity } from "./oauth-providers.js";
 import { type SamlReplayStore, type SamlSpConfig } from "./saml.js";
@@ -9,7 +10,7 @@ import { type SamlReplayStore, type SamlSpConfig } from "./saml.js";
  *
  * `createAuthFrontend()` returns an Express/Node-compatible middleware that the host app mounts
  * (e.g. `app.use('/api/v1', createAuthFrontend(cfg))`). It implements exactly the endpoints the
- * `@auth/react` `RealAuthCore` calls, so a SPA gets a *real* Google Workspace sign-in with no
+ * `@auth/react` `RealAuthCore` calls, so a SPA gets a *real* Google, X or SAML sign-in with no
  * separate auth server process:
  *
  *   GET  /sign_in/sso                         → 302 to Google's OAuth 2.0 / OIDC authorize URL
@@ -26,9 +27,10 @@ import { type SamlReplayStore, type SamlSpConfig } from "./saml.js";
  *   GET  /client/sessions/:id/reverify        → step-up: refresh the session's verified-at time
  *   POST /client/sessions/:id/remove          → sign out (clear the session cookie)
  *
- * Everything runs in the host's own process. The human is authenticated by Google (real OIDC
- * round-trip, real id_token signature check against Google's JWKS, real `hd`/`email_verified`
- * enforcement). The app *session* and the short-lived access tokens are signed with a single
+ * Everything runs in the host's own process. The human is authenticated by the provider (for
+ * Google: a real OIDC round-trip, a real id_token signature check against Google's JWKS, a real
+ * `email_verified` check). WHO is admitted is the embedding app's stated policy (see admission.ts);
+ * this file executes it. The app *session* and the short-lived access tokens are signed with a single
  * in-process HS256 secret (`sessionSecret`) — the same secret `verifyToken()` checks in embedded
  * mode — so there is no JWKS endpoint and no second service to run.
  */
@@ -62,8 +64,26 @@ export interface GoogleConnectionConfig {
     clientSecret?: string;
     /** Must exactly match an Authorized redirect URI in the Google Cloud OAuth client. */
     redirectUri: string;
-    /** Google Workspace hosted domain to hint + enforce (`hd`). Optional. */
+    /**
+     * A fixed Google `hd` HINT sent on every authorize request (pre-selects that organization in
+     * Google's account chooser). A hint only: admission is decided by {@link requireHostedDomain} /
+     * {@link allowedHostedDomains} and the app's policy, never by this value.
+     */
     hostedDomain?: string;
+    /** Refuse an identity without a verified hd. Never a default. */
+    requireHostedDomain?: boolean;
+    /** When !== undefined: hd must be present and in this list ([] => nobody). Implies requireHostedDomain. */
+    allowedHostedDomains?: string[];
+    /**
+     * Domains a client may pick as the hd hint via `?connection=conn_<slug>`. Legacy default: the
+     * deprecated top-level `allowedDomains`. New-API default: `[]` (a client-chosen hint is ignored
+     * and no hd is sent).
+     */
+    hostedDomainHints?: string[];
+    /** Publish the hint domains in `/environment` `user_settings.connections`. Default false. */
+    publishHintDomains?: boolean;
+    /** Button label. Default "Google". */
+    label?: string;
 }
 /**
  * An X (Twitter) OAuth 2.0 sign-in connection. `strategy` mirrors Federated's `oauth_x`.
@@ -84,10 +104,18 @@ export interface XConnectionConfig {
     clientSecret?: string;
     /** Must exactly match a Callback URI registered in the X app's *User authentication settings*. */
     redirectUri: string;
+    /** Button label. Default "X". An X identity always requires a confirmed email. */
+    label?: string;
 }
 /** A SAML 2.0 sign-in connection. `strategy` mirrors Federated's enterprise SSO vocabulary. */
 export type SamlConnectionConfig = {
     strategy: "saml";
+    /** Refuse an identity whose assertion carries no corroborated hosted-domain attribute. */
+    requireHostedDomain?: boolean;
+    /** When !== undefined: the corroborated hd must be in this list ([] => nobody). Implies requireHostedDomain. */
+    allowedHostedDomains?: string[];
+    /** Button label. Default "SSO". */
+    label?: string;
 } & SamlSpConfig;
 /**
  * One configured sign-in connection. Mirrors Federated's connection/strategy model
@@ -123,18 +151,26 @@ export interface FederatedFrontendConfig {
      */
     saml?: SamlSpConfig;
     /**
-     * Email/`hd` domains permitted to complete sign-in. Anything else is rejected — unless
-     * {@link allowAnyDomain} is on, in which case this list is not consulted for admission.
+     * @deprecated Use {@link signUpMode} + {@link restrictions} + {@link allowlistIdentifiers}
+     * (`domains.map(d => "*@" + d)`) and, for the account-chooser hint, the Google connection's
+     * `hostedDomainHints`.
+     *
+     * LEGACY GATE. When this key is PRESENT (it must then be an array of strings, or construction
+     * throws {@link OafConfigError}), email/`hd` domains not on the list are refused — unless
+     * {@link allowAnyDomain} is on. `[]` refuses everyone. Its presence also seeds the defaults for
+     * `hostedDomainHints`, publishing `allowed_domains` in `/environment` and
+     * `organization_settings.enabled`, unless those are set explicitly. Optional now (it used to be
+     * required); omit it and state a policy with the new API instead.
      */
-    allowedDomains: string[];
+    allowedDomains?: string[];
     /**
+     * @deprecated Omit the allowlist and use `signUpMode: "public"`.
+     *
      * Admit a VERIFIED email on ANY domain, skipping the {@link allowedDomains} check. Defaults to
      * false — FAIL CLOSED.
      *
-     * WHY THIS FLAG HAS TO EXIST. The library was written for company apps, where "who may sign in"
-     * is a list of domains. A public, consumer-facing app has no such list: its users arrive with
-     * gmail.com, outlook.com, icloud.com and every other mailbox there is, and enumerating them is
-     * not a control, it is a bug report waiting to be filed by whoever has the next domain.
+     * A public app's users arrive with every mailbox provider there is, and enumerating them is not
+     * a control.
      *
      * WHAT IT DOES NOT LOOSEN. The provider must still assert a VERIFIED email — an identity without
      * one is refused exactly as before. {@link requireHostedDomain} still applies on its own terms,
@@ -165,7 +201,7 @@ export interface FederatedFrontendConfig {
     sessionCookieName?: string;
     /**
      * Session **maximum lifetime** in seconds — the "maximum lifetime" knob. The absolute ceiling
-     * after which the user must sign in again, regardless of activity. Defaults to ~4 months. The
+     * after which the user must sign in again, regardless of activity. Defaults to 7 days. The
      * session is a sliding window (re-issued on each token mint), so active use rolls the cookie
      * forward up to this ceiling. (Name kept as `sessionTtlSeconds` for back-compat.)
      */
@@ -173,9 +209,9 @@ export interface FederatedFrontendConfig {
     accessTokenTtlSeconds?: number;
     /**
      * Session **inactivity timeout** in seconds — the "inactivity timeout" knob. If a session
-     * goes this long without a token refresh / touch, it is treated as signed out. `0` (the default)
-     * disables it: combined with the long maximum lifetime, a user stays signed in "forever" as long
-     * as they return within the maximum lifetime. Only enforced when a {@link sessionStore} is set
+     * goes this long without a token refresh / touch, it is treated as signed out. Defaults to 12
+     * hours; `0` disables it (a user then stays signed in as long as they return within the maximum
+     * lifetime). Only enforced when a {@link sessionStore} is set
      * (the store is where `lastActiveAt` is durably tracked).
      */
     inactivityTimeoutSeconds?: number;
@@ -252,10 +288,13 @@ export interface FederatedFrontendConfig {
      */
     audience?: string;
     /**
-     * Require a present, allowlisted Google Workspace hosted-domain (`hd`) claim. When true, an
-     * identity lacking `hd` (e.g. a consumer gmail.com account) is rejected even if its email domain
-     * is on {@link allowedDomains} — the email domain is no longer accepted as a substitute for
-     * Workspace membership. Defaults to false (back-compat).
+     * @deprecated Use the per-connection `requireHostedDomain` / `allowedHostedDomains` on the
+     * Google and SAML connections.
+     *
+     * LEGACY GATE. Require a present, allowlisted hosted-domain (`hd`) claim. When true, an identity
+     * lacking `hd` (e.g. a consumer mailbox account) is rejected even if its email domain is on
+     * {@link allowedDomains} — the email domain is no longer accepted as a substitute for
+     * organization membership. Defaults to false (back-compat).
      */
     requireHostedDomain?: boolean;
     /**
@@ -265,11 +304,14 @@ export interface FederatedFrontendConfig {
      */
     allowedRedirectOrigins?: string[];
     /**
-     * Trust the IdP-asserted SAML email as verified when no explicit attribute is present. Forwarded
-     * to {@link validateSamlAcs}; defaults to false (fail closed).
+     * @deprecated HAS NO EFFECT (it never did). Set `trustAssertedEmailVerified` on the SAML
+     * connection instead. A WARN is logged once per process when this key is present.
      */
     samlTrustAssertedEmailVerified?: boolean;
     /**
+     * @deprecated Not needed with the new admission API (the legacy hosted-domain gate is the only
+     * thing it exempts X from).
+     *
      * Admit an X sign-in on the strength of its `confirmed_email` alone, when
      * {@link requireHostedDomain} is on. Defaults to false — FAIL CLOSED.
      *
@@ -297,10 +339,17 @@ export interface FederatedFrontendConfig {
     securityHeaders?: boolean;
     /** CORS allowlist for the auth endpoints. When set, matching Origins get credentialed CORS. */
     allowedCorsOrigins?: string[];
-    /** Map a verified identity to roles/permissions/orgs. Defaults to a least-privilege grant. */
-    resolveGrants?: (identity: OidcIdentity) => ResolvedGrants;
+    /**
+     * Map a verified, ADMITTED identity to roles/permissions/orgs. Defaults to a least-privilege grant.
+     * May be async (it is awaited). It runs after admission and cannot refuse; refuse with
+     * {@link actions} instead.
+     */
+    resolveGrants?: (identity: OidcIdentity) => ResolvedGrants | Promise<ResolvedGrants>;
     logger?: (level: "info" | "warn" | "error", message: string, meta?: unknown) => void;
     /**
+     * @deprecated Not needed with the new admission API (the legacy hosted-domain gate is the only
+     * thing it exempts SAML from).
+     *
      * Admit a SAML sign-in under {@link requireHostedDomain} when the IdP asserts no hosted-domain
      * attribute. Defaults to false — FAIL CLOSED.
      *
@@ -314,6 +363,35 @@ export interface FederatedFrontendConfig {
      * {@link allowedDomains} still applies either way; this flag never bypasses it.
      */
     samlSatisfiesHostedDomain?: boolean;
+    /**
+     * Who may CREATE an account. `public`: any verified identity that passes the lists.
+     * `restricted`: a new identity needs an allowlist match (a standing invitation) or
+     * `users.lookup(...).invited`. `waitlist`: no new identity is admitted (requires {@link users}).
+     * When no policy is stated at all the library defaults to `public` and WARNs once per process
+     * (or throws, with {@link requirePolicy}).
+     */
+    signUpMode?: Live<SignUpMode>;
+    /** Which lists are engaged. See {@link Restrictions}. */
+    restrictions?: Live<Restrictions>;
+    /** Allowlist identifiers (`ann@example.com`, `*@example.com`, `*@*.example.com`). Never published. */
+    allowlistIdentifiers?: Live<readonly Identifier[]>;
+    /** Blocklist identifiers, same grammar. The more specific match wins over the allowlist. Never published. */
+    blocklistIdentifiers?: Live<readonly Identifier[]>;
+    /** App callbacks that may Allow or Deny each attempt. A Deny mints nothing. */
+    actions?: AdmissionActions;
+    /** Optional app-owned user directory, so returning users can be told apart from new ones. */
+    users?: AdmissionUsers;
+    /** Override the default (neutral) copy for any refusal code. */
+    messages?: Partial<Record<AdmissionErrorCode, AdmissionMessage>>;
+    /** Throw at construction unless signUpMode, restrictions or a legacy key is present. Default false (WARN once). */
+    requirePolicy?: boolean;
+    /** What the unauthenticated `/environment` endpoint publishes. */
+    environment?: {
+        /** display_config.allowed_domains. New-API default false; legacy default true. An explicit value wins in mixed mode. */
+        publishAllowedDomains?: boolean;
+        /** organization_settings.enabled. New-API default false; legacy default true. An explicit value wins. */
+        organizationsEnabled?: boolean;
+    };
     /**
      * Scope the minted user id to the strategy that authenticated it — `user_google_<sub>`,
      * `user_saml_<nameID>`, `user_x_<id>` — instead of the flat `user_<sub>`. Defaults to **false**
@@ -416,6 +494,10 @@ export interface BrowserSession {
     memberships: OrgMembership[];
     /** When the human last proved their identity upstream (epoch seconds). */
     lastVerifiedAt: number;
+    /** Which strategy authenticated this session. Absent on very old sessions. */
+    provider?: IdentityProvider;
+    /** The upstream subject exactly as the provider asserted it. Absent on very old sessions. */
+    providerSub?: string;
 }
 /**
  * What {@link createFederatedFrontend} returns: the mountable Node/Express middleware, plus the
@@ -452,6 +534,22 @@ export interface FederatedFrontend {
      * their own verifier.
      */
     verifyToken(token: string, opts?: VerifyTokenOptions): Promise<TokenClaims>;
+    /**
+     * Run the full admission pipeline on a synthetic identity WITHOUT minting anything (no session,
+     * no cookie, no store write, no `resolveGrants` call). For an app's boot self-test and for
+     * tests. `isSignUp` (when given, including `null`) replaces `users.lookup`; `phase: "reverify"`
+     * runs the reverify subset (no sign-up steps).
+     */
+    evaluateAdmission(identity: ActionIdentity, opts?: {
+        isSignUp?: boolean | null;
+        phase?: AdmissionPhase;
+    }): Promise<AdmissionResult>;
+    /**
+     * Revoke every session of one user (by email) in the configured `sessionStore`. Throws when no
+     * store is configured or the store has no `revokeAllForUser`. Returns the count revoked.
+     * Cookie-only (store-less) sessions cannot be revoked server-side.
+     */
+    revokeUserSessions(email: string): Promise<number>;
 }
 /**
  * Alias for {@link FederatedFrontend}, kept because the callable-plus-method shape reads as a

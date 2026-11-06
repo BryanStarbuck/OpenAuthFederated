@@ -16,13 +16,13 @@ export function useAuthContext() {
 export function FederatedProvider(props) {
     const coreRef = useRef(null);
     if (!coreRef.current) {
-        const domains = props.allowedDomains && props.allowedDomains.length > 0
-            ? props.allowedDomains
-            : ["act3ai.com", "whitehatengineering.com"];
-        // Default to the real federated client. OpenAuthFederated ships no dev mock; an app that wants a
-        // localhost-only dev core builds its own and injects it via `core` (gated on its own side).
+        // Default to the real federated client. OpenAuthFederated ships no dev mock and NO default
+        // domain list: the buttons come from the app (connections / allowedDomains), the server's
+        // /environment, or one generic Google button. An app that wants a localhost-only dev core builds
+        // its own and injects it via `core` (gated on its own side).
         coreRef.current =
-            props.core ?? new RealAuthCore(props.frontendApi ?? "", props.publishableKey ?? "", domains);
+            props.core ??
+                new RealAuthCore(props.frontendApi ?? "", props.publishableKey ?? "", props.allowedDomains, props.connections);
     }
     const core = coreRef.current;
     const [isLoaded, setIsLoaded] = useState(false);
@@ -42,9 +42,9 @@ export function FederatedProvider(props) {
     const subscribe = useMemo(() => (cb) => core.subscribe(cb), [core]);
     const snapshot = useSyncExternalStore(subscribe, () => core.getSnapshot(), () => core.getSnapshot());
     const loadState = useSyncExternalStore(subscribe, () => core.loadState(), () => core.loadState());
-    // `connections` is derived from a constructor argument and never changes, so it is read once and
-    // kept out of the value memo below — which re-runs on every snapshot change.
-    const connections = useMemo(() => core.connections(), [core]);
+    // `connections` is a stable, frozen reference that changes at most once (when the server's
+    // /environment supplies the buttons), so reading it through the store costs nothing per render.
+    const connections = useSyncExternalStore(subscribe, () => core.connections(), () => core.connections());
     const value = useMemo(() => ({
         core,
         snapshot,

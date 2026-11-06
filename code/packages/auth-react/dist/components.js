@@ -84,9 +84,11 @@ const rejectionBanner = {
     color: "#991b1b",
     fontSize: 12,
 };
-/** Internal: the federated, password-free sign-in/up surface — one button per company domain. */
+/** Internal: the federated, password-free sign-in/up surface — one button per connection. */
 function FederatedAuth(props) {
-    const { connections, config } = useAuthContext();
+    const ctx = useAuthContext();
+    const config = ctx.config;
+    const connections = props.connections ?? ctx.connections;
     const { signIn } = useSignIn();
     const { signUp } = useSignUp();
     const complete = props.forceRedirectUrl ?? props.fallbackRedirectUrl ?? "/";
@@ -94,34 +96,35 @@ function FederatedAuth(props) {
     // Surface a rejection from a prior callback bounce (e.g. domain enforcement, §7.3). One-shot,
     // cleared on read, so a refresh doesn't re-show a stale message.
     const rejection = useAuthError();
-    const start = (connectionId) => {
+    const start = (conn) => {
         const authenticate = props.mode === "sign-up"
             ? signUp.authenticateWithRedirect
             : signIn.authenticateWithRedirect;
         authenticate({
-            strategy: "oauth_google_workspace",
-            connectionId,
+            strategy: conn.strategy ?? "oauth_google",
+            connection: conn.id,
             redirectUrl: "/sso-callback",
             redirectUrlComplete: complete,
         });
     };
-    return (_jsxs("div", { style: card, children: [_jsx("h1", { style: { fontSize: 18, fontWeight: 700, margin: 0 }, children: "Internal App" }), _jsx("p", { style: { fontSize: 13, color: "#6b7280", marginTop: 4 }, children: "Employees only. Continue with your company Google Workspace." }), rejection && (_jsxs("div", { role: "alert", style: rejectionBanner, children: [_jsx("strong", { style: { display: "block" }, children: rejection.message }), rejection.longMessage && (_jsx("span", { style: { display: "block", marginTop: 4 }, children: rejection.longMessage })), rejection.meta?.allowedDomains?.length ? (_jsxs("span", { style: { display: "block", marginTop: 4 }, children: ["Allowed company ", rejection.meta.allowedDomains.length > 1 ? "domains" : "domain", ":", " ", rejection.meta.allowedDomains.join(", "), "."] })) : null] })), connections.map((conn) => (_jsxs("button", { type: "button", onClick: () => start(conn.id), style: bigButton(color), children: ["Continue with ", conn.domain] }, conn.id))), _jsx(GoogleOneTap, { fallbackRedirectUrl: complete, signInForceRedirectUrl: complete }), _jsx("p", { style: { fontSize: 11, color: "#9ca3af", marginTop: 14 }, children: "No passwords. Access is restricted to company accounts." })] }));
+    const title = props.title ?? (props.mode === "sign-up" ? "Create account" : "Sign in");
+    return (_jsxs("div", { style: card, children: [_jsx("h1", { style: { fontSize: 18, fontWeight: 700, margin: 0 }, children: title }), props.subtitle ? (_jsx("p", { style: { fontSize: 13, color: "#6b7280", marginTop: 4 }, children: props.subtitle })) : null, rejection && (_jsxs("div", { role: "alert", style: rejectionBanner, children: [_jsx("strong", { style: { display: "block" }, children: rejection.message }), rejection.longMessage && (_jsx("span", { style: { display: "block", marginTop: 4 }, children: rejection.longMessage })), rejection.meta?.allowedDomains?.length ? (_jsxs("span", { style: { display: "block", marginTop: 4 }, children: ["Allowed ", rejection.meta.allowedDomains.length > 1 ? "domains" : "domain", ":", " ", rejection.meta.allowedDomains.join(", "), "."] })) : null] })), connections.map((conn) => (_jsxs("button", { type: "button", onClick: () => start(conn), style: bigButton(color), children: ["Continue with ", conn.label] }, conn.id))), _jsx(GoogleOneTap, { fallbackRedirectUrl: complete, signInForceRedirectUrl: complete }), props.footer ? _jsx("div", { style: { fontSize: 11, color: "#9ca3af", marginTop: 14 }, children: props.footer }) : null] }));
 }
 /** Complete federated sign-in experience (no password field). */
 export function SignIn(props) {
-    return (_jsx(FederatedAuth, { mode: "sign-in", forceRedirectUrl: props.forceRedirectUrl, fallbackRedirectUrl: props.fallbackRedirectUrl, appearance: props.appearance }));
+    return (_jsx(FederatedAuth, { mode: "sign-in", forceRedirectUrl: props.forceRedirectUrl, fallbackRedirectUrl: props.fallbackRedirectUrl, appearance: props.appearance, title: props.title, subtitle: props.subtitle, footer: props.footer, connections: props.connections }));
 }
 /** Sign-up surface — funnels into the same federated flow (JIT provisioning). */
 export function SignUp(props) {
-    return (_jsx(FederatedAuth, { mode: "sign-up", forceRedirectUrl: props.forceRedirectUrl, fallbackRedirectUrl: props.fallbackRedirectUrl, appearance: props.appearance }));
+    return (_jsx(FederatedAuth, { mode: "sign-up", forceRedirectUrl: props.forceRedirectUrl, fallbackRedirectUrl: props.fallbackRedirectUrl, appearance: props.appearance, title: props.title, subtitle: props.subtitle, footer: props.footer, connections: props.connections }));
 }
 /** Lightweight trigger that starts the federated sign-in flow. */
 export function SignInButton(props) {
     const { connections } = useAuthContext();
     const { signIn } = useSignIn();
     const onClick = () => signIn.authenticateWithRedirect({
-        strategy: "oauth_google_workspace",
-        connectionId: connections[0]?.id,
+        strategy: connections[0]?.strategy ?? "oauth_google",
+        connection: connections[0]?.id,
         redirectUrl: "/sso-callback",
         redirectUrlComplete: props.forceRedirectUrl ?? props.fallbackRedirectUrl ?? "/",
     });
@@ -135,8 +138,8 @@ export function SignUpButton(props) {
     const { connections } = useAuthContext();
     const { signUp } = useSignUp();
     const onClick = () => signUp.authenticateWithRedirect({
-        strategy: "oauth_google_workspace",
-        connectionId: connections[0]?.id,
+        strategy: connections[0]?.strategy ?? "oauth_google",
+        connection: connections[0]?.id,
         redirectUrl: "/sso-callback",
         redirectUrlComplete: props.forceRedirectUrl ?? props.fallbackRedirectUrl ?? "/",
     });
@@ -168,9 +171,9 @@ export function GoogleOneTap(_props) {
 }
 /**
  * Completes the SSO redirect handshake on the callback route. On success it forwards the user
- * on; on a rejection (e.g. domain enforcement — `identity_domain_not_allowed`) it stashes the
- * error and bounces back to the sign-in screen so the user sees a clear "restricted to company
- * accounts" message (§7.3). No session is created for a rejected identity.
+ * on; on a rejection (any admission refusal — `identity_not_allowlisted`, `sign_up_restricted`,
+ * an app action's own code, ...) it stashes the error and bounces back to the sign-in screen so
+ * the user sees why (§7.3). No session is created for a rejected identity.
  */
 export function AuthenticateWithRedirectCallback(props) {
     const { core, config } = useAuthContext();

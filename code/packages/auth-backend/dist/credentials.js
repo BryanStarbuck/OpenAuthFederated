@@ -37,7 +37,7 @@ class OAuthCredentialsError extends Error {
 exports.OAuthCredentialsError = OAuthCredentialsError;
 /**
  * The full, secret-free remediation message. Describes how the embedding app must supply the
- * credentials (pass them to `createAuthFrontend`, or set the generic env vars). It names no
+ * credentials (pass them to `createFederatedFrontend`; the library reads no environment). It names no
  * application-specific file, path, override env var, or JSON key — those are the host app's
  * concern — and never includes the credential values themselves.
  */
@@ -56,7 +56,7 @@ function credentialsRemediation() {
         "    secrets file or deployment environment); OpenAuthFederated only receives the resolved value.",
         "  - Keep credentials OUT of any repository — never commit them.",
         '  - The OAuth client must be a "Web application" client whose Authorized redirect URI exactly',
-        "    matches the app's redirect URI (dev: http://localhost:9111/api/v1/oauth_callback).",
+        "    matches the app's redirect URI (e.g. <your-app-origin>/api/v1/oauth_callback).",
     ].join("\n");
 }
 /**

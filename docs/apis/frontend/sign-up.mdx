@@ -144,6 +144,11 @@ A Session now exists; mint a JWT via
 
 ## Domain enforcement
 
+> **Embedded mode:** who may sign up is the app's stated `signUpMode` (`public`, `restricted`,
+> `waitlist`) plus its allowlist / blocklist and actions — see [Admission](./admission.mdx).
+> `useSignUp()` sends `mode=sign_up` as an untrusted hint; whether the identity is new is the app's
+> `users.lookup` to answer. The example below is the hosted-style reference shape.
+
 Identities outside a verified domain are **rejected at the callback** — no user is created and no
 session is established. This applies even if the upstream IdP successfully authenticated the
 person. On the OIDC path the rejection covers a missing/mismatched `hd` claim or

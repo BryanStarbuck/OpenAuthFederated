@@ -8,7 +8,7 @@ import {
   useSignUp,
   useUser,
 } from "./hooks.js"
-import type { Appearance, AuthRejection, PermissionCheck } from "./types.js"
+import type { Appearance, AuthRejection, Connection, PermissionCheck } from "./types.js"
 
 // Where a callback rejection (e.g. domain enforcement) is stashed so the sign-in screen can
 // show a clear message after we bounce the user back. Read+cleared by <SignIn> / useAuthError.
@@ -98,6 +98,14 @@ interface SignInProps {
   forceRedirectUrl?: string
   fallbackRedirectUrl?: string
   appearance?: Appearance
+  /** Heading. Default "Sign in" (or "Create account" for `<SignUp>`). The app owns its own wording. */
+  title?: ReactNode
+  /** Optional line under the heading. Default none. */
+  subtitle?: ReactNode
+  /** Optional footer under the buttons. Default none. */
+  footer?: ReactNode
+  /** Override the provider's connections for this one screen. */
+  connections?: Connection[]
 }
 
 const rejectionBanner: CSSProperties = {
@@ -110,14 +118,20 @@ const rejectionBanner: CSSProperties = {
   fontSize: 12,
 }
 
-/** Internal: the federated, password-free sign-in/up surface — one button per company domain. */
+/** Internal: the federated, password-free sign-in/up surface — one button per connection. */
 function FederatedAuth(props: {
   mode: "sign-in" | "sign-up"
   forceRedirectUrl?: string
   fallbackRedirectUrl?: string
   appearance?: Appearance
+  title?: ReactNode
+  subtitle?: ReactNode
+  footer?: ReactNode
+  connections?: Connection[]
 }): ReactNode {
-  const { connections, config } = useAuthContext()
+  const ctx = useAuthContext()
+  const config = ctx.config
+  const connections = props.connections ?? ctx.connections
   const { signIn } = useSignIn()
   const { signUp } = useSignUp()
   const complete = props.forceRedirectUrl ?? props.fallbackRedirectUrl ?? "/"
@@ -127,25 +141,26 @@ function FederatedAuth(props: {
   // cleared on read, so a refresh doesn't re-show a stale message.
   const rejection = useAuthError()
 
-  const start = (connectionId: string) => {
+  const start = (conn: Connection) => {
     const authenticate =
       props.mode === "sign-up"
         ? signUp.authenticateWithRedirect
         : signIn.authenticateWithRedirect
     authenticate({
-      strategy: "oauth_google_workspace",
-      connectionId,
+      strategy: conn.strategy ?? "oauth_google",
+      connection: conn.id,
       redirectUrl: "/sso-callback",
       redirectUrlComplete: complete,
     })
   }
 
+  const title = props.title ?? (props.mode === "sign-up" ? "Create account" : "Sign in")
   return (
     <div style={card}>
-      <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>Internal App</h1>
-      <p style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>
-        Employees only. Continue with your company Google Workspace.
-      </p>
+      <h1 style={{ fontSize: 18, fontWeight: 700, margin: 0 }}>{title}</h1>
+      {props.subtitle ? (
+        <p style={{ fontSize: 13, color: "#6b7280", marginTop: 4 }}>{props.subtitle}</p>
+      ) : null}
       {rejection && (
         <div role="alert" style={rejectionBanner}>
           <strong style={{ display: "block" }}>{rejection.message}</strong>
@@ -154,7 +169,7 @@ function FederatedAuth(props: {
           )}
           {rejection.meta?.allowedDomains?.length ? (
             <span style={{ display: "block", marginTop: 4 }}>
-              Allowed company {rejection.meta.allowedDomains.length > 1 ? "domains" : "domain"}:{" "}
+              Allowed {rejection.meta.allowedDomains.length > 1 ? "domains" : "domain"}:{" "}
               {rejection.meta.allowedDomains.join(", ")}.
             </span>
           ) : null}
@@ -164,17 +179,15 @@ function FederatedAuth(props: {
         <button
           key={conn.id}
           type="button"
-          onClick={() => start(conn.id)}
+          onClick={() => start(conn)}
           style={bigButton(color)}
         >
-          Continue with {conn.domain}
+          Continue with {conn.label}
         </button>
       ))}
-      {/* Optional near-frictionless return sign-in, still subject to domain enforcement (§7.1). */}
+      {/* Optional near-frictionless return sign-in, still subject to the app's admission policy. */}
       <GoogleOneTap fallbackRedirectUrl={complete} signInForceRedirectUrl={complete} />
-      <p style={{ fontSize: 11, color: "#9ca3af", marginTop: 14 }}>
-        No passwords. Access is restricted to company accounts.
-      </p>
+      {props.footer ? <div style={{ fontSize: 11, color: "#9ca3af", marginTop: 14 }}>{props.footer}</div> : null}
     </div>
   )
 }
@@ -187,6 +200,10 @@ export function SignIn(props: SignInProps): ReactNode {
       forceRedirectUrl={props.forceRedirectUrl}
       fallbackRedirectUrl={props.fallbackRedirectUrl}
       appearance={props.appearance}
+      title={props.title}
+      subtitle={props.subtitle}
+      footer={props.footer}
+      connections={props.connections}
     />
   )
 }
@@ -199,6 +216,10 @@ export function SignUp(props: SignInProps): ReactNode {
       forceRedirectUrl={props.forceRedirectUrl}
       fallbackRedirectUrl={props.fallbackRedirectUrl}
       appearance={props.appearance}
+      title={props.title}
+      subtitle={props.subtitle}
+      footer={props.footer}
+      connections={props.connections}
     />
   )
 }
@@ -216,8 +237,8 @@ export function SignInButton(props: TriggerButtonProps): ReactNode {
   const { signIn } = useSignIn()
   const onClick = () =>
     signIn.authenticateWithRedirect({
-      strategy: "oauth_google_workspace",
-      connectionId: connections[0]?.id,
+      strategy: connections[0]?.strategy ?? "oauth_google",
+      connection: connections[0]?.id,
       redirectUrl: "/sso-callback",
       redirectUrlComplete: props.forceRedirectUrl ?? props.fallbackRedirectUrl ?? "/",
     })
@@ -241,8 +262,8 @@ export function SignUpButton(props: TriggerButtonProps): ReactNode {
   const { signUp } = useSignUp()
   const onClick = () =>
     signUp.authenticateWithRedirect({
-      strategy: "oauth_google_workspace",
-      connectionId: connections[0]?.id,
+      strategy: connections[0]?.strategy ?? "oauth_google",
+      connection: connections[0]?.id,
       redirectUrl: "/sso-callback",
       redirectUrlComplete: props.forceRedirectUrl ?? props.fallbackRedirectUrl ?? "/",
     })
@@ -309,9 +330,9 @@ export function GoogleOneTap(_props: {
 
 /**
  * Completes the SSO redirect handshake on the callback route. On success it forwards the user
- * on; on a rejection (e.g. domain enforcement — `identity_domain_not_allowed`) it stashes the
- * error and bounces back to the sign-in screen so the user sees a clear "restricted to company
- * accounts" message (§7.3). No session is created for a rejected identity.
+ * on; on a rejection (any admission refusal — `identity_not_allowlisted`, `sign_up_restricted`,
+ * an app action's own code, ...) it stashes the error and bounces back to the sign-in screen so
+ * the user sees why (§7.3). No session is created for a rejected identity.
  */
 export function AuthenticateWithRedirectCallback(props: {
   signInForceRedirectUrl?: string

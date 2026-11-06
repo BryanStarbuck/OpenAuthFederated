@@ -78,7 +78,11 @@ export declare function useSignIn(): {
         authenticateWithRedirect: (p: AuthenticateWithRedirectParams) => Promise<void>;
     };
 };
-/** The sign-up counterpart (funnels into the same federated flow + JIT provisioning). */
+/**
+ * The sign-up counterpart. Same federated flow, but it tells the server the user asked to SIGN UP
+ * (`mode: 'sign_up'`). That is an untrusted hint for the app's admission actions; whether the
+ * identity is actually new is decided server-side (the app's `users.lookup`).
+ */
 export declare function useSignUp(): {
     isLoaded: boolean;
     signUp: {

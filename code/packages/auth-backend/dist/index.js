@@ -1,6 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.authClient = exports.federatedClient = exports.createAuthClient = exports.OAuthCredentialsError = exports.credentialsRemediation = exports.assertGoogleCredentials = exports.loadGoogleCredentials = exports.InMemorySamlReplayStore = exports.validateSamlAcs = exports.samlSpMetadata = exports.samlLoginRedirectUrl = exports.buildSamlClient = exports.loadOrCreateSecret = exports.InMemorySessionStore = exports.FileSessionStore = exports.X_SCOPES = exports.GOOGLE_ISSUERS = exports.OAuthExchangeError = exports.exchangeXCode = exports.xAuthorizeUrl = exports.exchangeGoogleCode = exports.googleAuthorizeUrl = exports.randomUrlToken = exports.pkceChallenge = exports.createPkcePair = exports.createAuthFrontend = exports.createFederatedFrontend = exports.getAuth = exports.requireAuth = exports.federatedMiddleware = exports.AuthError = exports.bearerToken = exports.authenticateRequest = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.jwksCacheSize = exports.createEmbeddedVerifier = exports.configureEmbeddedVerification = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.verifyWebhook = exports.FederatedClient = exports.AuthClient = void 0;
+exports.InMemorySamlReplayStore = exports.validateSamlAcs = exports.samlSpMetadata = exports.samlLoginRedirectUrl = exports.buildSamlClient = exports.loadOrCreateSecret = exports.InMemorySessionStore = exports.FileSessionStore = exports.X_SCOPES = exports.GOOGLE_ISSUERS = exports.OAuthExchangeError = exports.exchangeXCode = exports.xAuthorizeUrl = exports.exchangeGoogleCode = exports.googleAuthorizeUrl = exports.randomUrlToken = exports.pkceChallenge = exports.createPkcePair = exports.DEFAULT_ADMISSION_MESSAGES = exports.connectionIdForDomain = exports.decideRestrictions = exports.matchIdentifier = exports.parseEmail = exports.OafConfigError = exports.ADMISSION_API_VERSION = exports.createAuthFrontend = exports.createFederatedFrontend = exports.getAuth = exports.requireAuth = exports.federatedMiddleware = exports.AuthError = exports.bearerToken = exports.authenticateRequest = exports.getRequestAuth = exports.createRouteMatcher = exports.authMiddleware = exports.checkClaims = exports.hasRole = exports.hasPermission = exports.requireRole = exports.requirePermission = exports.jwksCacheSize = exports.createEmbeddedVerifier = exports.configureEmbeddedVerification = exports.hasScope = exports.verifyMachineToken = exports.verifyToken = exports.verifyWebhook = exports.FederatedClient = exports.AuthClient = void 0;
+exports.authClient = exports.federatedClient = exports.createAuthClient = exports.OAuthCredentialsError = exports.credentialsRemediation = exports.assertGoogleCredentials = exports.loadGoogleCredentials = void 0;
 exports.createFederatedClient = createFederatedClient;
 const client_js_1 = require("./client.js");
 // The backend client. `FederatedClient` is the primary name; `AuthClient` is kept as an alias so
@@ -42,6 +43,16 @@ Object.defineProperty(exports, "getAuth", { enumerable: true, get: function () {
 var frontend_js_1 = require("./frontend.js");
 Object.defineProperty(exports, "createFederatedFrontend", { enumerable: true, get: function () { return frontend_js_1.createFederatedFrontend; } });
 Object.defineProperty(exports, "createAuthFrontend", { enumerable: true, get: function () { return frontend_js_1.createAuthFrontend; } });
+// Admission: the app states who may sign in / sign up; the platform executes it. The pure helpers
+// (parseEmail, matchIdentifier, decideRestrictions) let an app apply the same rule per request.
+var admission_js_1 = require("./admission.js");
+Object.defineProperty(exports, "ADMISSION_API_VERSION", { enumerable: true, get: function () { return admission_js_1.ADMISSION_API_VERSION; } });
+Object.defineProperty(exports, "OafConfigError", { enumerable: true, get: function () { return admission_js_1.OafConfigError; } });
+Object.defineProperty(exports, "parseEmail", { enumerable: true, get: function () { return admission_js_1.parseEmail; } });
+Object.defineProperty(exports, "matchIdentifier", { enumerable: true, get: function () { return admission_js_1.matchIdentifier; } });
+Object.defineProperty(exports, "decideRestrictions", { enumerable: true, get: function () { return admission_js_1.decideRestrictions; } });
+Object.defineProperty(exports, "connectionIdForDomain", { enumerable: true, get: function () { return admission_js_1.connectionIdForDomain; } });
+Object.defineProperty(exports, "DEFAULT_ADMISSION_MESSAGES", { enumerable: true, get: function () { return admission_js_1.DEFAULT_ADMISSION_MESSAGES; } });
 // The provider protocols on their own (authorize URL, PKCE, code exchange, verified identity), with
 // no session, cookie or domain policy. createFederatedFrontend() is built on these; an app that keeps
 // its own session model (its own accounts service) calls them directly.

@@ -47,13 +47,19 @@ export interface FederatedProviderProps {
   children: ReactNode
   /** Browser-safe publishable key (`pk_live_…` / `pk_test_…`). */
   publishableKey?: string
-  /** Frontend API base, e.g. https://auth.whitehatengineering.com. */
+  /** Frontend API base, e.g. https://auth.example.com or a same-origin path like "/api". */
   frontendApi?: string
   signInUrl?: string
   signUpUrl?: string
   afterSignOutUrl?: string
   appearance?: Appearance
-  /** The company domains presented as "global logins" (the two SSO connections). */
+  /**
+   * The sign-in buttons (Google, X, SAML, or Google with a hint domain). Takes precedence over
+   * everything else; an EMPTY array shows no buttons. When omitted (and no `allowedDomains`), the
+   * server's `/environment` connections are used, else one generic Google button.
+   */
+  connections?: Connection[]
+  /** @deprecated Use {@link connections}. One Google button per domain (`Continue with <domain>`). */
   allowedDomains?: string[]
   /**
    * Inject a custom {@link AuthCore} instead of the default real Frontend-API client. This is the
@@ -77,14 +83,13 @@ export type AuthProviderProps = FederatedProviderProps
 export function FederatedProvider(props: FederatedProviderProps): ReactNode {
   const coreRef = useRef<AuthCore | null>(null)
   if (!coreRef.current) {
-    const domains =
-      props.allowedDomains && props.allowedDomains.length > 0
-        ? props.allowedDomains
-        : ["act3ai.com", "whitehatengineering.com"]
-    // Default to the real federated client. OpenAuthFederated ships no dev mock; an app that wants a
-    // localhost-only dev core builds its own and injects it via `core` (gated on its own side).
+    // Default to the real federated client. OpenAuthFederated ships no dev mock and NO default
+    // domain list: the buttons come from the app (connections / allowedDomains), the server's
+    // /environment, or one generic Google button. An app that wants a localhost-only dev core builds
+    // its own and injects it via `core` (gated on its own side).
     coreRef.current =
-      props.core ?? new RealAuthCore(props.frontendApi ?? "", props.publishableKey ?? "", domains)
+      props.core ??
+      new RealAuthCore(props.frontendApi ?? "", props.publishableKey ?? "", props.allowedDomains, props.connections)
   }
   const core = coreRef.current
 
@@ -114,9 +119,13 @@ export function FederatedProvider(props: FederatedProviderProps): ReactNode {
     () => core.loadState(),
   )
 
-  // `connections` is derived from a constructor argument and never changes, so it is read once and
-  // kept out of the value memo below — which re-runs on every snapshot change.
-  const connections = useMemo(() => core.connections(), [core])
+  // `connections` is a stable, frozen reference that changes at most once (when the server's
+  // /environment supplies the buttons), so reading it through the store costs nothing per render.
+  const connections = useSyncExternalStore(
+    subscribe,
+    () => core.connections(),
+    () => core.connections(),
+  )
 
   const value = useMemo<AuthContextValue>(
     () => ({

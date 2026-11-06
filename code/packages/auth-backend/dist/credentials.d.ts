@@ -49,7 +49,7 @@ export declare class OAuthCredentialsError extends Error {
 }
 /**
  * The full, secret-free remediation message. Describes how the embedding app must supply the
- * credentials (pass them to `createAuthFrontend`, or set the generic env vars). It names no
+ * credentials (pass them to `createFederatedFrontend`; the library reads no environment). It names no
  * application-specific file, path, override env var, or JSON key — those are the host app's
  * concern — and never includes the credential values themselves.
  */

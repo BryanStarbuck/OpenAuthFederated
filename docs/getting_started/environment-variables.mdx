@@ -5,6 +5,12 @@ description: Every OpenAuthFederated environment variable, what it does, where t
 
 OpenAuthFederated is configured with a small set of environment variables. Anything prefixed with `NEXT_PUBLIC_` is exposed to the browser and must be safe to ship publicly; everything else is server-only and must never reach client code. The values come from your OpenAuthFederated dashboard and from your self-hosted deployment's domains.
 
+> **Embedded mode (the shipped library).** `createFederatedFrontend()` runs in your app's own
+> process and reads **no environment variables**: credentials and the admission policy are passed
+> in through its API. Who may sign in or sign up is stated by the app — see
+> [Admission](../apis/frontend/admission.mdx). The variables below are the app-side convention for
+> the hosted-style SDKs; nothing in OpenAuthFederated reads them.
+
 ## Quick start
 
 Add these to `.env.local` for local development. For production, set them in your hosting provider's environment configuration — never commit secret keys.
@@ -12,13 +18,13 @@ Add these to `.env.local` for local development. For production, set them in you
 ```env
 # Public (browser-safe)
 NEXT_PUBLIC_AUTH_PUBLISHABLE_KEY=pk_test_your_publishable_key
-NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.whitehatengineering.com
+NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.example.com
 NEXT_PUBLIC_AUTH_SIGN_IN_URL=/sign-in
 NEXT_PUBLIC_AUTH_SIGN_UP_URL=/sign-up
 
 # Secret (server-only)
 AUTH_SECRET_KEY=sk_test_your_secret_key
-AUTH_BACKEND_API=https://api.whitehatengineering.com/v1
+AUTH_BACKEND_API=https://api.example.com/v1
 ```
 
 ## Public variables
@@ -47,7 +53,6 @@ These are read only on the server. Treat them like passwords: never log them, ne
 | --- | --- |
 | `AUTH_WEBHOOK_SIGNING_SECRET` | Verifies the signature on incoming webhooks (`user.created`, `user.updated`, `user.deleted`, group changes). Set this if you consume webhooks. |
 | `AUTH_JWT_ISSUER` | Expected `iss` claim when verifying access tokens. Usually your Frontend API URL. |
-| `AUTH_ALLOWED_DOMAINS` | Comma-separated list of verified company domains permitted to sign in. For the reference deployment: `whitehatengineering.com`. Enforced server-side. |
 
 ## Key prefixes at a glance
 
@@ -64,4 +69,5 @@ These are read only on the server. Treat them like passwords: never log them, ne
 
 - [Next.js quickstart](./quickstart-nextjs.mdx) — wire these values into a running app.
 - [Protect routes](./protect-routes.mdx) — use the keys to enforce auth and permissions.
-- [Deploy](./deploy.mdx) — switch from `*_test_*` to `*_live_*` and set domain enforcement.
+- [Deploy](./deploy.mdx) — switch from `*_test_*` to `*_live_*` and state your admission policy.
+- [Admission](../apis/frontend/admission.mdx) — who may sign in is passed through the API, not an environment variable.

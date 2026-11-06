@@ -1,0 +1,271 @@
+---
+title: Admission (who may sign in and sign up)
+description: The app states its sign-in and sign-up policy through the API; the embedded library executes it. Sign-up modes, allowlist and blocklist identifiers, per-connection requirements, admission actions, the user directory hook, and the deprecated options they replace.
+---
+
+# Admission: the platform executes, the app decides
+
+OpenAuthFederated ships **no domains, no people and no application names**. It enforces protocol
+hygiene (a verified email, `state`, PKCE, signatures) and then executes whatever admission policy
+the embedding application states through `createFederatedFrontend()`. The library reads no
+environment variables: every value below is passed in by the caller.
+
+When in a sign-in callback (Google, X or SAML), with a verified identity in hand, the library runs
+the admission pipeline below and mints a session only if every step admits — implemented in:
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `admit()` / `finishSignIn()` / `finishReverify()`.
+
+The pure helpers and every type live in:
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/admission.ts` — `parseEmail()`, `matchIdentifier()`, `decideRestrictions()`, `ADMISSION_API_VERSION`.
+
+## Quick examples
+
+```ts
+import { createFederatedFrontend, ADMISSION_API_VERSION } from '@auth/backend'
+
+// A public consumer app: any verified email, a few blocked identities.
+createFederatedFrontend({
+  sessionSecret,
+  connections: [googleConnection, xConnection],
+  requirePolicy: true,
+  signUpMode: 'public',
+  restrictions: { blocklist: true },
+  blocklistIdentifiers: () => myConfig().blocked,      // Live: re-read on every sign-in
+})
+
+// An organization-only app: one domain, a hosted-domain requirement, one person blocked.
+createFederatedFrontend({
+  sessionSecret,
+  connections: [{ ...googleConnection, allowedHostedDomains: ['corp.example'], hostedDomainHints: ['corp.example'] }],
+  requirePolicy: true,
+  signUpMode: 'restricted',
+  restrictions: { allowlist: true, blocklist: true },
+  allowlistIdentifiers: ['*@corp.example'],
+  blocklistIdentifiers: ['former.employee@corp.example'],
+  actions: {
+    authentication: (ctx) => myRule(ctx.identity) ? { verdict: 'Allow' } : { verdict: 'Deny', code: 'not_permitted', errorMessage: 'Use your organization account.' },
+  },
+})
+
+if (ADMISSION_API_VERSION < 1) throw new Error('stale @auth/backend dist')   // assert at boot
+```
+
+## The configuration surface
+
+| Option | Type | Default | Meaning |
+|---|---|---|---|
+| `signUpMode` | `Live<'public' \| 'restricted' \| 'waitlist'>` | `'public'` with a once-per-process WARN when no policy is stated | Who may **create** an account. |
+| `restrictions` | `Live<{ allowlist?, blocklist?, applyToSignIn? }>` | all off; `applyToSignIn` **true** | Which lists are engaged. |
+| `allowlistIdentifiers` | `Live<readonly string[]>` | `[]` | Identifiers that may enter (when `restrictions.allowlist`). |
+| `blocklistIdentifiers` | `Live<readonly string[]>` | `[]` | Identifiers refused (when `restrictions.blocklist`). |
+| `actions` | `{ authentication?, userRegistration?, onError?, timeoutMs? }` | none | App callbacks that return `Allow` or `Deny`. |
+| `users` | `{ lookup(identity) => Promise<{ exists, invited? }> }` | none | The app's own user directory, so returning users can be told from new ones. |
+| `messages` | `Partial<Record<code, { message, longMessage? }>>` | neutral copy | Override the refusal copy per code. |
+| `requirePolicy` | `boolean` | `false` | Throw at construction unless `signUpMode`, `restrictions` or a legacy key is present. |
+| `environment.publishAllowedDomains` | `boolean` | new API `false`; legacy `true` | Publish `display_config.allowed_domains` and send `allowed_domains` on refusals. |
+| `environment.organizationsEnabled` | `boolean` | new API `false`; legacy `true` | `organization_settings.enabled` in `/environment`. |
+
+**A list never goes unenforced silently.** A list is only consulted when its switch is on
+(`restrictions.allowlist` / `restrictions.blocklist`). A STATIC non-empty `allowlistIdentifiers` or
+`blocklistIdentifiers` without its switch set to `true` throws `OafConfigError` at construction,
+because the list would otherwise be ignored: a blocklist that blocks nobody, or an allowlist that
+does not restrict a public app. When the list or `restrictions` is `Live`, this cannot be judged at
+construction, so OAF logs one WARN per process the first time a non-empty list resolves without its
+switch. An app that turns a list on and off by mode should resolve it to `[]` while it is off.
+
+`Live<T>` is `T | (() => T | Promise<T>)`. A Live value is resolved **once per attempt** under
+`actions.timeoutMs` (default 5000 ms). A resolver that throws, times out or returns an invalid
+value (`'Public'`, `undefined`, a non-array list) refuses the attempt with `action_failed` and logs
+an ERROR. It never falls back to a more open value.
+
+### Per-connection options
+
+| Connection | Option | Meaning |
+|---|---|---|
+| Google | `requireHostedDomain?: boolean` | Refuse an identity without a verified `hd` claim. Never a default. |
+| Google | `allowedHostedDomains?: string[]` | When set (`!== undefined`): `hd` must be present and on the list. `[]` admits nobody. Implies `requireHostedDomain`. |
+| Google | `hostedDomainHints?: string[]` | Domains a client may pick as the account-chooser `hd` hint via `?connection=conn_<slug>`. New-API default `[]` (a client-chosen hint is ignored). Legacy default: `allowedDomains`. |
+| Google | `publishHintDomains?: boolean` | Publish the hint domains in `/environment`. Default `false`. |
+| Google | `hostedDomain?: string` | A fixed `hd` hint sent on every authorize request. A hint only; it never admits anyone. |
+| SAML | `requireHostedDomain?`, `allowedHostedDomains?` | Same rules, against the SAML `hd` attribute **only when it equals the email domain**. |
+| all | `label?: string` | Button label in `/environment` (defaults `Google`, `X`, `SSO`). |
+
+An X identity never carries `hd` and always needs a confirmed email.
+
+## Identifier grammar
+
+Identifiers are trimmed and case-insensitive, and are matched against the **verified email only**
+(never against `hd`). Domains are compared after `domainToASCII` (punycode).
+
+| Identifier | Matches | Specificity |
+|---|---|---|
+| `ann@example.com` | exactly that address | 3 |
+| `*@example.com` | that domain only | 2 |
+| `*@*.example.com` | subdomains only, not the apex | 1 |
+| anything else (e.g. `ann*@x`) | treated as an exact string; WARN once per entry per process | 3 |
+
+An email that does not parse (two `@`, no `@`, a quoted local part, a trailing dot) never matches.
+
+### Precedence
+
+`decideRestrictions(email, restrictions, allowlist, blocklist)`:
+
+1. `allow` = the most specific allowlist match, only when `restrictions.allowlist` is on.
+2. `block` = the most specific blocklist match, only when `restrictions.blocklist` is on.
+3. `block` and (`!allow` or `allow` less specific than `block`) → **blocked**.
+4. `restrictions.allowlist` on and no `allow` → **not allowlisted**.
+5. Otherwise → **allow**.
+
+So the more specific match wins, and an equal-specificity tie goes to the allowlist. That is what
+lets an app block one person inside an allowlisted domain (`ann@corp.example` beats
+`*@corp.example`). A stale allowlist cannot rescue a blocked identity when the allowlist is off.
+
+When an app checks a token per request, it calls the same exported `decideRestrictions()`.
+
+## The pipeline
+
+It stops at the first refusal. Nothing is minted, stored, or granted for a refused identity.
+
+| # | Step | Runs when | Refusal code |
+|---|---|---|---|
+| 0 | Resolve every Live value once, under the timeout, and validate it | not legacy-only | `action_failed` |
+| 1 | Email present and verified (Google `email_verified`, X `confirmed_email`, SAML `trustAssertedEmailVerified`); `parseEmail` | always | `identity_email_unverified` / `identity_email_invalid` (legacy-only: `identity_domain_not_allowed` + `error_reason`) |
+| 2 | Legacy gate (the old `requireHostedDomain` + `allowedDomains` checks, unchanged) | a legacy key is present | `identity_domain_not_allowed` |
+| 3 | The producing connection's `requireHostedDomain` / `allowedHostedDomains` | set on that connection | `identity_hosted_domain_required` |
+| 4 | `users.lookup` → new or returning, invited | `users` supplied | `action_failed` on throw/timeout |
+| 5 | `decideRestrictions` | a new or unknown identity, or `applyToSignIn` | `identity_blocked` / `identity_not_allowlisted` |
+| 6 | Sign-up mode for a new or unknown identity: `public` passes; `restricted` passes on an allowlist match or `invited`; `waitlist` refuses | always | `sign_up_restricted` / `sign_up_waitlisted` |
+| 7 | `actions.userRegistration` | a new identity | the action's code, or `action_denied`; `action_failed` on error |
+| 8 | `actions.authentication` (`phase: 'sign_in'`) | supplied | same as step 7 |
+| 9 | `await resolveGrants(identity)`, then mint the session | admitted | — |
+
+"Unknown" means there is no `users.lookup`: OpenAuthFederated has no user store, so it cannot tell
+sign-in from sign-up and treats the attempt as a sign-up (fail closed). That is why
+`applyToSignIn` defaults to true, why `waitlist` without `users` throws at construction, and why
+`restricted` with `applyToSignIn: false` and no `users` throws too.
+
+### Action contexts
+
+Every field of `ctx.identity` (`ActionIdentity`) is **trusted**: `provider`, `sub` (key app
+identities on `(provider, sub)`), the lowercased `email`, `emailVerified: true`, `hd` (Google's
+verified claim or the corroborated SAML attribute; never for X), `name`, `username` (X).
+`ctx.untrusted` holds what the browser or network sent (`connectionId`, `requestedMode`,
+`ipAddress`, `userAgent`). It is never a security input. `ctx.id` is also sent as `trace_id`.
+
+A verdict is `{ verdict: 'Allow' }` or `{ verdict: 'Deny', code?, errorMessage?, errorLongMessage? }`.
+A Deny `code` must match `/^[a-z][a-z0-9_]{0,63}$/` or it becomes `action_denied`; messages are
+truncated to 500 and 2000 characters. A throw, a timeout or a malformed verdict is an error:
+`onError` decides (`'deny'` by default → `action_failed`).
+
+### Reverify (step-up)
+
+A fresh IdP authentication on the reverify path no longer simply re-stamps the session:
+
+1. Steps 0 and 1 run.
+2. **Binding check**: the presented identity must be the session's own (same provider, same
+   provider subject, same email; a session older than this change is matched on its email). On a
+   mismatch nothing is stamped, the session is kept, a WARN is logged, and the browser returns
+   with `sign_in_not_completed`.
+3. Steps 2, 3, 5 (as a returning user) and 8 (`phase: 'reverify'`) run. On a refusal the session
+   record is removed and the cookie cleared.
+4. `lastVerifiedAt` is stamped.
+
+## Redirect parameters and refusal codes
+
+On a refusal the browser returns to the app's callback with `error`, `error_message`, `trace_id`
+and `redirect_url_complete` always, plus `error_long_message`, `presented_domain` (legacy gate),
+`email_verified=false` and `error_reason` when relevant. `allowed_domains` is sent only when
+`environment.publishAllowedDomains` is in effect.
+
+| Code | Default message |
+|---|---|
+| `identity_email_unverified` | Your sign-in provider has not verified this account's email address. |
+| `identity_email_invalid` | This account's email address cannot be used to sign in. |
+| `identity_domain_not_allowed`, `identity_not_allowlisted`, `identity_blocked`, `action_denied` | This account is not permitted to sign in to this application. |
+| `identity_hosted_domain_required` | This application requires an organization-managed account from your sign-in provider. |
+| `sign_up_restricted` | Sign-up for this application is by invitation only. |
+| `sign_up_waitlisted` | Sign-ups are currently waitlisted. |
+| `action_failed` | Sign-in could not be completed. Please try again. |
+
+## `/environment`
+
+```jsonc
+{
+  "display_config": { /* "allowed_domains" only when publishAllowedDomains is in effect */ },
+  "user_settings": {
+    "sign_up": { "mode": "public|restricted|waitlist", "allowlist_only": false },
+    "social": {
+      "oauth_google": { "enabled": true, "strategy": "oauth_google", "name": "Google" },
+      "oauth_x":      { "enabled": false, "strategy": "oauth_x", "name": "X" }
+    },
+    "saml": { "enabled": false },
+    "connections": [ { "id": "conn_google", "strategy": "oauth_google", "label": "Google" } ]
+  },
+  "organization_settings": { "enabled": false }
+}
+```
+
+Allowlist and blocklist contents are **never** published. Hint domains are published only with
+`publishHintDomains: true`. If a Live value fails to resolve, `sign_up.mode` reads `"restricted"`.
+
+## Methods on the returned middleware
+
+* `evaluateAdmission(identity, { isSignUp?, phase? })` runs the whole pipeline on a synthetic
+  `ActionIdentity` and returns `{ allowed: true, matchedAllowlistIdentifier }` or
+  `{ allowed: false, code, message, step }`. It mints, stores and grants nothing. Use it for a boot
+  self-test with at least one positive case, so a misconfiguration cannot lock everyone out silently.
+* `revokeUserSessions(email)` revokes every session of one user through the store's
+  `revokeAllForUser` (implemented by `FileSessionStore` and `InMemorySessionStore`). It throws when
+  there is no store. Cookie-only sessions cannot be revoked server-side.
+
+When an app must evict a user immediately (offboarding, a newly blocked identity), it calls
+`revokeUserSessions` — implemented in:
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/session-store.ts` — `FileSessionStore.revokeAllForUser()` / `InMemorySessionStore.revokeAllForUser()`.
+
+## Tokens and sessions
+
+* Access tokens gain `provider` and `email_verified: true`, taken from the session when it recorded
+  them. Tokens from sessions created before this change lack both: treat absent as "legacy", never
+  as "verified".
+* `BrowserSession` gains `provider` and `providerSub`.
+* The default grants (no `resolveGrants`) are a least-privilege `member` of `org_default`.
+* `resolveGrants` may be async; it is awaited.
+
+## React SDK
+
+* There is no built-in domain list. Buttons come from, in order: the `connections` prop, the
+  deprecated `allowedDomains` prop, the server's `/environment` `user_settings.connections`, then
+  one generic `Continue with Google`. An explicitly empty `connections` shows no buttons.
+* `<SignIn>` / `<SignUp>` take `title`, `subtitle`, `footer` and `connections`; the defaults are
+  neutral (`Sign in`, `Continue with {label}`, no footer).
+* `useSignUp()` sends `mode=sign_up` (an untrusted hint for actions).
+* `connectionIdForDomain(domain)` is exported by both packages with identical output.
+
+## Deprecated options (still supported)
+
+| Legacy | Kept behaviour | Move to |
+|---|---|---|
+| `allowedDomains` | When present (an array is required, or construction throws `OafConfigError`), the legacy gate runs as before; `[]` refuses all; it seeds `hostedDomainHints`, `allowed_domains` publishing and `organizationsEnabled: true` unless those are set explicitly | `restrictions.allowlist` + `allowlistIdentifiers: d.map(x => '*@' + x)` + `hostedDomainHints` |
+| `allowAnyDomain` | Some domain must be present; does **not** lift `requireHostedDomain` | omit the allowlist; `signUpMode: 'public'` |
+| `requireHostedDomain` (top level) | The old hosted-domain gate with the X/SAML exemptions | per-connection `requireHostedDomain` / `allowedHostedDomains` on **each** Google and SAML connection (an app that refused X under the legacy flag configures no X connection) |
+| `xTrustConfirmedEmail`, `samlSatisfiesHostedDomain` | Exempt from the legacy hosted-domain gate only | not needed |
+| `samlTrustAssertedEmailVerified` | No effect (WARN once) | the SAML connection's `trustAssertedEmailVerified` |
+| `google: {}` / `saml: {}` blocks | unchanged | `connections[]` |
+| `RealAuthCore(api, key, allowedDomains)`, `FederatedProvider allowedDomains` | unchanged | `connections` |
+
+Legacy keys are detected by **presence**, so a misspelled or `undefined` value cannot fail open.
+In **mixed mode** (legacy keys plus new ones) the legacy gate runs first, so legacy keys can only
+narrow what the new policy admits. In **legacy-only** mode the behaviour is the old one apart from
+the neutral copy and two additive redirect parameters (`error_reason`, `email_verified`).
+A WARN listing the deprecated keys in use is printed once per process.
+
+## Deviations from the hosted-provider convention
+
+| Deviation | Reason |
+|---|---|
+| In `restricted` mode an allowlist match counts as a standing invitation, and the allowlist applies in every mode. | There is no invitation store; this plays the role of domain auto-invitation. |
+| `applyToSignIn` defaults to true. | No user store, so the library fails closed. |
+| The most specific match wins; the allowlist wins only on an equal-specificity tie. | Lets an app block one person inside an allowlisted domain. |
+| `verdict: 'Allow' \| 'Deny'` is capitalised and the context names follow the actions convention. | Mirrors that convention so app code ports over. |
+| Refusal codes are this library's own (`identity_not_allowlisted`, ...). | The hosted convention's own code is unverified; an alias is added only after it is checked against a primary source. |
+| No REST `/allowlist_identifiers` resource. | Embedded mode has no Backend API; the lists are in-process config (`Live`). |
+| Hygiene flags (sub-address blocking, disposable-domain blocking, dot folding) are deferred. | Two of them need a shipped list of provider domains, which conflicts with shipping no domains. A later phase may accept them as app-supplied lists. |

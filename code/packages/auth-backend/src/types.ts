@@ -7,12 +7,22 @@ export interface TokenClaims {
   sid?: string
   /** Active organization/tenant id (`org_…`). */
   org_id?: string
-  /** Mapped RBAC roles, derived from upstream Google Workspace groups. */
+  /** RBAC roles, as the embedding app's `resolveGrants` mapped them. */
   roles?: string[]
-  /** Mapped `<feature>:<action>` permissions, derived from groups. */
+  /** `<feature>:<action>` permissions, as the embedding app's `resolveGrants` mapped them. */
   permissions?: string[]
-  /** Upstream hosted-domain claim (Google Workspace `hd`). */
+  /** Upstream hosted-domain claim (Google `hd`, or a corroborated SAML attribute). */
   hd?: string
+  /**
+   * Which strategy authenticated the session behind this token. Optional: tokens minted from a
+   * session created before it was recorded lack it. Key app identities on (provider, sub).
+   */
+  provider?: "google" | "x" | "saml"
+  /**
+   * Present (and true) when the session was established after admission required a verified
+   * email. Absent on tokens from older sessions — treat absent as "legacy", never as "verified".
+   */
+  email_verified?: true
   iss?: string
   aud?: string | string[]
   exp?: number

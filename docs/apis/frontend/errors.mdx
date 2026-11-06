@@ -78,7 +78,8 @@ https://app.whitehatengineering.com/sso-callback
 | `error_message` | `errors[0].message` | Optional. If omitted, the SDK fills a sensible default from the code. |
 | `error_long_message` | `errors[0].long_message` | Optional detailed explanation. |
 | `presented_domain` | `meta.presented_domain` | The verified domain the identity actually presented. |
-| `allowed_domains` | `meta.allowed_domains` | Comma-separated list of allowed company domains. |
+| `allowed_domains` | `meta.allowed_domains` | Comma-separated list of allowed domains — sent only when the app publishes them (`environment.publishAllowedDomains`). |
+| `error_reason` | `reason` | A finer reason under a legacy code (e.g. `identity_email_unverified` under `identity_domain_not_allowed`). |
 | `email_verified` | `meta.email_verified` | `"true"` / `"false"`. |
 | `trace_id` | `trace_id` | For support correlation. |
 
@@ -87,15 +88,24 @@ and no `error`.
 
 ## Rejection code catalog
 
-These are the codes the federated, domain-gated sign-in/sign-up flow can return. The SDK ships a
-friendly default `message` for each (used only when the platform did not send its own).
+These are the codes the embedded sign-in/sign-up flow returns (full pipeline:
+[Admission](./admission.mdx)). The SDK ships a neutral default `message` for each (used only when
+the platform did not send its own); apps override the copy with `messages` or an action's
+`errorMessage`.
 
 | `code` | When it happens | HTTP (direct call) |
 |---|---|---|
-| `identity_domain_not_allowed` | The verified email domain is not in the org's allowlist. The canonical "wrong / unauthorized account" rejection (a personal `gmail.com`, a partner domain, a contractor elsewhere). | `403` |
-| `domain_not_allowed` | Alias of the above used by the allowlist/blocklist evaluation order (see [invitations](../backend/invitations.mdx)). Treat identically. | `403` |
-| `identity_email_unverified` | OIDC `email_verified` was `false`, so the identity can't be trusted even if its domain would match. | `403` |
-| `identity_blocked` | The identity matches a blocklist entry — explicitly denied (e.g. a suspended ex-employee). | `403` |
+| `identity_email_unverified` | The provider did not assert the email as verified (Google `email_verified`, X `confirmed_email`, SAML). | `403` |
+| `identity_email_invalid` | The email does not parse strictly (two `@`, a quoted local part, a trailing dot). | `403` |
+| `identity_domain_not_allowed` | The **legacy** domain gate refused (`allowedDomains` / top-level `requireHostedDomain`). Also an unverified email in legacy-only mode, with `error_reason=identity_email_unverified`. | `403` |
+| `identity_hosted_domain_required` | The connection requires a verified hosted domain (`requireHostedDomain` / `allowedHostedDomains`) and the identity has none, or one off the list. | `403` |
+| `identity_blocked` | The identity matches a blocklist identifier (and no more specific allowlist entry). | `403` |
+| `identity_not_allowlisted` | The allowlist is on and the identity matches no entry. | `403` |
+| `sign_up_restricted` | `signUpMode: 'restricted'` and a new identity has neither an allowlist match nor an invitation. | `403` |
+| `sign_up_waitlisted` | `signUpMode: 'waitlist'` and the identity is new. | `403` |
+| `action_denied` | An app admission action denied without a valid code of its own. Apps may also send their own codes. | `403` |
+| `action_failed` | An app action, `users.lookup` or a Live policy value threw, timed out or was invalid. Fails closed. | — |
+| `domain_not_allowed` | Hosted-style alias of `identity_domain_not_allowed`. Treat identically. | `403` |
 | `attempt_expired` | The sign-in/sign-up attempt expired before the handshake completed. | `422` |
 | `sign_in_not_completed` | The handshake returned but no active session was established and no specific error was provided. A catch-all the SDK synthesizes; retry. | — |
 
@@ -129,8 +139,8 @@ The flow is:
 2. On a rejection it **stashes** the `AuthRejection`, invokes your optional `onError` callback
    (for audit/telemetry), and **bounces back to the sign-in screen** — no session is created.
 3. The drop-in **`<SignIn>`** reads the stashed rejection once and renders it: the `message` as the
-   headline, the `longMessage` beneath, and the allowed company domains from `meta` so the user
-   knows exactly which account to use.
+   headline, the `longMessage` beneath, and — only when the server published them — the allowed
+   domains from `meta`.
 
 ### Observe the rejection (audit / telemetry)
 

@@ -21,8 +21,8 @@ import { dirname, join } from "node:path"
  *
  * The default {@link FileSessionStore} writes one JSON file per session under
  *   `<root>/users/<email>/sessions/<sid>.json`
- * which matches the per-user disk layout both consuming web apps already use (`~/T/_mai/users/...`
- * and `~/T/_act3_app/users/...`). No database required.
+ * which matches a simple per-user disk layout (`<data-dir>/users/<email>/...`). No database
+ * required.
  */
 
 /** One organization membership carried on a stored session (structurally identical to OrgMembership). */
@@ -67,6 +67,8 @@ export interface StoredSession {
    */
   providerSub?: string
   provider?: "google" | "saml" | "x"
+  /** True when the session was established after admission required a verified email. */
+  emailVerified?: boolean
   /** When the session was first established (epoch seconds). */
   createdAt: number
   /** Last time a token was minted / the session was touched (epoch seconds) — drives inactivity. */
@@ -100,6 +102,12 @@ export interface SessionStore {
   remove(userKey: string, sid: string): Promise<void> | void
   /** List a user's non-revoked sessions (the "active sessions" surface). */
   list(userKey: string): Promise<StoredSession[]> | StoredSession[]
+  /**
+   * Revoke EVERY session of one user ("sign out everywhere", offboarding, a newly blocked
+   * identity). Optional so third-party stores keep type-checking; the frontend's
+   * `revokeUserSessions()` throws when it is missing. Returns the number of sessions revoked.
+   */
+  revokeAllForUser?(userKey: string): Promise<number> | number
 }
 
 /**
@@ -267,6 +275,17 @@ export class FileSessionStore implements SessionStore {
     )
     return records.filter((r): r is StoredSession => r !== null && !r.revoked)
   }
+
+  /** Tombstone every non-revoked session under `users/<email>/sessions/`. */
+  async revokeAllForUser(userKey: string): Promise<number> {
+    const active = await this.list(userKey)
+    let count = 0
+    for (const s of active) {
+      await this.create({ ...s, revoked: true })
+      count++
+    }
+    return count
+  }
 }
 
 /** In-memory {@link SessionStore} — handy for tests or stateless deployments. Lost on restart. */
@@ -295,13 +314,24 @@ export class InMemorySessionStore implements SessionStore {
       .filter(([k, v]) => k.startsWith(prefix) && !v.revoked)
       .map(([, v]) => ({ ...v }))
   }
+  /** Delete every session of one user (an in-memory store has no lingering cookie to out-live). */
+  revokeAllForUser(userKey: string): number {
+    const prefix = `${userFolderKey(userKey)}${KEY_SEP}`
+    let count = 0
+    for (const [k, v] of [...this.map.entries()]) {
+      if (!k.startsWith(prefix)) continue
+      if (!v.revoked) count++
+      this.map.delete(k)
+    }
+    return count
+  }
 }
 
 /**
  * Load a stable HS256 signing secret from disk, creating one (cryptographically random, 0600) on
- * first run. Use this when no `AUTH_SESSION_SECRET` is provided so the secret is BOTH strong AND
- * stable across restarts — a random per-process secret would silently invalidate every session on
- * every restart. An explicit env secret should still win over this; callers pass it as a fallback.
+ * first run. Use this when the embedding app has no explicitly supplied secret, so the secret is
+ * BOTH strong AND stable across restarts — a random per-process secret would silently invalidate
+ * every session on every restart. A secret the app supplies explicitly should still win over this.
  *
  * NOTE: only adopt this where the signing secret is not also shared with another process (e.g. a
  * frontend dev-core that signs tokens with a known shared default) — in that case keep the shared

@@ -37,4 +37,17 @@ export function hasRole(roles, role) {
 export function domainSlug(domain) {
     return domain.replace(/[^a-zA-Z0-9]+/g, "_");
 }
+/**
+ * Connection id for a domain. Identical to the backend's `connectionIdForDomain`, so a client-built
+ * id always matches the server mapping.
+ */
+export function connectionIdForDomain(domain) {
+    return "conn_" + String(domain).toLowerCase().replace(/[^a-z0-9]/g, "_");
+}
+/** The generic Google button used when an app configures no connections at all. */
+export const GENERIC_GOOGLE_CONNECTION = Object.freeze({
+    id: "conn_google",
+    label: "Google",
+    strategy: "oauth_google",
+});
 //# sourceMappingURL=types.js.map

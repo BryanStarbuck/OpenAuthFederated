@@ -6,6 +6,7 @@ import {
   type Connection,
   domainSlug,
   EMPTY_SNAPSHOT,
+  GENERIC_GOOGLE_CONNECTION,
   hasPermission,
   hasRole,
   type LoadState,
@@ -77,6 +78,11 @@ export abstract class BaseCore implements AuthCore {
   protected setState(next: LoadState): void {
     if (this.state === next) return
     this.state = next
+    for (const listener of this.listeners) listener()
+  }
+
+  /** Wake every subscriber (e.g. after the connection list changed). */
+  protected notify(): void {
     for (const listener of this.listeners) listener()
   }
 
@@ -157,26 +163,33 @@ export abstract class BaseCore implements AuthCore {
 }
 
 /**
- * Map the documented callback rejection codes (`docs/apis/frontend/errors.mdx`) to a friendly
- * fallback message — used only when the platform did not send its own `error_message`. Covers
- * every rejection the federated, domain-gated flow can produce so the user always sees a
- * specific reason rather than a generic "try again."
+ * Map the documented callback rejection codes (`docs/apis/frontend/errors.mdx`) to a neutral
+ * fallback message — used only when the platform did not send its own `error_message`. The copy is
+ * deliberately app-agnostic; an app that wants its own words keys them by `code`.
  */
-function rejectionMessage(code: string, presentedDomain?: string): string {
-  const who = presentedDomain ? ` ('${presentedDomain}')` : ""
+function rejectionMessage(code: string): string {
   switch (code) {
     case "identity_domain_not_allowed":
     case "domain_not_allowed":
-      return `This app is restricted to company accounts. The identity${who} is not part of an allowed company domain.`
-    case "identity_email_unverified":
-      return `That Google account's email is not verified, so sign-in can't continue. Use your company Google Workspace account.`
+    case "identity_not_allowlisted":
     case "identity_blocked":
-      return `This account${who} has been blocked from accessing the app. Contact your administrator.`
+    case "action_denied":
+      return "This account is not permitted to sign in to this application."
+    case "identity_email_unverified":
+      return "Your sign-in provider has not verified this account's email address."
+    case "identity_email_invalid":
+      return "This account's email address cannot be used to sign in."
+    case "identity_hosted_domain_required":
+      return "This application requires an organization-managed account from your sign-in provider."
+    case "sign_up_restricted":
+      return "Sign-up for this application is by invitation only."
+    case "sign_up_waitlisted":
+      return "Sign-ups are currently waitlisted."
     case "attempt_expired":
     case "session_expired":
       return "Your sign-in attempt expired before it completed. Please try again."
+    case "action_failed":
     case "sign_in_not_completed":
-      return "Sign-in could not be completed. Please try again."
     default:
       return "Sign-in could not be completed. Please try again."
   }
@@ -240,9 +253,11 @@ function rejectionFromParams(params: URLSearchParams): AuthRejection | null {
   if (presentedDomain) meta.presentedDomain = presentedDomain
   if (emailVerified !== undefined) meta.emailVerified = emailVerified
 
+  const reason = params.get("error_reason") ?? undefined
   return {
     code,
-    message: params.get("error_message") ?? rejectionMessage(code, presentedDomain),
+    ...(reason ? { reason } : {}),
+    message: params.get("error_message") ?? rejectionMessage(code),
     longMessage: params.get("error_long_message") ?? undefined,
     presentedDomain,
     meta: Object.keys(meta).length ? meta : undefined,
@@ -289,8 +304,14 @@ export class RealAuthCore extends BaseCore {
   private autoRefresh = false
   private refreshTimer: ReturnType<typeof setTimeout> | null = null
 
+  /** True when no connections were configured: /environment may supply them on load(). */
+  private connectionsFromEnvironment: boolean
+  /** The /environment read is attempted once per core. */
+  private environmentLoaded = false
+
   /**
-   * The connection list, built ONCE.
+   * The connection list, built ONCE (replaced at most once, from /environment, when the app
+   * configured none).
    *
    * It is derived entirely from a constructor argument, so it can never change — but `connections()`
    * used to rebuild it with `.map` on every call, and the provider calls it inside a `useMemo` that
@@ -299,20 +320,73 @@ export class RealAuthCore extends BaseCore {
    * and `<SignUpButton>` for a value that had not moved. Frozen so a stable reference cannot become
    * a shared mutable one.
    */
-  private readonly connectionList: Connection[]
+  private connectionList: Connection[]
 
+  /**
+   * @param allowedDomains DEPRECATED (use `connections`): one Google button per domain, as before.
+   * @param connections The app's own buttons. Precedence: `connections`, then `allowedDomains`, then
+   *   the server's `/environment` `user_settings.connections`, then one generic Google button.
+   *   There is NO built-in domain list.
+   */
   constructor(
     private readonly frontendApi: string,
     private readonly publishableKey: string,
-    // Not retained: it is consumed once, below, to build the frozen connection list.
-    allowedDomains: string[],
+    // Not retained: consumed once, below, to build the frozen connection list.
+    allowedDomains?: string[],
+    connections?: Connection[],
   ) {
     super()
-    this.connectionList = Object.freeze(
-      allowedDomains.map((domain) =>
-        Object.freeze({ id: `conn_${domainSlug(domain)}`, domain, label: domain }),
-      ),
-    ) as Connection[]
+    let list: Connection[]
+    if (connections && connections.length > 0) {
+      list = connections.map((c) => Object.freeze({ ...c }))
+      this.connectionsFromEnvironment = false
+    } else if (allowedDomains && allowedDomains.length > 0) {
+      list = allowedDomains.map((domain) =>
+        Object.freeze({ id: `conn_${domainSlug(domain)}`, domain, label: domain, strategy: "oauth_google" as const }),
+      )
+      this.connectionsFromEnvironment = false
+    } else {
+      list = [GENERIC_GOOGLE_CONNECTION]
+      // An explicit EMPTY connections array means "no buttons": never fall back to the server's.
+      this.connectionsFromEnvironment = connections === undefined
+      if (connections !== undefined) list = []
+    }
+    this.connectionList = Object.freeze(list) as Connection[]
+  }
+
+  /** Adopt the server's published connections once, when the app configured none. Best-effort. */
+  private async loadEnvironmentConnections(): Promise<void> {
+    if (!this.connectionsFromEnvironment || this.environmentLoaded) return
+    this.environmentLoaded = true
+    try {
+      const res = await fetch(`${this.base()}/environment`, { headers: this.headers(), credentials: "include" })
+      if (!res.ok) return
+      const env = (await res.json()) as { user_settings?: { connections?: unknown } }
+      const raw = env?.user_settings?.connections
+      if (!Array.isArray(raw) || raw.length === 0) return
+      const parsed: Connection[] = []
+      for (const c of raw) {
+        const rec = c as Record<string, unknown>
+        if (typeof rec?.id !== "string" || typeof rec?.label !== "string") continue
+        const strategy =
+          rec.strategy === "oauth_google" || rec.strategy === "oauth_x" || rec.strategy === "saml"
+            ? rec.strategy
+            : undefined
+        parsed.push(
+          Object.freeze({
+            id: rec.id,
+            label: rec.label,
+            ...(strategy ? { strategy } : {}),
+            ...(typeof rec.domain === "string" ? { domain: rec.domain } : {}),
+          }),
+        )
+      }
+      if (parsed.length === 0) return
+      this.connectionList = Object.freeze(parsed) as Connection[]
+      this.notify()
+    } catch {
+      // The generic Google button stays; /environment is optional.
+    }
   }
 
   private base(): string {
@@ -334,7 +408,7 @@ export class RealAuthCore extends BaseCore {
   private static readonly LOAD_BACKOFF_MS = [400, 800, 1500, 2500, 4000, 5000]
 
   async load(): Promise<void> {
-    await this.loadWithRetry(0)
+    await Promise.all([this.loadWithRetry(0), this.loadEnvironmentConnections()])
   }
 
   private async loadWithRetry(attempt: number): Promise<void> {
@@ -454,15 +528,24 @@ export class RealAuthCore extends BaseCore {
   }
 
   async authenticateWithRedirect(params: AuthenticateWithRedirectParams): Promise<void> {
-    const conn =
-      this.connections().find((c) => c.id === params.connectionId) ?? this.connections()[0]
-    const query = new URLSearchParams({
-      strategy: params.strategy ?? "oauth_google_workspace",
-      connection: conn?.id ?? "",
-      redirect_url: new URL(params.redirectUrl, window.location.origin).toString(),
-      redirect_url_complete: new URL(params.redirectUrlComplete, window.location.origin).toString(),
-    })
-    window.location.assign(`${this.base()}/sign_in/sso?${query.toString()}`)
+    window.location.assign(this.signInUrl(params))
+  }
+
+  /**
+   * The `/sign_in/sso` URL for a redirect sign-in (exposed for tests and custom flows). Strategy:
+   * the explicit param, else the connection's, else `oauth_google` (`oauth_google_workspace` stays
+   * an accepted alias server-side). No `connection` is sent when there is none.
+   */
+  signInUrl(params: AuthenticateWithRedirectParams): string {
+    const wanted = params.connection ?? params.connectionId
+    const conn = (wanted ? this.connections().find((c) => c.id === wanted) : undefined) ?? this.connections()[0]
+    const origin = typeof window === "undefined" ? "http://localhost" : window.location.origin
+    const query = new URLSearchParams({ strategy: params.strategy ?? conn?.strategy ?? "oauth_google" })
+    if (conn?.id) query.set("connection", conn.id)
+    if (params.mode) query.set("mode", params.mode)
+    query.set("redirect_url", new URL(params.redirectUrl, origin).toString())
+    query.set("redirect_url_complete", new URL(params.redirectUrlComplete, origin).toString())
+    return `${this.base()}/sign_in/sso?${query.toString()}`
   }
 
   async completeRedirectCallback(): Promise<RedirectCallbackResult> {

@@ -60,6 +60,7 @@ session flows.
 [Client & sessions](./apis/frontend/client-and-sessions.mdx) ·
 [Sign-in](./apis/frontend/sign-in.mdx) ·
 [Sign-up](./apis/frontend/sign-up.mdx) ·
+[Admission](./apis/frontend/admission.mdx) ·
 [Current user](./apis/frontend/user.mdx)
 
 ### Backend API

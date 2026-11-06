@@ -22,7 +22,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "node test/core-perf.mjs"
+    "test": "node test/core-perf.mjs && node test/connections.mjs"
   },
   "peerDependencies": {
     "react": ">=18",

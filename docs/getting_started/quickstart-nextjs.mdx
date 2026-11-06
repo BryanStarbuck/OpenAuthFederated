@@ -3,7 +3,7 @@ title: Next.js Quickstart
 description: Add OpenAuthFederated to a Next.js App Router app and get a user signed in.
 ---
 
-This quickstart gets you from an empty Next.js App Router project to a working sign-in in a few minutes. You will install `@auth/nextjs`, configure your keys, add middleware, wrap your app in `<AuthProvider>`, and read the signed-in user on the server. The examples target the `whitehatengineering.com` Google Workspace reference deployment.
+This quickstart gets you from an empty Next.js App Router project to a working sign-in in a few minutes. You will install `@auth/nextjs`, configure your keys, add middleware, wrap your app in `<AuthProvider>`, and read the signed-in user on the server. The examples use placeholder `example.com` hostnames; who may sign in is the app's own [admission policy](../apis/frontend/admission.mdx).
 
 > Prerequisites: a Next.js project on the App Router and your publishable + secret keys from the OpenAuthFederated dashboard.
 
@@ -32,8 +32,8 @@ NEXT_PUBLIC_AUTH_PUBLISHABLE_KEY=pk_test_your_publishable_key
 AUTH_SECRET_KEY=sk_test_your_secret_key
 
 # Self-hosted endpoints for your deployment
-NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.whitehatengineering.com
-AUTH_BACKEND_API=https://api.whitehatengineering.com/v1
+NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.example.com
+AUTH_BACKEND_API=https://api.example.com/v1
 
 # Where the UI sends users for sign-in / sign-up
 NEXT_PUBLIC_AUTH_SIGN_IN_URL=/sign-in
@@ -113,7 +113,7 @@ export default async function Page() {
   return (
     <main>
       <h1>Welcome, {user?.firstName ?? userId}</h1>
-      <p>You are signed in via your whitehatengineering.com Google Workspace account.</p>
+      <p>You are signed in.</p>
     </main>
   )
 }
@@ -125,7 +125,7 @@ export default async function Page() {
 npm run dev
 ```
 
-Open the app, click **Sign in**, and complete the Google Workspace flow. Only active employees in the `whitehatengineering.com` Workspace will be allowed through; everyone else is rejected by domain enforcement. After sign-in you will see the `<UserButton />` and your name from `currentUser()`.
+Open the app, click **Sign in**, and complete the Google Workspace flow. Who is allowed through is your app's stated [admission policy](../apis/frontend/admission.mdx) (for example `signUpMode: 'public'` for any verified email, or an allowlist of `*@corp.example`); everyone else is refused before a session exists. After sign-in you will see the `<UserButton />` and your name from `currentUser()`.
 
 ## Next steps
 

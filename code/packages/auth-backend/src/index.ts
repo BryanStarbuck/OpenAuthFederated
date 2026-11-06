@@ -88,6 +88,41 @@ export type {
   ResolvedGrants,
   RateLimitContext,
 } from "./frontend.js"
+// Admission: the app states who may sign in / sign up; the platform executes it. The pure helpers
+// (parseEmail, matchIdentifier, decideRestrictions) let an app apply the same rule per request.
+export {
+  ADMISSION_API_VERSION,
+  OafConfigError,
+  parseEmail,
+  matchIdentifier,
+  decideRestrictions,
+  connectionIdForDomain,
+  DEFAULT_ADMISSION_MESSAGES,
+} from "./admission.js"
+export type {
+  SignUpMode,
+  Live,
+  Restrictions,
+  Identifier,
+  IdentityProvider,
+  AuthenticationMethod,
+  ActionIdentity,
+  UntrustedRequestHints,
+  AdmissionPhase,
+  AuthenticationActionContext,
+  UserRegistrationActionContext,
+  ActionVerdict,
+  AdmissionActions,
+  AdmissionUsers,
+  AdmissionErrorCode,
+  AdmissionMessage,
+  IdentifierSpecificity,
+  IdentifierMatch,
+  MatchIdentifierOptions,
+  RestrictionOutcome,
+  AdmissionResult,
+  AdmissionStep,
+} from "./admission.js"
 // The provider protocols on their own (authorize URL, PKCE, code exchange, verified identity), with
 // no session, cookie or domain policy. createFederatedFrontend() is built on these; an app that keeps
 // its own session model (its own accounts service) calls them directly.

@@ -6,6 +6,7 @@ const node_crypto_1 = require("node:crypto");
 const jose_1 = require("jose");
 const credentials_js_1 = require("./credentials.js");
 const verify_js_1 = require("./verify.js");
+const admission_js_1 = require("./admission.js");
 const oauth_providers_js_1 = require("./oauth-providers.js");
 const saml_js_1 = require("./saml.js");
 const STATE_TTL_SECONDS = 600;
@@ -234,24 +235,23 @@ function constantTimeEqual(a, b) {
 }
 // --- default RBAC mapping ------------------------------------------------------------------
 /**
- * Default grant: a least-privilege authenticated employee — NO write, NO membership-management, NO
- * admin role. Any elevated authority (`*:write`, `org:admin`, `org:sys_memberships:manage`) MUST be
- * granted explicitly by the embedding app via `config.resolveGrants`, mapping Google Workspace
- * groups to roles. This fails closed: forgetting to wire `resolveGrants` yields a read-only user,
- * not an org admin.
+ * Default grant: a least-privilege authenticated member — NO write, NO membership-management, NO
+ * admin role, one neutral default organization. Any elevated authority (`*:write`, `org:admin`,
+ * `org:sys_memberships:manage`) MUST be granted explicitly by the embedding app via
+ * `config.resolveGrants`. This fails closed: forgetting to wire `resolveGrants` yields a read-only
+ * member, not an org admin.
  */
-function defaultResolveGrants(identity) {
-    const domain = identity.hd || emailDomain(identity.email) || "company";
+function defaultResolveGrants(_identity) {
     const membership = {
-        id: "orgmem_internal",
-        organization: { id: "org_internal", name: `${domain} (Internal)`, slug: "internal" },
-        role: "employee",
+        id: "orgmem_default",
+        organization: { id: "org_default", name: "Default", slug: "default" },
+        role: "member",
         permissions: [],
     };
     return {
-        roles: ["employee"],
+        roles: ["member"],
         permissions: [],
-        orgId: "org_internal",
+        orgId: "org_default",
         memberships: [membership],
     };
 }
@@ -283,10 +283,179 @@ function normalizeConnections(config) {
     else {
         saml = config.saml;
     }
-    return { google, saml, x: xConn };
+    return { google, saml, x: xConn, googleConn, samlConn };
+}
+const LEGACY_KEYS = [
+    "allowedDomains",
+    "allowAnyDomain",
+    "requireHostedDomain",
+    "xTrustConfirmedEmail",
+    "samlSatisfiesHostedDomain",
+];
+/** Normalize a domain list (trim + lowercase, drop empties). */
+function normDomains(list) {
+    return list.map((d) => String(d).trim().toLowerCase()).filter(Boolean);
+}
+/**
+ * Construction-time validation of the admission policy. Everything static is checked HERE so a
+ * broken policy fails at boot, loudly, instead of at the first sign-in. Live values are checked on
+ * every resolution instead (a failure there is `action_failed`, never a fallback).
+ */
+function normalizeAdmission(config, googleConn, samlConn, xConn) {
+    const has = (k) => Object.prototype.hasOwnProperty.call(config, k);
+    const deprecatedKeys = LEGACY_KEYS.filter((k) => has(k));
+    const legacy = deprecatedKeys.length > 0;
+    if (legacy) {
+        // Key presence decides legacy mode, so `{ allowedDomains: undefined }` can never fail open: it
+        // throws here, exactly as the old unguarded `.map` crashed at construction.
+        if (!Array.isArray(config.allowedDomains) || config.allowedDomains.some((d) => typeof d !== "string")) {
+            throw new admission_js_1.OafConfigError("createFederatedFrontend: a legacy admission key is present (" +
+                deprecatedKeys.join(", ") +
+                ") so `allowedDomains` must be an array of strings. State the policy with signUpMode / " +
+                "restrictions / allowlistIdentifiers instead, or pass allowedDomains explicitly.");
+        }
+        for (const k of ["allowAnyDomain", "requireHostedDomain", "xTrustConfirmedEmail", "samlSatisfiesHostedDomain"]) {
+            const v = config[k];
+            if (v !== undefined && typeof v !== "boolean") {
+                throw new admission_js_1.OafConfigError(`createFederatedFrontend: \`${k}\` must be a boolean (got ${JSON.stringify(v)})`);
+            }
+        }
+    }
+    if (has("samlTrustAssertedEmailVerified"))
+        deprecatedKeys.push("samlTrustAssertedEmailVerified");
+    const newApi = config.signUpMode !== undefined ||
+        config.restrictions !== undefined ||
+        config.allowlistIdentifiers !== undefined ||
+        config.blocklistIdentifiers !== undefined ||
+        config.actions !== undefined ||
+        config.users !== undefined;
+    const policyStated = config.signUpMode !== undefined || config.restrictions !== undefined || legacy;
+    if (!policyStated && config.requirePolicy === true) {
+        throw new admission_js_1.OafConfigError("createFederatedFrontend: requirePolicy is set but no admission policy is stated. Pass " +
+            "signUpMode (and restrictions / allowlistIdentifiers as needed).");
+    }
+    // Static values are validated now; Live (function) values on every resolution.
+    if (config.signUpMode !== undefined && typeof config.signUpMode !== "function") {
+        const err = (0, admission_js_1.invalidSignUpMode)(config.signUpMode);
+        if (err)
+            throw new admission_js_1.OafConfigError(`createFederatedFrontend: ${err}`);
+    }
+    if (config.restrictions !== undefined && typeof config.restrictions !== "function") {
+        const err = (0, admission_js_1.invalidRestrictions)(config.restrictions);
+        if (err)
+            throw new admission_js_1.OafConfigError(`createFederatedFrontend: ${err}`);
+    }
+    for (const [name, v] of [
+        ["allowlistIdentifiers", config.allowlistIdentifiers],
+        ["blocklistIdentifiers", config.blocklistIdentifiers],
+    ]) {
+        if (v !== undefined && typeof v !== "function") {
+            const err = (0, admission_js_1.invalidIdentifierList)(v, name);
+            if (err)
+                throw new admission_js_1.OafConfigError(`createFederatedFrontend: ${err}`);
+        }
+    }
+    // A list without its switch is IGNORED by decideRestrictions, which fails OPEN for a blocklist (the
+    // person it names still gets in) and for an allowlist on a public install (anyone gets in). An app
+    // author who writes the list and forgets the flag believes the opposite, so a static list that
+    // would be ignored is a construction error. A Live list or Live restrictions cannot be judged here;
+    // resolvePolicy() warns once per process for those instead.
+    if (typeof config.restrictions !== "function") {
+        const r = (config.restrictions ?? {});
+        for (const [name, v, flag] of [
+            ["blocklistIdentifiers", config.blocklistIdentifiers, "blocklist"],
+            ["allowlistIdentifiers", config.allowlistIdentifiers, "allowlist"],
+        ]) {
+            if (Array.isArray(v) && v.length > 0 && r[flag] !== true) {
+                throw new admission_js_1.OafConfigError(`createFederatedFrontend: \`${name}\` has ${v.length} entr${v.length === 1 ? "y" : "ies"} but ` +
+                    `restrictions.${flag} is not true, so the list would be silently ignored. Set ` +
+                    `restrictions.${flag}: true to enforce it, or pass an empty list.`);
+            }
+        }
+    }
+    if (config.users !== undefined && (typeof config.users !== "object" || typeof config.users?.lookup !== "function")) {
+        throw new admission_js_1.OafConfigError("createFederatedFrontend: users must be { lookup(identity) }");
+    }
+    if (config.signUpMode === "waitlist" && !config.users) {
+        throw new admission_js_1.OafConfigError("createFederatedFrontend: signUpMode 'waitlist' needs `users` (a lookup), or it would refuse " +
+            "every returning user too.");
+    }
+    if (config.signUpMode === "restricted" &&
+        config.restrictions !== undefined &&
+        typeof config.restrictions !== "function" &&
+        config.restrictions.applyToSignIn === false &&
+        !config.users) {
+        throw new admission_js_1.OafConfigError("createFederatedFrontend: signUpMode 'restricted' with restrictions.applyToSignIn false needs " +
+            "`users`: without a lookup every sign-in is treated as a sign-up.");
+    }
+    const actions = config.actions;
+    if (actions !== undefined) {
+        if (typeof actions !== "object" || actions === null) {
+            throw new admission_js_1.OafConfigError("createFederatedFrontend: actions must be an object");
+        }
+        for (const k of ["authentication", "userRegistration"]) {
+            if (actions[k] !== undefined && typeof actions[k] !== "function") {
+                throw new admission_js_1.OafConfigError(`createFederatedFrontend: actions.${k} must be a function`);
+            }
+        }
+        if (actions.timeoutMs !== undefined &&
+            !(typeof actions.timeoutMs === "number" && Number.isInteger(actions.timeoutMs) && actions.timeoutMs > 0)) {
+            throw new admission_js_1.OafConfigError("createFederatedFrontend: actions.timeoutMs must be a positive integer");
+        }
+        for (const k of ["authentication", "userRegistration"]) {
+            const v = actions.onError?.[k];
+            if (v !== undefined && v !== "deny" && v !== "allow") {
+                throw new admission_js_1.OafConfigError(`createFederatedFrontend: actions.onError.${k} must be 'deny' or 'allow'`);
+            }
+        }
+    }
+    const listOrUndefined = (v, name) => {
+        if (v === undefined)
+            return undefined;
+        const err = (0, admission_js_1.invalidIdentifierList)(v, name);
+        if (err)
+            throw new admission_js_1.OafConfigError(`createFederatedFrontend: ${err}`);
+        return normDomains(v);
+    };
+    const legacyDomains = legacy ? normDomains(config.allowedDomains) : [];
+    const hints = listOrUndefined(googleConn?.hostedDomainHints, "hostedDomainHints");
+    const env = config.environment ?? {};
+    return {
+        legacy,
+        legacyOnly: legacy && !newApi,
+        deprecatedKeys,
+        signUpMode: config.signUpMode,
+        restrictions: config.restrictions,
+        allowlist: config.allowlistIdentifiers,
+        blocklist: config.blocklistIdentifiers,
+        actions,
+        users: config.users,
+        messages: config.messages ?? {},
+        timeoutMs: actions?.timeoutMs ?? 5000,
+        onError: {
+            authentication: actions?.onError?.authentication ?? "deny",
+            userRegistration: actions?.onError?.userRegistration ?? "deny",
+        },
+        publishAllowedDomains: typeof env.publishAllowedDomains === "boolean" ? env.publishAllowedDomains : legacy,
+        organizationsEnabled: typeof env.organizationsEnabled === "boolean" ? env.organizationsEnabled : legacy,
+        google: {
+            requireHostedDomain: googleConn?.requireHostedDomain === true,
+            allowedHostedDomains: listOrUndefined(googleConn?.allowedHostedDomains, "google allowedHostedDomains"),
+            hostedDomainHints: hints ?? (legacy ? legacyDomains : []),
+            publishHintDomains: googleConn?.publishHintDomains === true,
+            label: googleConn?.label || "Google",
+        },
+        saml: {
+            requireHostedDomain: samlConn?.requireHostedDomain === true,
+            allowedHostedDomains: listOrUndefined(samlConn?.allowedHostedDomains, "saml allowedHostedDomains"),
+            label: samlConn?.label || "SSO",
+        },
+        xLabel: xConn?.label || "X",
+    };
 }
 function normalizeConfig(config) {
-    const { google: googleCfg, saml: samlCfg, x: xCfg } = normalizeConnections(config);
+    const { google: googleCfg, saml: samlCfg, x: xCfg, googleConn, samlConn } = normalizeConnections(config);
+    const admission = normalizeAdmission(config, googleConn, samlConn, xCfg);
     // Resolve the Google OAuth credentials the library was given (explicit config only — the library
     // reads no environment variable and no app-specific file; the embedding app sources the value and
     // passes it in). We capture a secret-free remediation message rather than throwing,
@@ -320,7 +489,9 @@ function normalizeConfig(config) {
         googleConfigured,
         googleRemediation,
         saml: samlCfg?.enabled ? samlCfg : undefined,
-        allowedDomains: config.allowedDomains.map((d) => d.trim().toLowerCase()).filter(Boolean),
+        // Only the LEGACY gate reads this; the unguarded `.map` that used to sit here crashed on a
+        // missing list, and normalizeAdmission now throws a named OafConfigError for that case instead.
+        allowedDomains: admission.legacy ? normDomains(config.allowedDomains) : [],
         sessionSecret: config.sessionSecret,
         issuer: config.issuer,
         // All cookies share one prefix so two apps on the same host (cookies aren't port-scoped)
@@ -367,6 +538,7 @@ function normalizeConfig(config) {
             : 20_000,
         rateLimit: config.rateLimit,
         resolveGrants: config.resolveGrants ?? defaultResolveGrants,
+        admission,
         // Every message is scrubbed of control characters on the way out — see sanitizeLogMessage.
         // Wrapping the sink (rather than each call site) is what makes it hold for call sites added
         // later, and it applies to a host-supplied logger too, which is where the messages actually go.
@@ -385,9 +557,9 @@ function normalizeConfig(config) {
  * Create the embedded Frontend API middleware. Mount it where the SDK's `frontendApi` + `/v1`
  * resolves to — e.g. `app.use('/api/v1', createFederatedFrontend(cfg))` with `frontendApi: '/api'`.
  *
- * Pass connections the Federated-idiomatic way:
+ * Pass connections the Federated-idiomatic way, and state the admission policy:
  *   `createFederatedFrontend({ connections: [{ strategy: 'oauth_google', clientId, clientSecret,
- *     redirectUri }], allowedDomains, sessionSecret })`
+ *     redirectUri }], signUpMode: 'public', requirePolicy: true, sessionSecret })`
  */
 /**
  * The log line and the human's sentence for a failed provider exchange. The sentences are the ones
@@ -488,6 +660,346 @@ function createFederatedFrontend(config) {
         // folding this block into the message would flatten it for no benefit.
         cfg.log("warn", "Google OAuth client is not configured; Google sign-in routes will return 503 until it is.", { remediation: cfg.googleRemediation });
     }
+    // --- admission engine ("the platform executes, the app decides"; see admission.ts) -----------
+    //
+    // The pipeline below is the ONE place a sign-in, a reverify and evaluateAdmission() are decided.
+    // It stops at the first refusal. Legacy-only configs (allowedDomains & co., no new keys) run only
+    // the email check and the legacy gate, which keeps them byte-compatible apart from the neutral
+    // copy and two additive redirect parameters (error_reason, email_verified).
+    const adm = cfg.admission;
+    if (adm.deprecatedKeys.length > 0) {
+        (0, admission_js_1.warnOncePerProcess)(`oaf-deprecated:${adm.deprecatedKeys.join(",")}`, () => cfg.log("warn", `deprecated admission option(s) in use: ${adm.deprecatedKeys.join(", ")}. They keep working; ` +
+            "see docs/apis/frontend/admission.mdx for the replacements (signUpMode, restrictions, " +
+            "allowlistIdentifiers, per-connection requireHostedDomain / allowedHostedDomains / hostedDomainHints)."));
+    }
+    if (adm.deprecatedKeys.includes("samlTrustAssertedEmailVerified")) {
+        (0, admission_js_1.warnOncePerProcess)("oaf-saml-trust-dead", () => cfg.log("warn", "samlTrustAssertedEmailVerified has no effect; set trustAssertedEmailVerified on the SAML connection instead."));
+    }
+    if (!adm.legacy && adm.signUpMode === undefined && adm.restrictions === undefined) {
+        (0, admission_js_1.warnOncePerProcess)("oaf-no-policy", () => cfg.log("warn", "no admission policy stated; defaulting to signUpMode 'public' (any verified email). Pass " +
+            "signUpMode (and requirePolicy: true) to make this explicit."));
+    }
+    /** One-line, content-free description of the effective policy for the boot log. */
+    function describePolicy() {
+        const live = (v) => typeof v === "function";
+        const mode = live(adm.signUpMode)
+            ? "live"
+            : adm.signUpMode ?? (adm.legacyOnly ? "legacy-gate" : "public");
+        const r = adm.restrictions;
+        const flag = (k) => (live(r) ? "live" : r?.[k] === true ? "on" : "off");
+        const size = (v) => (live(v) ? "live" : Array.isArray(v) ? String(v.length) : "0");
+        const conn = (c) => c.allowedHostedDomains !== undefined
+            ? `hd in ${c.allowedHostedDomains.length} domain(s)`
+            : c.requireHostedDomain
+                ? "hd required"
+                : "no hd requirement";
+        return (`policy: mode=${mode}, legacy=${adm.legacy ? (adm.legacyOnly ? "only" : "mixed") : "no"}, ` +
+            `allowlist=${flag("allowlist")} (${size(adm.allowlist)} identifiers), ` +
+            `blocklist=${flag("blocklist")} (${size(adm.blocklist)} identifiers), ` +
+            `actions=${adm.actions ? Object.keys(adm.actions).filter((k) => k === "authentication" || k === "userRegistration").join("+") || "none" : "none"}, ` +
+            `users=${adm.users ? "lookup" : "none"}, google: ${conn(adm.google)}, saml: ${conn(adm.saml)}`);
+    }
+    cfg.log("info", describePolicy());
+    function messageFor(code) {
+        return (adm.messages[code] ??
+            admission_js_1.DEFAULT_ADMISSION_MESSAGES[code] ??
+            admission_js_1.DEFAULT_ADMISSION_MESSAGES.action_denied);
+    }
+    function refuse(code, step, o = {}) {
+        const copy = messageFor(o.messageCode ?? code);
+        return {
+            ok: false,
+            code,
+            step,
+            message: o.message ?? copy.message,
+            longMessage: o.longMessage ?? (o.message ? undefined : copy.longMessage),
+            params: o.params ?? {},
+        };
+    }
+    /** Step 0: resolve every Live value once, under the timeout, and validate it. Never a fallback. */
+    async function resolvePolicy() {
+        try {
+            const ms = adm.timeoutMs;
+            const [mode, restrictions, allowlist, blocklist] = await Promise.all([
+                (0, admission_js_1.resolveLive)("signUpMode", adm.signUpMode, ms),
+                (0, admission_js_1.resolveLive)("restrictions", adm.restrictions, ms),
+                (0, admission_js_1.resolveLive)("allowlistIdentifiers", adm.allowlist, ms),
+                (0, admission_js_1.resolveLive)("blocklistIdentifiers", adm.blocklist, ms),
+            ]);
+            // A STATIC absent value takes its default; a LIVE resolver that returns undefined is invalid.
+            const m = mode === undefined && typeof adm.signUpMode !== "function" ? "public" : mode;
+            const modeErr = (0, admission_js_1.invalidSignUpMode)(m);
+            if (modeErr)
+                return { error: modeErr };
+            const r = restrictions === undefined && typeof adm.restrictions !== "function" ? {} : restrictions;
+            const rErr = (0, admission_js_1.invalidRestrictions)(r);
+            if (rErr)
+                return { error: rErr };
+            const a = allowlist === undefined && typeof adm.allowlist !== "function" ? [] : allowlist;
+            const aErr = (0, admission_js_1.invalidIdentifierList)(a, "allowlistIdentifiers");
+            if (aErr)
+                return { error: aErr };
+            const b = blocklist === undefined && typeof adm.blocklist !== "function" ? [] : blocklist;
+            const bErr = (0, admission_js_1.invalidIdentifierList)(b, "blocklistIdentifiers");
+            if (bErr)
+                return { error: bErr };
+            const policy = {
+                mode: m,
+                restrictions: r,
+                allowlist: a,
+                blocklist: b,
+            };
+            // A list without its switch is ignored by decideRestrictions (fail open for a blocklist). Static
+            // values were refused at construction; a Live value can only be reported, once per process.
+            for (const [name, list, flag] of [
+                ["blocklistIdentifiers", policy.blocklist, "blocklist"],
+                ["allowlistIdentifiers", policy.allowlist, "allowlist"],
+            ]) {
+                if (list.length > 0 && policy.restrictions[flag] !== true) {
+                    (0, admission_js_1.warnOncePerProcess)(`oaf-list-without-flag:${flag}`, () => cfg.log("warn", `admission: ${name} resolved to ${list.length} entr${list.length === 1 ? "y" : "ies"} but ` +
+                        `restrictions.${flag} is not true, so the list is IGNORED. Set restrictions.${flag}: true ` +
+                        `to enforce it, or resolve the list to [] when it is not meant to apply.`));
+                }
+            }
+            if (policy.mode === "waitlist" && !adm.users)
+                return { error: "signUpMode 'waitlist' needs `users`" };
+            if (policy.mode === "restricted" && policy.restrictions.applyToSignIn === false && !adm.users) {
+                return { error: "signUpMode 'restricted' with applyToSignIn false needs `users`" };
+            }
+            return policy;
+        }
+        catch (err) {
+            return { error: err instanceof Error ? err.message : String(err) };
+        }
+    }
+    const AUTH_METHOD = {
+        google: "GoogleOAuth",
+        x: "XOAuth",
+        saml: "SSO",
+    };
+    /**
+     * The LEGACY gate (the old G2 + G3), extracted verbatim apart from the neutral copy. Runs whenever
+     * a legacy key is present; in mixed mode it runs before the new steps, so legacy keys can only
+     * ever NARROW what the new policy admits.
+     */
+    function legacyDomainGate(identity) {
+        // When the deployment is Workspace-gated (requireHostedDomain), the authoritative signal is the
+        // `hd` (Workspace-membership) claim — NOT the email domain. An identity that merely ends in an
+        // allowlisted domain but is not a Workspace member (no hd) is rejected. When not gated, fall
+        // back to the email domain for back-compat.
+        const provider = identity.provider ?? "google";
+        const hd = identity.hd?.toLowerCase();
+        // X HAS NO HOSTED-DOMAIN CLAIM AND NEVER WILL. `confirmed_email` says X delivered mail to that
+        // address; it asserts nothing about membership of an organization, which is the whole of what
+        // requireHostedDomain is for. So an X identity is admissible under that setting only when the
+        // operator has explicitly said the confirmed email is enough (xTrustConfirmedEmail).
+        const xExempt = provider === "x" && cfg.xTrustConfirmedEmail;
+        // SAML's counterpart to the X exemption. A SAML IdP that DOES assert a hosted-domain attribute
+        // needs nothing here — `hd` is populated and the check passes on its own merits.
+        const samlExempt = provider === "saml" && cfg.samlSatisfiesHostedDomain;
+        const hdExempt = xExempt || samlExempt;
+        if (cfg.requireHostedDomain && !hd && !hdExempt) {
+            cfg.log("warn", `Rejecting ${provider} sign-in: hosted-domain (hd) claim required but absent`);
+            return refuse("identity_domain_not_allowed", "legacy_gate", {
+                messageCode: "identity_hosted_domain_required",
+                params: { presented_domain: "", error_reason: "identity_hosted_domain_required" },
+            });
+        }
+        // The allowlist still runs for every strategy — the exemptions above are from the `hd`
+        // requirement only, never from allowedDomains.
+        //
+        // SAML IS EVALUATED ON ITS EMAIL DOMAIN, NEVER ON THE ASSERTED `hd`. A SAML `hd` is just an
+        // attribute whose value the IdP chose; letting it stand in for the email domain here would
+        // mean an assertion for `attacker@evil.example` carrying `hd: company.example` satisfies a
+        // `company.example` allowlist.
+        const presentedDomain = (provider === "saml"
+            ? emailDomain(identity.email)
+            : cfg.requireHostedDomain && !hdExempt
+                ? hd
+                : hd || emailDomain(identity.email)) ?? "";
+        // allowAnyDomain: any VERIFIED email (checked before this gate). The domain only has to exist.
+        const domainAdmitted = cfg.allowAnyDomain
+            ? Boolean(presentedDomain)
+            : Boolean(presentedDomain) && cfg.allowedDomains.includes(presentedDomain);
+        if (!domainAdmitted) {
+            cfg.log("warn", `Rejecting sign-in from non-allowed domain: ${presentedDomain || "unknown"}`);
+            return refuse("identity_domain_not_allowed", "legacy_gate", {
+                params: { presented_domain: presentedDomain },
+            });
+        }
+        return null;
+    }
+    async function runAction(kind, fn, ctx, step, traceId) {
+        let verdict;
+        try {
+            const raw = await (0, admission_js_1.withTimeout)(`actions.${kind}`, adm.timeoutMs, () => fn(ctx));
+            verdict = (0, admission_js_1.normalizeVerdict)(raw);
+            if (!verdict)
+                throw new Error(`actions.${kind} returned no valid { verdict: 'Allow' | 'Deny' }`);
+        }
+        catch (err) {
+            const mode = adm.onError[kind];
+            cfg.log("error", `actions.${kind} failed (trace ${traceId}); onError=${mode}`, err instanceof Error ? err.message : err);
+            return mode === "allow" ? null : refuse("action_failed", step);
+        }
+        if (verdict.allow)
+            return null;
+        cfg.log("warn", `Sign-in denied by actions.${kind} (trace ${traceId}, code ${verdict.code})`);
+        return refuse(verdict.code, step, { message: verdict.message, longMessage: verdict.longMessage });
+    }
+    async function admit(identity, o) {
+        const provider = identity.provider ?? "google";
+        const legacyOnly = adm.legacyOnly;
+        // 0. Resolve the app's Live policy once.
+        let policy = { mode: "public", restrictions: {}, allowlist: [], blocklist: [] };
+        if (!legacyOnly) {
+            const p = await resolvePolicy();
+            if ("error" in p) {
+                cfg.log("error", `admission policy could not be resolved; refusing (trace ${o.traceId}): ${p.error}`);
+                return refuse("action_failed", "resolve_policy");
+            }
+            policy = p;
+        }
+        // 1. A present, VERIFIED email (Google email_verified, X confirmed_email, SAML trusted/asserted).
+        if (!identity.email || !identity.emailVerified) {
+            cfg.log("warn", `Rejecting ${provider} sign-in: ` +
+                (identity.email ? "the provider did not assert the email as verified" : "the provider returned no email address"));
+            if (legacyOnly) {
+                return refuse("identity_domain_not_allowed", "email", {
+                    messageCode: "identity_email_unverified",
+                    params: { presented_domain: "", error_reason: "identity_email_unverified", email_verified: "false" },
+                });
+            }
+            return refuse("identity_email_unverified", "email", { params: { email_verified: "false" } });
+        }
+        const parsed = (0, admission_js_1.parseEmail)(identity.email);
+        if (!parsed && !legacyOnly) {
+            cfg.log("warn", `Rejecting ${provider} sign-in: the email address does not parse`);
+            return refuse("identity_email_invalid", "email");
+        }
+        // Reverify: the presented identity must be the one the session belongs to.
+        if (o.binding && !o.binding(identity))
+            return refuse("sign_in_not_completed", "reverify_binding");
+        // 2. The legacy gate (only when a legacy key is present).
+        if (adm.legacy) {
+            const g = legacyDomainGate(identity);
+            if (g)
+                return g;
+        }
+        // 3. Requirements of the connection that produced the identity. X never carries an hd.
+        const hd = provider === "x" ? undefined : identity.hd?.trim().toLowerCase() || undefined;
+        const req = provider === "google" ? adm.google : provider === "saml" ? adm.saml : undefined;
+        if (req && (req.requireHostedDomain || req.allowedHostedDomains !== undefined)) {
+            if (!hd || (req.allowedHostedDomains !== undefined && !req.allowedHostedDomains.includes(hd))) {
+                cfg.log("warn", `Rejecting ${provider} sign-in: the connection requires a verified hosted domain${hd ? " on its list" : ""}`);
+                return refuse("identity_hosted_domain_required", "connection");
+            }
+        }
+        if (legacyOnly || !parsed)
+            return { ok: true, matchedAllowlistIdentifier: null };
+        const actionIdentity = Object.freeze({
+            provider,
+            sub: identity.sub,
+            email: `${parsed.local}@${parsed.domain}`,
+            emailVerified: true,
+            ...(hd ? { hd } : {}),
+            ...(identity.name ? { name: identity.name } : {}),
+            ...(identity.username ? { username: identity.username } : {}),
+        });
+        const untrusted = Object.freeze({ ...o.untrusted });
+        // 4. Returning or new? Only the app can say (OpenAuthFederated has no user store).
+        let isSignUp = null;
+        let invited = false;
+        if (o.phase === "reverify")
+            isSignUp = false;
+        else if (o.isSignUp !== undefined)
+            isSignUp = o.isSignUp;
+        else if (adm.users) {
+            try {
+                const users = adm.users;
+                const found = await (0, admission_js_1.withTimeout)("users.lookup", adm.timeoutMs, () => users.lookup(actionIdentity));
+                if (!found || typeof found !== "object" || typeof found.exists !== "boolean") {
+                    throw new Error("users.lookup must resolve to { exists: boolean, invited?: boolean }");
+                }
+                isSignUp = !found.exists;
+                invited = found.invited === true;
+            }
+            catch (err) {
+                cfg.log("error", `users.lookup failed; refusing (trace ${o.traceId})`, err instanceof Error ? err.message : err);
+                return refuse("action_failed", "users_lookup");
+            }
+        }
+        // 5. Allowlist / blocklist (the more specific match wins; equal specificity goes to the allowlist).
+        const outcome = (0, admission_js_1.decideRestrictions)(actionIdentity.email, policy.restrictions, policy.allowlist, policy.blocklist, {
+            warn: (m) => cfg.log("warn", m),
+        });
+        const applyToSignIn = policy.restrictions.applyToSignIn !== false;
+        if (isSignUp !== false || applyToSignIn) {
+            if (outcome.outcome === "blocked") {
+                cfg.log("warn", `Rejecting ${provider} sign-in: identity is on the blocklist (trace ${o.traceId})`);
+                return refuse("identity_blocked", "restrictions");
+            }
+            if (outcome.outcome === "not_allowlisted") {
+                cfg.log("warn", `Rejecting ${provider} sign-in: identity is not on the allowlist (trace ${o.traceId})`);
+                return refuse("identity_not_allowlisted", "restrictions");
+            }
+        }
+        const matched = outcome.outcome === "allow" ? (outcome.matched?.identifier ?? null) : null;
+        // 6. Sign-up mode, for a new identity or an unknown one (null fails closed).
+        if (o.phase === "sign_in" && isSignUp !== false) {
+            if (policy.mode === "waitlist")
+                return refuse("sign_up_waitlisted", "sign_up_mode");
+            if (policy.mode === "restricted" && !matched && !invited)
+                return refuse("sign_up_restricted", "sign_up_mode");
+        }
+        const base = {
+            id: o.traceId,
+            identity: actionIdentity,
+            authenticationMethod: AUTH_METHOD[provider],
+            signUpMode: policy.mode,
+            matchedAllowlistIdentifier: matched,
+            untrusted,
+        };
+        // 7. The app's registration action, for a new identity only.
+        if (o.phase === "sign_in" && isSignUp === true && adm.actions?.userRegistration) {
+            const denied = await runAction("userRegistration", adm.actions.userRegistration, Object.freeze({ ...base, object: "user_registration_action_context", phase: "sign_in", isSignUp: true, invited }), "user_registration_action", o.traceId);
+            if (denied)
+                return denied;
+        }
+        // 8. The app's authentication action, on every attempt.
+        if (adm.actions?.authentication) {
+            const denied = await runAction("authentication", adm.actions.authentication, Object.freeze({ ...base, object: "authentication_action_context", phase: o.phase, isSignUp }), "authentication_action", o.traceId);
+            if (denied)
+                return denied;
+        }
+        return { ok: true, matchedAllowlistIdentifier: matched };
+    }
+    /** Codes whose refusal may name the (legacy) allowed domains, when publishing them is in effect. */
+    const DOMAIN_CODES = new Set(["identity_domain_not_allowed", "identity_not_allowlisted"]);
+    function refusalParams(d, traceId, redirectUrlComplete) {
+        const params = { error: d.code, error_message: d.message };
+        if (d.longMessage)
+            params.error_long_message = d.longMessage;
+        Object.assign(params, d.params);
+        if (adm.publishAllowedDomains && DOMAIN_CODES.has(d.code) && cfg.allowedDomains.length > 0) {
+            params.allowed_domains = cfg.allowedDomains.join(",");
+        }
+        params.redirect_url_complete = redirectUrlComplete;
+        params.trace_id = traceId;
+        return params;
+    }
+    function newTraceId() {
+        return `trc_${base64url((0, node_crypto_1.randomBytes)(12))}`;
+    }
+    function untrustedFrom(req, saved) {
+        const ua = req?.headers?.["user-agent"];
+        return {
+            ...(saved?.connectionId ? { connectionId: String(saved.connectionId).slice(0, 200) } : {}),
+            requestedMode: saved?.mode === "sign_up" ? "sign_up" : "sign_in",
+            ...(req?.socket?.remoteAddress ? { ipAddress: req.socket.remoteAddress } : {}),
+            ...(typeof ua === "string" ? { userAgent: ua.slice(0, 512) } : {}),
+        };
+    }
     async function signSession(record) {
         let jwt = new jose_1.SignJWT({
             email: record.email,
@@ -504,6 +1016,7 @@ function createFederatedFrontend(config) {
             gra: record.grantsResolvedAt,
             psub: record.providerSub,
             prv: record.provider,
+            ev: record.emailVerified,
         })
             .setProtectedHeader({ alg: "HS256" })
             .setSubject(record.userId)
@@ -532,6 +1045,7 @@ function createFederatedFrontend(config) {
             grantsResolvedAt: s.grantsResolvedAt ?? s.lastVerifiedAt ?? Math.floor(Date.now() / 1000),
             providerSub: s.providerSub,
             provider: s.provider,
+            emailVerified: s.emailVerified,
         };
     }
     async function readSession(req) {
@@ -566,6 +1080,7 @@ function createFederatedFrontend(config) {
             grantsResolvedAt: payload.gra ?? payload.lvc ?? Math.floor(Date.now() / 1000),
             providerSub: payload.psub,
             provider: payload.prv,
+            emailVerified: payload.ev === true ? true : undefined,
         };
         // Stateless mode (no store): the signed cookie IS the whole session — return it as before.
         if (!cfg.sessionStore || !cookieRec.sid)
@@ -672,6 +1187,11 @@ function createFederatedFrontend(config) {
             roles: g.roles,
             permissions: g.permissions,
             hd: session.hd,
+            // Additive claims, carried only when the session recorded them (sessions minted before the
+            // admission redesign lack `ev`, so their tokens lack email_verified — an app treats absent as
+            // "legacy", never as "verified").
+            ...(session.provider ? { provider: session.provider } : {}),
+            ...(session.emailVerified === true ? { email_verified: true } : {}),
         })
             .setProtectedHeader({ alg: "HS256" })
             .setSubject(session.userId)
@@ -794,6 +1314,10 @@ function createFederatedFrontend(config) {
             return null;
         }
     }
+    /** The client's ?mode= — UNTRUSTED, carried to the callback only as a hint for app actions. */
+    function requestedModeOf(q) {
+        return q.get("mode") === "sign_up" ? "sign_up" : "sign_in";
+    }
     // --- endpoint handlers ---------------------------------------------------------------------
     /**
      * Fail-closed guard for the Google OIDC routes. When the OAuth client id/secret are missing, do
@@ -856,6 +1380,8 @@ function createFederatedFrontend(config) {
             redirectUrl,
             redirectUrlComplete,
             provider: "x",
+            mode: requestedModeOf(q),
+            ...(q.get("connection") ? { connectionId: String(q.get("connection")).slice(0, 200) } : {}),
         });
         setCookie(res, cfg.stateCookieName, stateJwt, {
             maxAgeSeconds: STATE_TTL_SECONDS,
@@ -924,7 +1450,7 @@ function createFederatedFrontend(config) {
                 redirect_url_complete: redirectUrlComplete,
             });
         }
-        return finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete);
+        return finishSignIn(req, res, identity, fallbackRedirect, redirectUrlComplete, untrustedFrom(req, saved));
     }
     async function handleSsoStart(req, res) {
         const q = queryOf(req);
@@ -932,13 +1458,17 @@ function createFederatedFrontend(config) {
         const redirectUrlComplete = q.get("redirect_url_complete") || "/";
         // Step-up reverify: the user already has a session but must prove fresh presence at the IdP.
         const reverify = q.get("reverify") === "1";
-        // The SDK passes connection=conn_<domain_slug>; the explicit hostedDomain config wins.
-        const connection = q.get("connection") ?? "";
-        const domainFromConn = connection.startsWith("conn_")
+        // The SDK may pass connection=conn_<domain_slug>. The client only PICKS among the hint domains
+        // the app configured (hostedDomainHints; legacy default: allowedDomains) — an unknown or empty
+        // connection sends no `hd`. The explicit, fixed hostedDomain config wins over any pick.
+        const connection = (q.get("connection") ?? "").toLowerCase();
+        const legacySlugDomain = connection.startsWith("conn_")
             ? connection.slice("conn_".length).replace(/_/g, ".")
             : undefined;
-        const hostedDomain = cfg.google.hostedDomain ??
-            (domainFromConn && cfg.allowedDomains.includes(domainFromConn) ? domainFromConn : undefined);
+        const hintDomain = connection
+            ? cfg.admission.google.hostedDomainHints.find((d) => (0, admission_js_1.connectionIdForDomain)(d) === connection || d === legacySlugDomain)
+            : undefined;
+        const hostedDomain = cfg.google.hostedDomain ?? hintDomain;
         const state = (0, oauth_providers_js_1.randomUrlToken)();
         const nonce = (0, oauth_providers_js_1.randomUrlToken)();
         const { codeVerifier, codeChallenge } = (0, oauth_providers_js_1.createPkcePair)();
@@ -951,6 +1481,8 @@ function createFederatedFrontend(config) {
             domain: hostedDomain,
             reverify,
             provider: "google",
+            mode: requestedModeOf(q),
+            ...(connection ? { connectionId: connection.slice(0, 200) } : {}),
         });
         setCookie(res, cfg.stateCookieName, stateJwt, {
             maxAgeSeconds: STATE_TTL_SECONDS,
@@ -1071,125 +1603,101 @@ function createFederatedFrontend(config) {
             });
         }
         // Step-up reverify: the user proved fresh presence at the IdP. Re-stamp the EXISTING session's
-        // lastVerifiedAt only — do not mint a new session — and bounce back to where they were.
+        // lastVerifiedAt only — do not mint a new session — after checking that the identity is the
+        // session's own and that it is still admitted.
         if (saved.reverify) {
-            const session = await readSession(req);
-            if (session?.sid) {
-                session.lastVerifiedAt = Math.floor(Date.now() / 1000);
-                const sessionJwt = await signSession(session);
-                setCookie(res, cfg.sessionCookieName, sessionJwt, {
-                    maxAgeSeconds: cfg.sessionTtlSeconds,
-                    secure: cfg.cookieSecure,
-                    sameSite: cfg.sessionCookieSameSite,
-                });
-                if (cfg.sessionStore) {
-                    try {
-                        await cfg.sessionStore.touch(session.email, session.sid, {
-                            lastVerifiedAt: session.lastVerifiedAt,
-                            lastActiveAt: session.lastVerifiedAt,
-                        });
-                    }
-                    catch (err) {
-                        cfg.log("warn", "session store touch failed on reverify callback", err);
-                    }
-                }
-            }
-            return backToApp(res, redirectUrlComplete, {});
+            return finishReverify(req, res, identity, fallbackRedirect, redirectUrlComplete, untrustedFrom(req, saved));
         }
-        return finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete);
+        return finishSignIn(req, res, identity, fallbackRedirect, redirectUrlComplete, untrustedFrom(req, saved));
+    }
+    /** Reverify binding: the identity that just re-authenticated must be the session's own. */
+    function bindingMatches(session, identity) {
+        const provider = identity.provider ?? "google";
+        const email = (identity.email ?? "").trim().toLowerCase();
+        if (!email || email !== (session.email ?? "").trim().toLowerCase())
+            return false;
+        // A session created before provider/providerSub existed can only be matched on its email.
+        if (!session.provider)
+            return true;
+        if (session.provider !== provider)
+            return false;
+        if (session.providerSub === undefined)
+            return true;
+        return session.providerSub === identity.sub;
     }
     /**
-     * Shared tail of every sign-in path (OIDC callback and SAML ACS): enforce the company-domain
-     * allowlist on the verified identity, resolve grants, mint the session cookie, and bounce back
-     * to the SPA. Keeping this in one place guarantees SAML and OIDC produce an identical session.
+     * Shared tail of both step-up reverify paths (Google and SAML). Replaces the bare
+     * `lastVerifiedAt` stamp, which re-stamped ANY session for ANY freshly-authenticated account.
+     *   1. resolve policy + verified email; 2. binding check (mismatch: no stamp, session KEPT);
+     *   3. legacy gate, connection requirements, lists (as a returning user) and the authentication
+     *      action with phase 'reverify' (refusal: session REMOVED, cookie cleared); 4. stamp.
      */
-    async function finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete) {
-        // Domain enforcement (authentication.mdx §3): require a verified email on an allowed domain.
-        if (!identity.email || !identity.emailVerified) {
-            // This branch refused in SILENCE until 2026-08-31: the citizen saw one sentence and the trail
-            // held nothing, so "which provider, and was the address missing or merely unverified?" could
-            // not be answered from the logs at all.
-            cfg.log("warn", `Rejecting ${identity.provider ?? "google"} sign-in: ` +
-                (identity.email ? "the provider did not assert the email as verified" : "the provider returned no email address"));
-            return backToApp(res, fallbackRedirect, {
-                error: "identity_domain_not_allowed",
-                error_message: identity.provider === "x"
-                    ? "X did not give us a confirmed email address for your account, so we cannot sign you in."
-                    : "A verified company email is required.",
-                presented_domain: "",
-                redirect_url_complete: redirectUrlComplete,
-            });
+    async function finishReverify(req, res, identity, fallbackRedirect, redirectUrlComplete, untrusted) {
+        const session = await readSession(req);
+        if (!session?.sid)
+            return backToApp(res, redirectUrlComplete, {});
+        const traceId = newTraceId();
+        const d = await admit(identity, {
+            phase: "reverify",
+            untrusted,
+            traceId,
+            binding: (id) => bindingMatches(session, id),
+        });
+        if (!d.ok) {
+            if (d.step === "reverify_binding") {
+                cfg.log("warn", `reverify identity mismatch (trace ${traceId}): session provider ${session.provider ?? "unknown"}, ` +
+                    `presented provider ${identity.provider ?? "google"}; not stamped, session kept`);
+            }
+            if (d.step !== "reverify_binding" && d.step !== "resolve_policy" && d.step !== "email") {
+                // The identity is the session's own but no longer admitted: end the session.
+                if (cfg.sessionStore) {
+                    try {
+                        await cfg.sessionStore.remove(session.email, session.sid);
+                    }
+                    catch (err) {
+                        cfg.log("warn", "session store remove failed after a refused reverify", err);
+                    }
+                }
+                clearCookie(res, cfg.sessionCookieName, cfg.cookieSecure);
+                cfg.log("info", `Session ended on reverify for ${redactEmail(session.email, emailLogKey)} (${d.code}, trace ${traceId})`);
+            }
+            return backToApp(res, fallbackRedirect, refusalParams(d, traceId, redirectUrlComplete));
         }
-        // When the deployment is Workspace-gated (requireHostedDomain), the authoritative signal is the
-        // `hd` (Workspace-membership) claim — NOT the email domain. An identity that merely ends in an
-        // allowlisted domain but is not a Workspace member (no hd) is rejected. When not gated, fall
-        // back to the email domain for back-compat.
+        session.lastVerifiedAt = Math.floor(Date.now() / 1000);
+        const sessionJwt = await signSession(session);
+        setCookie(res, cfg.sessionCookieName, sessionJwt, {
+            maxAgeSeconds: cfg.sessionTtlSeconds,
+            secure: cfg.cookieSecure,
+            sameSite: cfg.sessionCookieSameSite,
+        });
+        if (cfg.sessionStore) {
+            try {
+                await cfg.sessionStore.touch(session.email, session.sid, {
+                    lastVerifiedAt: session.lastVerifiedAt,
+                    lastActiveAt: session.lastVerifiedAt,
+                });
+            }
+            catch (err) {
+                cfg.log("warn", "session store touch failed on reverify callback", err);
+            }
+        }
+        return backToApp(res, redirectUrlComplete, {});
+    }
+    /**
+     * Shared tail of every sign-in path (Google and X callbacks, SAML ACS): run the admission
+     * pipeline on the verified identity, resolve grants, mint the session cookie, and bounce back to
+     * the SPA. Keeping this in one place guarantees every strategy produces an identical session —
+     * and that a refused identity never gets one.
+     */
+    async function finishSignIn(_req, res, identity, fallbackRedirect, redirectUrlComplete, untrusted) {
         const provider = identity.provider ?? "google";
-        const hd = identity.hd?.toLowerCase();
-        // X HAS NO HOSTED-DOMAIN CLAIM AND NEVER WILL. `confirmed_email` says X delivered mail to that
-        // address; it asserts nothing about membership of an organization, which is the whole of what
-        // requireHostedDomain is for. So an X identity is admissible under that setting only when the
-        // operator has explicitly said the confirmed email is enough (xTrustConfirmedEmail). Without
-        // that, X sign-in is refused HERE and the citizen is told which of the two facts is missing —
-        // rather than exempting X quietly, which would weaken the control on every account it guards.
-        const xExempt = provider === "x" && cfg.xTrustConfirmedEmail;
-        // SAML's counterpart to the X exemption. A SAML IdP that DOES assert a hosted-domain attribute
-        // needs nothing here — `hd` is populated and the check passes on its own merits. This covers the
-        // common IdP that asserts no such attribute but is nonetheless scoped to one verified company
-        // directory, and it exists so the operator states that in one place rather than the library
-        // exempting every SAML sign-in silently. Without it, `requireHostedDomain` refused 100% of SAML
-        // sign-ins — which, since the charter makes SAML 2.0 the go-forward default, pushed operators to
-        // switch the control off for the OIDC path too.
-        const samlExempt = provider === "saml" && cfg.samlSatisfiesHostedDomain;
-        const hdExempt = xExempt || samlExempt;
-        if (cfg.requireHostedDomain && !hd && !hdExempt) {
-            cfg.log("warn", `Rejecting ${provider} sign-in: hosted-domain (hd) claim required but absent`);
-            return backToApp(res, fallbackRedirect, {
-                error: "identity_domain_not_allowed",
-                error_message: provider === "x"
-                    ? "This app requires a Google Workspace account, so sign-in with X is not accepted here."
-                    : provider === "saml"
-                        ? "This app requires an account whose identity provider asserts a verified company domain."
-                        : "This app requires a Google Workspace account (hosted domain).",
-                presented_domain: "",
-                redirect_url_complete: redirectUrlComplete,
-            });
+        const traceId = newTraceId();
+        const decision = await admit(identity, { phase: "sign_in", untrusted, traceId });
+        if (!decision.ok) {
+            return backToApp(res, fallbackRedirect, refusalParams(decision, traceId, redirectUrlComplete));
         }
-        // The allowlist still runs for every strategy — the exemptions above are from the `hd`
-        // requirement only, never from allowedDomains, so an admitted account still has to present an
-        // allowed domain.
-        //
-        // SAML IS EVALUATED ON ITS EMAIL DOMAIN, NEVER ON THE ASSERTED `hd`. The two hosted-domain
-        // claims are not the same kind of fact. Google computes `hd` itself from real Workspace
-        // membership and will not assert a domain the account is not in; a SAML `hd` is just an
-        // attribute whose value the IdP chose, and attribute mapping is exactly the thing that gets
-        // misconfigured. Letting it stand in for the email domain here would mean an assertion for
-        // `attacker@evil.example` carrying `hd: company.com` satisfies a `company.com` allowlist — the
-        // allowlist stops gating who may sign in and starts gating what the IdP claims about them.
-        //
-        // So for SAML the asserted `hd` does exactly one job: satisfying `requireHostedDomain` above.
-        // Admission is still decided by the address the assertion is actually for.
-        const presentedDomain = (provider === "saml"
-            ? emailDomain(identity.email)
-            : cfg.requireHostedDomain && !hdExempt
-                ? hd
-                : hd || emailDomain(identity.email)) ?? "";
-        // allowAnyDomain: a public app admits any VERIFIED email (checked above). The domain only has
-        // to exist — an identity with no domain at all is still refused.
-        const domainAdmitted = cfg.allowAnyDomain
-            ? Boolean(presentedDomain)
-            : Boolean(presentedDomain) && cfg.allowedDomains.includes(presentedDomain);
-        if (!domainAdmitted) {
-            cfg.log("warn", `Rejecting sign-in from non-allowed domain: ${presentedDomain || "unknown"}`);
-            return backToApp(res, fallbackRedirect, {
-                error: "identity_domain_not_allowed",
-                error_message: "This app is restricted to company accounts. Your domain is not on the allowlist.",
-                presented_domain: presentedDomain,
-                redirect_url_complete: redirectUrlComplete,
-            });
-        }
-        // Establish the session.
-        const grants = cfg.resolveGrants(identity);
+        // Establish the session. resolveGrants may be async; it is awaited.
+        const grants = await cfg.resolveGrants(identity);
         const now = Math.floor(Date.now() / 1000);
         const session = {
             sid: `sess_${base64url((0, node_crypto_1.randomBytes)(12))}`,
@@ -1215,6 +1723,8 @@ function createFederatedFrontend(config) {
             // Kept verbatim so grant re-resolution asks about the subject the IdP actually named.
             providerSub: identity.sub,
             provider,
+            // Admission refused every identity without a verified email, so this session's is verified.
+            emailVerified: true,
         };
         const sessionJwt = await signSession(session);
         setCookie(res, cfg.sessionCookieName, sessionJwt, {
@@ -1250,7 +1760,40 @@ function createFederatedFrontend(config) {
      * exposes only which strategies are enabled and the non-secret session policy — never client
      * ids/secrets, cookie names, or the signing secret.
      */
-    function handleEnvironment(res) {
+    async function handleEnvironment(res) {
+        // Sign-up mode as the app states it. A Live value that fails to resolve is reported as
+        // "restricted" (never a more open mode) and logged. Identifier lists are NEVER published.
+        let mode;
+        let allowlistOnly;
+        if (adm.legacyOnly) {
+            mode = cfg.allowAnyDomain ? "public" : "restricted";
+            allowlistOnly = !cfg.allowAnyDomain;
+        }
+        else {
+            const p = await resolvePolicy();
+            if ("error" in p) {
+                cfg.log("error", `admission policy could not be resolved for /environment; reporting restricted: ${p.error}`);
+                mode = "restricted";
+                allowlistOnly = false;
+            }
+            else {
+                mode = p.mode;
+                allowlistOnly = p.restrictions.allowlist === true;
+            }
+        }
+        const connections = [];
+        if (cfg.googleConfigured) {
+            connections.push({ id: "conn_google", strategy: "oauth_google", label: adm.google.label });
+            if (adm.google.publishHintDomains) {
+                for (const d of adm.google.hostedDomainHints) {
+                    connections.push({ id: (0, admission_js_1.connectionIdForDomain)(d), strategy: "oauth_google", label: d, domain: d });
+                }
+            }
+        }
+        if (cfg.xConfigured)
+            connections.push({ id: "conn_x", strategy: "oauth_x", label: adm.xLabel });
+        if (cfg.saml)
+            connections.push({ id: "conn_saml", strategy: "saml", label: adm.saml.label });
         sendJson(res, 200, {
             object: "environment",
             auth_config: {
@@ -1261,16 +1804,19 @@ function createFederatedFrontend(config) {
             },
             display_config: {
                 object: "display_config",
-                allowed_domains: cfg.allowedDomains,
+                // Published only when the app opted in (the legacy default, because legacy always did).
+                ...(adm.publishAllowedDomains ? { allowed_domains: cfg.allowedDomains } : {}),
             },
             user_settings: {
+                sign_up: { mode, allowlist_only: allowlistOnly },
                 social: {
-                    oauth_google: { enabled: cfg.googleConfigured, strategy: "oauth_google" },
-                    oauth_x: { enabled: cfg.xConfigured, strategy: "oauth_x" },
+                    oauth_google: { enabled: cfg.googleConfigured, strategy: "oauth_google", name: adm.google.label },
+                    oauth_x: { enabled: cfg.xConfigured, strategy: "oauth_x", name: adm.xLabel },
                 },
                 saml: { enabled: Boolean(cfg.saml) },
+                connections,
             },
-            organization_settings: { enabled: true },
+            organization_settings: { enabled: adm.organizationsEnabled },
         });
     }
     async function handleClient(req, res) {
@@ -1502,7 +2048,13 @@ function createFederatedFrontend(config) {
         // node-saml caches the AuthnRequest ID it generated (its default cacheProvider) and enforces
         // InResponseTo at the ACS via validateInResponseTo: ifPresent, binding the Response to the
         // request in-process. We additionally carry our signed RelayState cookie as defense-in-depth.
-        const relayJwt = await signSamlRelay({ relayState, redirectUrl, redirectUrlComplete });
+        const relayJwt = await signSamlRelay({
+            relayState,
+            redirectUrl,
+            redirectUrlComplete,
+            mode: requestedModeOf(q),
+            ...(q.get("connection") ? { connectionId: String(q.get("connection")).slice(0, 200) } : {}),
+        });
         // The ACS is a cross-site top-level POST from the IdP, so the relay cookie MUST be
         // SameSite=None to be sent — which requires Secure. Lax/Strict would drop it and break SAML.
         setCookie(res, cfg.samlRelayCookieName, relayJwt, {
@@ -1546,33 +2098,12 @@ function createFederatedFrontend(config) {
                 redirect_url_complete: redirectUrlComplete,
             });
         }
-        // SAML step-up reverify: fresh ForceAuthn assertion proved presence — re-stamp the existing
-        // session's lastVerifiedAt only, do not re-establish.
+        // SAML step-up reverify: a fresh ForceAuthn assertion proved presence. Same tail as Google's:
+        // binding check, admission re-check, then re-stamp lastVerifiedAt (never re-establish).
         if (saved.reverify) {
-            const session = await readSession(req);
-            if (session?.sid) {
-                session.lastVerifiedAt = Math.floor(Date.now() / 1000);
-                const sessionJwt = await signSession(session);
-                setCookie(res, cfg.sessionCookieName, sessionJwt, {
-                    maxAgeSeconds: cfg.sessionTtlSeconds,
-                    secure: cfg.cookieSecure,
-                    sameSite: cfg.sessionCookieSameSite,
-                });
-                if (cfg.sessionStore) {
-                    try {
-                        await cfg.sessionStore.touch(session.email, session.sid, {
-                            lastVerifiedAt: session.lastVerifiedAt,
-                            lastActiveAt: session.lastVerifiedAt,
-                        });
-                    }
-                    catch (err) {
-                        cfg.log("warn", "session store touch failed on SAML reverify", err);
-                    }
-                }
-            }
-            return backToApp(res, redirectUrlComplete, {});
+            return finishReverify(req, res, identity, fallbackRedirect, redirectUrlComplete, untrustedFrom(req, saved));
         }
-        return finishSignIn(res, identity, fallbackRedirect, redirectUrlComplete);
+        return finishSignIn(req, res, identity, fallbackRedirect, redirectUrlComplete, untrustedFrom(req, saved));
     }
     // --- router --------------------------------------------------------------------------------
     const handler = ((req, res, next) => {
@@ -1623,11 +2154,12 @@ function createFederatedFrontend(config) {
             }
             if (method === "GET" && path === "/sign_in/sso") {
                 // Unified sign-in entry point: strategy=saml routes to the SAML SP path (when
-                // configured); everything else is the Google OIDC path.
+                // configured); strategy=x (or the connection-strategy spelling oauth_x) to X; everything
+                // else (oauth_google, the legacy oauth_google_workspace alias, none) is the Google path.
                 const strategy = queryOf(req).get("strategy") ?? "";
                 if (strategy === "saml" && cfg.saml)
                     await handleSamlLogin(req, res);
-                else if (strategy === "x") {
+                else if (strategy === "x" || strategy === "oauth_x") {
                     if (!guardXConfigured(res))
                         await handleXSsoStart(req, res);
                 }
@@ -1661,7 +2193,7 @@ function createFederatedFrontend(config) {
             // Hosted-IdP-style instance-configuration endpoint. Some hosted-IdP-style clients fetch this on
             // load; without it the request falls through to the host app as a noisy 404.
             if (method === "GET" && path === "/environment") {
-                handleEnvironment(res);
+                await handleEnvironment(res);
                 return true;
             }
             if (method === "GET" && path === "/client") {
@@ -1725,6 +2257,38 @@ function createFederatedFrontend(config) {
         audience: cfg.audience,
     });
     handler.verifyToken = (token, opts = {}) => ownVerifier(token, opts);
+    // The same pipeline a real sign-in runs, minus every side effect (no mint, no cookie, no store
+    // write, no resolveGrants). For an app's boot self-test: misconfiguration fails loudly at boot.
+    handler.evaluateAdmission = async (identity, opts = {}) => {
+        const oidc = {
+            sub: identity?.sub ?? "",
+            email: identity?.email ?? "",
+            emailVerified: identity?.emailVerified === true,
+            hd: identity?.hd,
+            name: identity?.name,
+            provider: identity?.provider,
+            username: identity?.username,
+        };
+        const d = await admit(oidc, {
+            phase: opts.phase === "reverify" ? "reverify" : "sign_in",
+            untrusted: { requestedMode: "sign_in" },
+            traceId: newTraceId(),
+            ...(opts.isSignUp !== undefined ? { isSignUp: opts.isSignUp } : {}),
+        });
+        return d.ok
+            ? { allowed: true, matchedAllowlistIdentifier: d.matchedAllowlistIdentifier }
+            : { allowed: false, code: d.code, message: d.message, step: d.step };
+    };
+    handler.revokeUserSessions = async (email) => {
+        const store = cfg.sessionStore;
+        if (!store || typeof store.revokeAllForUser !== "function") {
+            throw new Error("revokeUserSessions needs a sessionStore that implements revokeAllForUser (FileSessionStore and " +
+                "InMemorySessionStore do). Cookie-only sessions cannot be revoked server-side.");
+        }
+        const count = await store.revokeAllForUser(email);
+        cfg.log("info", `Revoked ${count} session(s) for ${redactEmail(email, emailLogKey)}`);
+        return count;
+    };
     return handler;
 }
 /** Project the library-internal session record onto the public {@link BrowserSession} contract. */
@@ -1743,6 +2307,8 @@ function publicSession(s) {
         orgId: s.orgId,
         memberships: [...s.memberships],
         lastVerifiedAt: s.lastVerifiedAt,
+        ...(s.provider ? { provider: s.provider } : {}),
+        ...(s.providerSub !== undefined ? { providerSub: s.providerSub } : {}),
     };
 }
 /**

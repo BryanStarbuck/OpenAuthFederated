@@ -1,11 +1,11 @@
 ---
 title: Deploy to Production
-description: Go live with a custom domain, a Google Workspace SAML/OIDC connection, domain enforcement, MFA, and offboarding.
+description: Go live with a custom domain, a SAML/OIDC connection, a stated admission policy, MFA, and offboarding.
 ---
 
-Going to production means pointing your app at a live OpenAuthFederated instance, federating to Google Workspace, and turning on the enforcement and revocation controls that make the platform safe. This page walks through the reference deployment that gates an internal app to the `whitehatengineering.com` Google Workspace — only active employees can sign in, with no app passwords, no social logins, and no anonymous access.
+Going to production means pointing your app at a live OpenAuthFederated instance, federating to your identity provider(s), stating your admission policy, and turning on the revocation controls that make the platform safe. The examples use an organization-only app restricted to the `corp.example` Google Workspace; a public app states `signUpMode: 'public'` instead (see [Admission](../apis/frontend/admission.mdx)).
 
-**Implemented in code.** The SAML connection (SP metadata / ACS URL / Entity ID and assertion validation) is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts` — `samlSpMetadata()`, `buildSamlClient()`, `validateSamlAcs()`. Domain enforcement and Workspace-group→role mapping run at sign-in in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `finishSignIn()` and the `resolveGrants`/`defaultResolveGrants()` hook — with permission checks in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts`.
+**Implemented in code.** The SAML connection (SP metadata / ACS URL / Entity ID and assertion validation) is in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/saml.ts` — `samlSpMetadata()`, `buildSamlClient()`, `validateSamlAcs()`. The app's admission policy runs at sign-in in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `admit()` / `finishSignIn()`, then the app's `resolveGrants` hook (default `defaultResolveGrants()`) — with permission checks in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/permissions.ts`.
 
 ## 1. Switch to live keys and a custom domain
 
@@ -15,11 +15,11 @@ Production uses `*_live_*` keys and your own auth/API hostnames. Set these in yo
 NEXT_PUBLIC_AUTH_PUBLISHABLE_KEY=pk_live_your_publishable_key
 AUTH_SECRET_KEY=sk_live_your_secret_key
 
-NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.whitehatengineering.com
-AUTH_BACKEND_API=https://api.whitehatengineering.com/v1
+NEXT_PUBLIC_AUTH_FRONTEND_API=https://auth.corp.example
+AUTH_BACKEND_API=https://api.corp.example/v1
 ```
 
-Configure DNS so the Frontend API resolves at `auth.whitehatengineering.com` and the Backend API at `api.whitehatengineering.com`, each served over HTTPS only. See [Environment variables](./environment-variables.mdx) for the full list.
+Configure DNS so the Frontend API resolves at `auth.corp.example` and the Backend API at `api.corp.example`, each served over HTTPS only. (These are app-side variables; the embedded library itself reads no environment variables.) See [Environment variables](./environment-variables.mdx) for the full list.
 
 ## 2. Register a SAML / OIDC connection to Google Workspace
 
@@ -35,23 +35,37 @@ OpenAuthFederated is the Service Provider; Google Workspace is the Identity Prov
 
 **OIDC (alternative):** register OpenAuthFederated as an OAuth client in Google, set the redirect URI to your callback, and request the `openid email profile` scopes. On this path the platform verifies the hosted-domain (`hd`) claim and `email_verified` on every sign-in.
 
-## 3. Enable domain enforcement
+## 3. State your admission policy
 
-Restrict sign-in to your verified company domain so any identity outside the org is rejected — including unverified emails and out-of-org Google accounts.
+The app states who may sign in through the API — the library ships no domains and reads no
+environment variables. For an organization-only app:
 
-```env
-AUTH_ALLOWED_DOMAINS=whitehatengineering.com
+```ts
+createFederatedFrontend({
+  sessionSecret,
+  requirePolicy: true,
+  signUpMode: 'restricted',
+  restrictions: { allowlist: true, blocklist: true },
+  allowlistIdentifiers: ['*@corp.example'],
+  blocklistIdentifiers: appConfig.blockedEmails,          // exact emails; the more specific match wins
+  connections: [{ strategy: 'oauth_google', clientId, clientSecret, redirectUri,
+    allowedHostedDomains: ['corp.example'], hostedDomainHints: ['corp.example'] }],
+})
 ```
 
-In the dashboard, set **Domain enforcement → Allowed domains** to `whitehatengineering.com`. With this on:
+With this:
 
-- Only `@whitehatengineering.com` Workspace accounts pass.
-- On the OIDC path, the `hd` claim must equal `whitehatengineering.com` and `email_verified` must be `true`.
-- First valid sign-in triggers **JIT provisioning**; **SCIM 2.0** keeps the directory in sync thereafter.
+- Only verified `@corp.example` addresses pass, and on the Google path the verified `hd` claim must be `corp.example`.
+- An unverified email is refused (`identity_email_unverified`); an off-list one with `identity_not_allowlisted`.
+- Nothing about the policy is published by `/environment`.
+
+A public app instead states `signUpMode: 'public'` (optionally with a blocklist). Run
+`evaluateAdmission()` at boot with one positive and a few negative identities so a misconfigured
+policy fails loudly. Full reference: [Admission](../apis/frontend/admission.mdx).
 
 ## 4. Map groups to roles and enable MFA
 
-- **RBAC:** in **Authorization**, map Google Workspace groups → roles → `<feature>:<action>` permissions (for example `code:read`, `jfk:write`, `*:read`). The IdP's groups are inputs; the authoritative model lives in our own backend/DB. These are the permissions your [route protection](./protect-routes.mdx) and `has()` checks evaluate.
+- **RBAC:** in **Authorization**, map upstream groups → roles → `<feature>:<action>` permissions (for example `code:read`, `docs:write`, `*:read`). The IdP's groups are inputs; the authoritative model lives in our own backend/DB. These are the permissions your [route protection](./protect-routes.mdx) and `has()` checks evaluate.
 - **MFA:** MFA is inherited from the upstream Google Workspace IdP — enforce 2-Step Verification in the Google Admin console. For sensitive actions, enable **optional step-up reverification** in OpenAuthFederated so the user must re-authenticate before the action proceeds.
 
 ## 5. Confirm session and security behavior
@@ -69,14 +83,14 @@ When an employee leaves, suspend or delete their Google Workspace account. Acces
 
 1. **SCIM deprovision** — the `user.deleted` (or suspend) event removes the user from OpenAuthFederated and fires your webhooks.
 2. **Short token lifetime** — the existing access token expires quickly and cannot be refreshed once the upstream account is gone.
-3. **Force-revoke** — admins can immediately invalidate all active sessions for a user from the dashboard or Backend API, killing access without waiting for token expiry.
+3. **Force-revoke** — the app calls `frontend.revokeUserSessions(email)` (needs a `sessionStore`) to invalidate every active session for a user immediately, without waiting for token expiry; adding the address to `blocklistIdentifiers` keeps it out.
 
 ## Production checklist
 
 - [ ] Live `pk_live_*` / `sk_live_*` keys set; secret key server-only.
 - [ ] `auth.` and `api.` custom domains serving HTTPS.
 - [ ] Google Workspace SAML (or OIDC) connection registered and attribute/group mapping verified.
-- [ ] `AUTH_ALLOWED_DOMAINS=whitehatengineering.com` and domain enforcement on.
+- [ ] Admission policy stated (`requirePolicy: true`) and checked at boot with `evaluateAdmission()`.
 - [ ] Groups mapped to roles and `<feature>:<action>` permissions.
 - [ ] MFA enforced upstream; step-up reverification configured for sensitive actions.
 - [ ] Webhook signing secret set; SCIM deprovision tested with a suspend.

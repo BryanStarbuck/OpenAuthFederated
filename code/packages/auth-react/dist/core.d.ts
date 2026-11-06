@@ -12,6 +12,8 @@ export declare abstract class BaseCore implements AuthCore {
     getSnapshot(): SessionSnapshot;
     loadState(): LoadState;
     protected setState(next: LoadState): void;
+    /** Wake every subscriber (e.g. after the connection list changed). */
+    protected notify(): void;
     subscribe(listener: () => void): () => void;
     protected setSnapshot(next: SessionSnapshot): void;
     /** The permissions/roles that apply *right now*, given the active organization. */
@@ -70,8 +72,13 @@ export declare class RealAuthCore extends BaseCore {
     private inflight;
     private autoRefresh;
     private refreshTimer;
+    /** True when no connections were configured: /environment may supply them on load(). */
+    private connectionsFromEnvironment;
+    /** The /environment read is attempted once per core. */
+    private environmentLoaded;
     /**
-     * The connection list, built ONCE.
+     * The connection list, built ONCE (replaced at most once, from /environment, when the app
+     * configured none).
      *
      * It is derived entirely from a constructor argument, so it can never change — but `connections()`
      * used to rebuild it with `.map` on every call, and the provider calls it inside a `useMemo` that
@@ -80,8 +87,16 @@ export declare class RealAuthCore extends BaseCore {
      * and `<SignUpButton>` for a value that had not moved. Frozen so a stable reference cannot become
      * a shared mutable one.
      */
-    private readonly connectionList;
-    constructor(frontendApi: string, publishableKey: string, allowedDomains: string[]);
+    private connectionList;
+    /**
+     * @param allowedDomains DEPRECATED (use `connections`): one Google button per domain, as before.
+     * @param connections The app's own buttons. Precedence: `connections`, then `allowedDomains`, then
+     *   the server's `/environment` `user_settings.connections`, then one generic Google button.
+     *   There is NO built-in domain list.
+     */
+    constructor(frontendApi: string, publishableKey: string, allowedDomains?: string[], connections?: Connection[]);
+    /** Adopt the server's published connections once, when the app configured none. Best-effort. */
+    private loadEnvironmentConnections;
     private base;
     private headers;
     connections(): Connection[];
@@ -91,6 +106,12 @@ export declare class RealAuthCore extends BaseCore {
     private parseMemberships;
     private applyClient;
     authenticateWithRedirect(params: AuthenticateWithRedirectParams): Promise<void>;
+    /**
+     * The `/sign_in/sso` URL for a redirect sign-in (exposed for tests and custom flows). Strategy:
+     * the explicit param, else the connection's, else `oauth_google` (`oauth_google_workspace` stays
+     * an accepted alias server-side). No `connection` is sent when there is none.
+     */
+    signInUrl(params: AuthenticateWithRedirectParams): string;
     completeRedirectCallback(): Promise<RedirectCallbackResult>;
     getToken(opts?: {
         template?: string;

@@ -13,7 +13,7 @@ export interface SdkUser {
   publicMetadata?: Record<string, unknown>
   roles: string[]
   permissions: string[]
-  /** Upstream hosted-domain (Google Workspace `hd`). */
+  /** Upstream hosted-domain (Google `hd`, or a corroborated SAML attribute). */
   hd?: string
 }
 
@@ -48,28 +48,55 @@ export interface SessionSnapshot {
   lastVerifiedAt: number | null
 }
 
-/** A federated "global login" — one company Workspace domain/SSO connection. */
+/**
+ * One sign-in button: a strategy (Google, X, SAML) and, optionally, a domain whose id the server
+ * may accept as an account-chooser hint. Build domain ids with {@link connectionIdForDomain} so they
+ * always match the server mapping.
+ */
 export interface Connection {
   id: string
-  domain: string
   label: string
+  strategy?: "oauth_google" | "oauth_x" | "saml"
+  /** A hint domain (Google `hd`), when this connection pre-selects one. */
+  domain?: string
 }
 
 export interface AuthenticateWithRedirectParams {
   strategy?: string
+  /** @deprecated Use {@link connection}. */
   connectionId?: string
+  /** The connection id to start (e.g. from `connections`). Omitted: the first connection. */
+  connection?: string
+  /** UNTRUSTED hint carried to the server's admission actions; `useSignUp` sends 'sign_up'. */
+  mode?: "sign_in" | "sign_up"
   redirectUrl: string
   redirectUrlComplete: string
 }
 
 /**
+ * Refusal codes the server can send back on the callback. Branch on `code`, never on `message`.
+ * Apps may also define their own codes through admission actions (`/^[a-z][a-z0-9_]{0,63}$/`).
+ */
+export type AuthRejectionCode =
+  | "identity_email_unverified"
+  | "identity_email_invalid"
+  | "identity_domain_not_allowed"
+  | "identity_hosted_domain_required"
+  | "identity_blocked"
+  | "identity_not_allowlisted"
+  | "sign_up_restricted"
+  | "sign_up_waitlisted"
+  | "action_denied"
+  | "action_failed"
+  | "sign_in_not_completed"
+
+/**
  * Structured context attached to a rejection, so the app can build a specific message
- * ("restricted to act3ai.com / whitehatengineering.com — you used gmail.com") instead of a
- * generic one. Mirrors the platform error envelope's `meta` block
- * (`docs/apis/frontend/errors.mdx`). Open-ended: the platform may add fields over time.
+ * ("restricted to example.com — you used example.org") instead of a generic one. Mirrors the
+ * platform error envelope's `meta` block (`docs/apis/frontend/errors.mdx`). Open-ended: the platform may add fields over time.
  */
 export interface AuthRejectionMeta {
-  /** The verified company domains that ARE allowed — name them back to the user. */
+  /** The allowed domains, only when the server publishes them (`allowed_domains`). */
   allowedDomains?: string[]
   /** The verified domain the upstream identity actually presented, when known. */
   presentedDomain?: string
@@ -89,8 +116,10 @@ export interface AuthRejectionMeta {
  * from. See `docs/apis/frontend/errors.mdx` and `docs/apis/frontend/sign-up.mdx#domain-enforcement`.
  */
 export interface AuthRejection {
-  /** Stable, machine-readable code — branch on this, never on `message`. */
-  code: string
+  /** Stable, machine-readable code — branch on this, never on `message`. See {@link AuthRejectionCode}. */
+  code: AuthRejectionCode | (string & {})
+  /** Finer reason under a legacy code (the server's `error_reason`), e.g. `identity_email_unverified`. */
+  reason?: string
   /** Short, human-readable summary, safe to show the user. */
   message: string
   /** Detailed, user-presentable explanation (the API `long_message`), when provided. */
@@ -181,3 +210,18 @@ export function hasRole(roles: string[], role: string): boolean {
 export function domainSlug(domain: string): string {
   return domain.replace(/[^a-zA-Z0-9]+/g, "_")
 }
+
+/**
+ * Connection id for a domain. Identical to the backend's `connectionIdForDomain`, so a client-built
+ * id always matches the server mapping.
+ */
+export function connectionIdForDomain(domain: string): string {
+  return "conn_" + String(domain).toLowerCase().replace(/[^a-z0-9]/g, "_")
+}
+
+/** The generic Google button used when an app configures no connections at all. */
+export const GENERIC_GOOGLE_CONNECTION: Readonly<Connection> = Object.freeze({
+  id: "conn_google",
+  label: "Google",
+  strategy: "oauth_google",
+})

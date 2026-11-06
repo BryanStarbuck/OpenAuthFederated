@@ -106,6 +106,18 @@ The sign-in evaluation order (blocklist → domain enforcement → allowlist →
 otherwise reject) is specified in `invitations.mdx`, "How identifiers interact with domain
 enforcement." This is exactly how "a domain **or** sample/explicit values" coexist.
 
+**Embedded mode (what ships today).** There is no REST identifier resource in the embedded
+library: the app passes the lists in-process (`restrictions`, `allowlistIdentifiers`,
+`blocklistIdentifiers`, static or `Live`), with most-specific-wins precedence, and states
+`signUpMode`. "Everyone on this domain" is `*@acme.example` on the allowlist plus
+`allowedHostedDomains: ['acme.example']` on the customer's SAML connection; a single contractor is an
+exact allowlist entry; a single banned address is an exact blocklist entry (it beats the domain
+entry).
+
+When a sign-in callback carries a verified identity, the app's stated lists and mode decide
+admission before any session is minted — implemented in:
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/admission.ts` — `decideRestrictions()`; pipeline in `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — inner `admit()`.
+
 ### Optional overlay: the customer is a SAML company (brings its own IdP)
 
 When the customer runs its own IdP, create a per-tenant **SSO connection** federating that org to

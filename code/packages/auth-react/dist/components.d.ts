@@ -1,5 +1,5 @@
 import { type ReactNode } from "react";
-import type { Appearance, AuthRejection, PermissionCheck } from "./types.js";
+import type { Appearance, AuthRejection, Connection, PermissionCheck } from "./types.js";
 /** Read and clear any stashed callback rejection (one-shot). */
 export declare function readAuthError(): AuthRejection | null;
 /**
@@ -17,6 +17,14 @@ interface SignInProps {
     forceRedirectUrl?: string;
     fallbackRedirectUrl?: string;
     appearance?: Appearance;
+    /** Heading. Default "Sign in" (or "Create account" for `<SignUp>`). The app owns its own wording. */
+    title?: ReactNode;
+    /** Optional line under the heading. Default none. */
+    subtitle?: ReactNode;
+    /** Optional footer under the buttons. Default none. */
+    footer?: ReactNode;
+    /** Override the provider's connections for this one screen. */
+    connections?: Connection[];
 }
 /** Complete federated sign-in experience (no password field). */
 export declare function SignIn(props: SignInProps): ReactNode;
@@ -50,9 +58,9 @@ export declare function GoogleOneTap(_props: {
 }): ReactNode;
 /**
  * Completes the SSO redirect handshake on the callback route. On success it forwards the user
- * on; on a rejection (e.g. domain enforcement — `identity_domain_not_allowed`) it stashes the
- * error and bounces back to the sign-in screen so the user sees a clear "restricted to company
- * accounts" message (§7.3). No session is created for a rejected identity.
+ * on; on a rejection (any admission refusal — `identity_not_allowlisted`, `sign_up_restricted`,
+ * an app action's own code, ...) it stashes the error and bounces back to the sign-in screen so
+ * the user sees why (§7.3). No session is created for a rejected identity.
  */
 export declare function AuthenticateWithRedirectCallback(props: {
     signInForceRedirectUrl?: string;
