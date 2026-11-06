@@ -557,6 +557,21 @@ export interface FederatedFrontend {
  * "middleware" at the call sites that mount it. Both names describe the same value.
  */
 export type FederatedFrontendMiddleware = FederatedFrontend;
+/**
+ * The `hd` of a session read back from its cookie or the durable store, or `undefined` when it cannot
+ * be trusted.
+ *
+ * WHY: before 2026-09-09 (commit 3c961ca) a session's `hd` fell back to the presented email domain
+ * whenever the upstream asserted none, so an old session can carry `hd: "corp.example"` for an account
+ * Google never called a Workspace member. That same commit started recording `provider` on every
+ * session. So a record WITH `provider` carries only an upstream-asserted `hd`, and a record WITHOUT it
+ * may not. Dropping the legacy value keeps the documented contract ("`hd` is Google's verified claim")
+ * true everywhere a session's `hd` leaves the library: access-token claims, the `revalidateGrants`
+ * identity, `/client`, `readBrowserSession()`. An app that gates on `hd` then signs that old session out
+ * (fail closed) and the person's next sign-in records a verified one. Nothing else about the session
+ * changes.
+ */
+export declare function trustedSessionHd(hd: unknown, provider: unknown): string | undefined;
 export declare function createFederatedFrontend(config: FederatedFrontendConfig): FederatedFrontend;
 /**
  * @deprecated Use {@link createFederatedFrontend}. Alias retained so existing

@@ -10,7 +10,7 @@ export { authMiddleware, createRouteMatcher, getRequestAuth, authenticateRequest
 export type { AuthRequestLike, RouteMatcher, RequestAuth, AuthObject, RequestState, } from "./middleware.js";
 export { federatedMiddleware, requireAuth, getAuth } from "./express.js";
 export type { FederatedMiddlewareOptions, ExpressLikeRequest, ExpressLikeResponse, } from "./express.js";
-export { createFederatedFrontend, createAuthFrontend } from "./frontend.js";
+export { createFederatedFrontend, createAuthFrontend, trustedSessionHd } from "./frontend.js";
 export type { BrowserSession, FederatedFrontend, FederatedFrontendMiddleware, FederatedFrontendConfig, FederatedConnectionConfig, GoogleConnectionConfig, SamlConnectionConfig, XConnectionConfig, LegacyGoogleConfig, AuthFrontendConfig, OidcIdentity, OrgMembership, ResolvedGrants, RateLimitContext, } from "./frontend.js";
 export { ADMISSION_API_VERSION, OafConfigError, parseEmail, matchIdentifier, decideRestrictions, connectionIdForDomain, DEFAULT_ADMISSION_MESSAGES, } from "./admission.js";
 export type { SignUpMode, Live, Restrictions, Identifier, IdentityProvider, AuthenticationMethod, ActionIdentity, UntrustedRequestHints, AdmissionPhase, AuthenticationActionContext, UserRegistrationActionContext, ActionVerdict, AdmissionActions, AdmissionUsers, AdmissionErrorCode, AdmissionMessage, IdentifierSpecificity, IdentifierMatch, MatchIdentifierOptions, RestrictionOutcome, AdmissionResult, AdmissionStep, } from "./admission.js";
