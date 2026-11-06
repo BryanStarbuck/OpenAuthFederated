@@ -5,3 +5,5 @@ export { SignIn, SignUp, SignInButton, SignUpButton, SignOutButton, UserButton, 
 export { hasPermission, hasRole, EMPTY_SNAPSHOT, domainSlug, connectionIdForDomain, GENERIC_GOOGLE_CONNECTION, } from "./types.js";
 export type { Appearance, AuthCore, AuthenticateWithRedirectParams, AuthRejection, AuthRejectionCode, AuthRejectionMeta, Connection, LoadState, RedirectCallbackResult, SdkUser, SdkOrganization, SdkMembership, SessionSnapshot, PermissionCheck, } from "./types.js";
 export { BaseCore, RealAuthCore } from "./core.js";
+export { requestEmailCode, verifyEmailCode, signInWithPassword } from "./email.js";
+export type { EmailAuthError, EmailCodePurpose, EmailCodeResult, EmailSignInResult } from "./email.js";

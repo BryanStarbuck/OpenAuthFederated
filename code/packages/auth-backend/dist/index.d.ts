@@ -18,6 +18,8 @@ export { createPkcePair, pkceChallenge, randomUrlToken, googleAuthorizeUrl, exch
 export type { PkcePair, GoogleAuthorizeOptions, GoogleExchangeOptions, GoogleEndpoints, XAuthorizeOptions, XExchangeOptions, XExchangeResult, XEndpoints, OAuthExchangeErrorKind, } from "./oauth-providers.js";
 export { FileSessionStore, InMemorySessionStore, loadOrCreateSecret, } from "./session-store.js";
 export type { SessionStore, StoredSession, SessionMembership } from "./session-store.js";
+export { FileEmailAccountStore, InMemoryEmailAccountStore, hashPassword, verifyPassword, passwordProblem, } from "./email-auth.js";
+export type { EmailAccount, EmailAccountStore, EmailCodeMessage, EmailCodePurpose, EmailConnectionConfig, EmailDelivery, PendingEmailCode, } from "./email-auth.js";
 export { buildSamlClient, samlLoginRedirectUrl, samlSpMetadata, validateSamlAcs, InMemorySamlReplayStore, } from "./saml.js";
 export type { SamlSpConfig, SamlAcsResult, SamlReplayStore } from "./saml.js";
 export { loadGoogleCredentials, assertGoogleCredentials, credentialsRemediation, OAuthCredentialsError, } from "./credentials.js";

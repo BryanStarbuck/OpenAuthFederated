@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { type VerifyTokenOptions } from "./verify.js";
 import type { TokenClaims } from "./types.js";
 import { type ActionIdentity, type AdmissionActions, type AdmissionErrorCode, type AdmissionMessage, type AdmissionPhase, type AdmissionResult, type AdmissionUsers, type Identifier, type IdentityProvider, type Live, type Restrictions, type SignUpMode } from "./admission.js";
+import { type EmailConnectionConfig } from "./email-auth.js";
 import type { SessionMembership, SessionStore } from "./session-store.js";
 import { type OidcIdentity } from "./oauth-providers.js";
 import { type SamlReplayStore, type SamlSpConfig } from "./saml.js";
@@ -122,7 +123,7 @@ export type SamlConnectionConfig = {
  * (`oauth_google`, SAML) so credentials are passed by API in a Federated-idiomatic shape rather than
  * via a provider-specific block.
  */
-export type FederatedConnectionConfig = GoogleConnectionConfig | SamlConnectionConfig | XConnectionConfig;
+export type FederatedConnectionConfig = GoogleConnectionConfig | SamlConnectionConfig | XConnectionConfig | EmailConnectionConfig;
 /** Shape of the legacy Google block (`google: { ... }`) accepted as deprecated shorthand. */
 export interface LegacyGoogleConfig {
     clientId?: string;

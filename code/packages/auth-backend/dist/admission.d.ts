@@ -43,8 +43,10 @@ export interface Restrictions {
  * Anything else (e.g. "ann*@x") is treated as an exact string; WARN once per distinct entry per process.
  */
 export type Identifier = string;
-export type IdentityProvider = "google" | "x" | "saml";
-export type AuthenticationMethod = "GoogleOAuth" | "XOAuth" | "SSO";
+/** `email` = the email connection (a one-time code or a password; email-auth.ts). */
+export type IdentityProvider = "google" | "x" | "saml" | "email";
+/** WorkOS spellings: `MagicAuth` is an emailed one-time code, `Password` a password. */
+export type AuthenticationMethod = "GoogleOAuth" | "XOAuth" | "SSO" | "MagicAuth" | "Password";
 /** Facts OpenAuthFederated verified. Every field here is TRUSTED. */
 export interface ActionIdentity {
     provider: IdentityProvider;
