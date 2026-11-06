@@ -66,7 +66,7 @@ export interface StoredSession {
    * parse of one of ours. Optional for back-compat with records written before they existed.
    */
   providerSub?: string
-  provider?: "google" | "saml" | "x"
+  provider?: "google" | "saml" | "x" | "email"
   /** True when the session was established after admission required a verified email. */
   emailVerified?: boolean
   /** When the session was first established (epoch seconds). */

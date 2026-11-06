@@ -158,6 +158,24 @@ export {
   loadOrCreateSecret,
 } from "./session-store.js"
 export type { SessionStore, StoredSession, SessionMembership } from "./session-store.js"
+// The email connection: sign up and sign in with an email address (an emailed one-time code, and
+// optionally a password). Pass `{ strategy: "email", sendCode, store }` in `connections`.
+export {
+  FileEmailAccountStore,
+  InMemoryEmailAccountStore,
+  hashPassword,
+  verifyPassword,
+  passwordProblem,
+} from "./email-auth.js"
+export type {
+  EmailAccount,
+  EmailAccountStore,
+  EmailCodeMessage,
+  EmailCodePurpose,
+  EmailConnectionConfig,
+  EmailDelivery,
+  PendingEmailCode,
+} from "./email-auth.js"
 export {
   buildSamlClient,
   samlLoginRedirectUrl,

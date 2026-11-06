@@ -67,7 +67,7 @@ export interface OidcIdentity {
    * `requireHostedDomain` asks for a Google Workspace `hd` claim, which is a thing only Google has.
    * Optional, and absent means `google` — so every existing call site keeps its exact behaviour.
    */
-  provider?: "google" | "saml" | "x"
+  provider?: "google" | "saml" | "x" | "email"
   /** The X handle, without the `@`. Set on the X path only; nothing else populates it. */
   username?: string
 }

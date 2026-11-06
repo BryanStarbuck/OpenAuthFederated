@@ -1,0 +1,118 @@
+---
+title: Email sign-in (code and password)
+description: The email connection — sign up and sign in with nothing but an email address. An emailed one-time code proves the mailbox; a password is optional. The app supplies the mail transport and the account store; admission and sessions are the same as every other connection.
+---
+
+# Email sign-in: the `email` connection
+
+A person creates an account with only an email address. OpenAuthFederated emails a six-digit code,
+the person types it back, and that proves the mailbox the same way Google's `email_verified` or X's
+`confirmed_email` does. The identity then goes through the **same admission pipeline**
+([admission.mdx](./admission.mdx)) and the **same session minting** as Google, X and SAML: the app's
+sign-up mode, allowlist, blocklist and actions apply unchanged.
+
+This mirrors Clerk's email address identifier with the `email_code` and `password` strategies, and
+WorkOS's Magic Auth and Password methods (the `authenticationMethod` an admission action sees is
+`MagicAuth` or `Password`).
+
+**Implemented in code.** Routes and flow: `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/frontend.ts` — `createFederatedFrontend()`, inner `handleEmailCode()`, `handleEmailVerify()`, `handleEmailPassword()`, `completeEmailSignIn()`; hashing, codes and stores: `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-backend/src/email-auth.ts` — `hashPassword()`, `verifyPassword()`, `FileEmailAccountStore`; browser calls: `~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/email.ts` — `requestEmailCode()`, `verifyEmailCode()`, `signInWithPassword()`. Tests: `auth-backend/test/email-auth.cjs`.
+
+## Configure it
+
+```ts
+import { createFederatedFrontend, FileEmailAccountStore } from "@auth/backend"
+
+createFederatedFrontend({
+  connections: [
+    { strategy: "oauth_google", clientId, clientSecret, redirectUri },
+    {
+      strategy: "email",
+      // The library NEVER sends mail. You own the transport and the copy, and you say whether it left.
+      sendCode: async ({ to, code, purpose, expiresInMinutes, accountExists }) => {
+        const r = await myMailer.send({ to, subject: "Your sign-in code", text: `${code} (expires in ${expiresInMinutes} min)` })
+        return { delivered: r.ok, problem: r.ok ? null : r.error }
+      },
+      // Where accounts and pending codes live. FileEmailAccountStore suits a single-replica app with a
+      // persistent state directory; a multi-replica app implements EmailAccountStore on its database.
+      store: new FileEmailAccountStore("/var/lib/myapp/auth/email"),
+      password: true, // default; false = codes only
+    },
+  ],
+  signUpMode: "public",
+  sessionSecret,
+})
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `sendCode(message)` | required | Deliver one code. Return `{ delivered: true }` only when it actually left. |
+| `store` | required | An `EmailAccountStore` (`FileEmailAccountStore`, `InMemoryEmailAccountStore`, or your own). |
+| `password` | `true` | Offer a password as a second way back in. |
+| `codeTtlSeconds` | `600` | Code lifetime. |
+| `maxCodeAttempts` | `5` | Wrong guesses before a code is burned. |
+| `resendCooldownSeconds` | `30` | Minimum gap between two codes to one address. |
+| `maxCodesPerHour` | `10` | Codes per address per rolling hour. |
+| `minPasswordLength` | `8` | Never below 8; the maximum is always 256. |
+| `maxPasswordFailures` | `10` | Wrong passwords before password sign-in is locked (a code still works). |
+| `passwordLockSeconds` | `900` | How long the lock lasts. |
+| `label` | `"Email"` | Published in `/environment`. |
+
+Construction throws `OafConfigError` when `sendCode` or `store` is missing.
+
+## The routes
+
+All three are `POST`, JSON in and JSON out, and **require `Content-Type: application/json`** (a
+cross-site HTML form cannot send that without a CORS preflight the middleware never grants an
+unlisted origin, so a page elsewhere cannot sign a visitor into an attacker's account).
+
+| Route | Body | Success |
+|---|---|---|
+| `/email/code` | `{ email, purpose }` (`sign_up` \| `sign_in` \| `reset_password`) | `200 { status: "code_sent", email, expires_in_seconds, password_enabled }` |
+| `/email/verify` | `{ email, code, password?, redirect_url_complete? }` | `200 { status: "complete", redirect_url_complete }` + session cookie |
+| `/email/password` | `{ email, password, redirect_url_complete? }` | `200 { status: "complete", redirect_url_complete }` + session cookie |
+
+On `complete`, send the browser to your sso-callback page with `redirect_url_complete`, exactly
+where the redirect connections land, so the SDK reloads the session the same way.
+
+`/email/code` answers **identically** whether or not an account exists (no account enumeration);
+`accountExists` is passed to `sendCode` so the email itself can say "sign in" or "confirm your new
+account". A wrong password and an unknown address also answer identically, and cost the same time.
+
+## Security rules
+
+1. **A password is never stored before the mailbox is proven.** It travels with the code to
+   `/email/verify` and is written only when the code verifies, so there is no unverified account
+   holding an attacker's password for the real owner to inherit. A password sent to `/email/code` is
+   ignored.
+2. **A code is single use, purpose-bound and stored only as a salted HMAC.** It is never logged.
+3. **An undelivered code cannot be spent**, and does not start the resend cooldown.
+4. **A weak password does not burn a correct code**: it is checked before the code is spent.
+5. **A refused identity leaves no account**: the account is written only after admission said yes.
+6. **No `hd`.** An email identity never carries a hosted domain, so a per-connection
+   `requireHostedDomain` or an app rule that keys organization membership on `hd` never admits it
+   as an organization member. Admin decisions keyed on a provider see `provider: "email"`.
+7. **No reverify.** An email session has no IdP to step up through;
+   `/client/sessions/:id/reverify` answers `error=reverify_unsupported`.
+
+## Errors
+
+| Code | Status | Meaning |
+|---|---|---|
+| `form_identifier_invalid` | 422 | Not an email address. |
+| `too_many_requests` | 429 | Cooldown or hourly cap; `retry_after_seconds` says how long. |
+| `email_not_delivered` | 503 | `sendCode` said it did not leave. |
+| `verification_expired` | 410 | No live code (expired, spent, or never delivered). |
+| `form_code_incorrect` | 422 | Wrong code; `attempts_remaining`. |
+| `verification_failed` | 429 | Too many wrong codes; the code is burned. |
+| `form_password_invalid` | 422 | Too short, too long, blank, or missing on a reset. |
+| `form_password_incorrect` | 401 | Wrong email/password pair (or no such account). |
+| `user_locked` | 429 | Password sign-in locked; `retry_after_seconds`. A code still works. |
+| `password_disabled` | 404 | The connection has `password: false`. |
+| `unsupported_media_type` | 415 | Not `application/json`. |
+| admission codes | 403 | `identity_blocked`, `identity_not_allowlisted`, `sign_up_restricted`, ... ([admission.mdx](./admission.mdx)). |
+
+## `/environment`
+
+`user_settings.email = { enabled, strategies: ["email_code", "password"], password_enabled,
+min_password_length, name }`, and `user_settings.connections` gains `{ id: "conn_email", strategy:
+"email_code" }`.

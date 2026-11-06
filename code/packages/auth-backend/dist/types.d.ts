@@ -17,7 +17,7 @@ export interface TokenClaims {
      * Which strategy authenticated the session behind this token. Optional: tokens minted from a
      * session created before it was recorded lack it. Key app identities on (provider, sub).
      */
-    provider?: "google" | "x" | "saml";
+    provider?: "google" | "x" | "saml" | "email";
     /**
      * Present (and true) when the session was established after admission required a verified
      * email. Absent on tokens from older sessions — treat absent as "legacy", never as "verified".

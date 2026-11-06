@@ -11,4 +11,6 @@ export { hasPermission, hasRole, EMPTY_SNAPSHOT, domainSlug, connectionIdForDoma
 // localhost-only dev sign-in core) and inject it via `<FederatedProvider core={...}>`.
 // OpenAuthFederated ships no dev/mock core of its own.
 export { BaseCore, RealAuthCore } from "./core.js";
+// The email connection (sign up / sign in with an email code, optionally a password).
+export { requestEmailCode, verifyEmailCode, signInWithPassword } from "./email.js";
 //# sourceMappingURL=index.js.map

@@ -39,6 +39,20 @@ import {
   warnOncePerProcess,
   withTimeout,
 } from "./admission.js"
+import {
+  type EmailAccount,
+  type EmailCodePurpose,
+  type EmailConnectionConfig,
+  codeMatches,
+  hashEmailCode,
+  hashPassword,
+  newCodeSalt,
+  newEmailAccountId,
+  newEmailCode,
+  normalizeEmailAddress,
+  passwordProblem,
+  verifyPassword,
+} from "./email-auth.js"
 import type { SessionMembership, SessionStore, StoredSession } from "./session-store.js"
 import {
   createPkcePair,
@@ -193,6 +207,7 @@ export type FederatedConnectionConfig =
   | GoogleConnectionConfig
   | SamlConnectionConfig
   | XConnectionConfig
+  | EmailConnectionConfig
 
 /** Shape of the legacy Google block (`google: { ... }`) accepted as deprecated shorthand. */
 export interface LegacyGoogleConfig {
@@ -825,7 +840,7 @@ interface SessionRecord {
    * Optional so a session cookie issued before this field existed still reads.
    */
   providerSub?: string
-  provider?: "google" | "saml" | "x"
+  provider?: "google" | "saml" | "x" | "email"
   /** True on every session established after the admission redesign (a verified email was required). */
   emailVerified?: boolean
 }
@@ -1031,6 +1046,48 @@ interface InternalConfig {
   googleRemediation: string
   /** The app's stated admission policy (or the legacy gate). */
   admission: AdmissionConfig
+  /** The `email` connection, resolved with its defaults (email-auth.ts). Absent = not offered. */
+  email?: ResolvedEmailConfig
+}
+
+/** {@link EmailConnectionConfig} with every default filled in. */
+interface ResolvedEmailConfig {
+  sendCode: EmailConnectionConfig["sendCode"]
+  store: EmailConnectionConfig["store"]
+  password: boolean
+  codeTtlSeconds: number
+  maxCodeAttempts: number
+  resendCooldownSeconds: number
+  maxCodesPerHour: number
+  minPasswordLength: number
+  maxPasswordFailures: number
+  passwordLockSeconds: number
+  label: string
+}
+
+function resolveEmailConfig(c: EmailConnectionConfig | undefined): ResolvedEmailConfig | undefined {
+  if (!c) return undefined
+  if (typeof c.sendCode !== "function") {
+    throw new OafConfigError("connections[strategy=email] needs sendCode(message) — the app owns the mail transport")
+  }
+  const s = c.store as Partial<EmailConnectionConfig["store"]> | undefined
+  if (!s || ["getAccount", "putAccount", "getPending", "putPending", "deletePending"].some((m) => typeof (s as Record<string, unknown>)[m] !== "function")) {
+    throw new OafConfigError("connections[strategy=email] needs a store (FileEmailAccountStore, InMemoryEmailAccountStore or your own)")
+  }
+  const pos = (v: number | undefined, d: number) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : d)
+  return {
+    sendCode: c.sendCode,
+    store: c.store,
+    password: c.password !== false,
+    codeTtlSeconds: pos(c.codeTtlSeconds, 600),
+    maxCodeAttempts: pos(c.maxCodeAttempts, 5),
+    resendCooldownSeconds: pos(c.resendCooldownSeconds, 30),
+    maxCodesPerHour: pos(c.maxCodesPerHour, 10),
+    minPasswordLength: Math.max(8, pos(c.minPasswordLength, 8)),
+    maxPasswordFailures: pos(c.maxPasswordFailures, 10),
+    passwordLockSeconds: pos(c.passwordLockSeconds, 900),
+    label: c.label || "Email",
+  }
 }
 
 /**
@@ -1044,6 +1101,7 @@ function normalizeConnections(config: FederatedFrontendConfig): {
   x?: XConnectionConfig
   googleConn?: GoogleConnectionConfig
   samlConn?: SamlConnectionConfig
+  emailConn?: EmailConnectionConfig
 } {
   const connections = config.connections ?? []
   const googleConn = connections.find(
@@ -1071,7 +1129,9 @@ function normalizeConnections(config: FederatedFrontendConfig): {
     saml = config.saml
   }
 
-  return { google, saml, x: xConn, googleConn, samlConn }
+  const emailConn = connections.find((c): c is EmailConnectionConfig => c.strategy === "email")
+
+  return { google, saml, x: xConn, googleConn, samlConn, emailConn }
 }
 
 const LEGACY_KEYS = [
@@ -1265,7 +1325,7 @@ function normalizeAdmission(
 }
 
 function normalizeConfig(config: FederatedFrontendConfig): InternalConfig {
-  const { google: googleCfg, saml: samlCfg, x: xCfg, googleConn, samlConn } = normalizeConnections(config)
+  const { google: googleCfg, saml: samlCfg, x: xCfg, googleConn, samlConn, emailConn } = normalizeConnections(config)
   const admission = normalizeAdmission(config, googleConn, samlConn, xCfg)
 
   // Resolve the Google OAuth credentials the library was given (explicit config only — the library
@@ -1303,6 +1363,7 @@ function normalizeConfig(config: FederatedFrontendConfig): InternalConfig {
     googleConfigured,
     googleRemediation,
     saml: samlCfg?.enabled ? samlCfg : undefined,
+    email: resolveEmailConfig(emailConn),
     // Only the LEGACY gate reads this; the unguarded `.map` that used to sit here crashed on a
     // missing list, and normalizeAdmission now throws a named OafConfigError for that case instead.
     allowedDomains: admission.legacy ? normDomains(config.allowedDomains as string[]) : [],
@@ -1667,6 +1728,7 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
     google: "GoogleOAuth",
     x: "XOAuth",
     saml: "SSO",
+    email: "MagicAuth",
   }
 
   /**
@@ -1731,6 +1793,8 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
     isSignUp?: boolean | null
     /** Reverify only: the presented identity must be the session's own. */
     binding?: (identity: OidcIdentity) => boolean
+    /** Overrides the per-provider method (the email connection: `MagicAuth` or `Password`). */
+    authenticationMethod?: AuthenticationMethod
   }
 
   async function runAction<C>(
@@ -1805,7 +1869,8 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
     }
 
     // 3. Requirements of the connection that produced the identity. X never carries an hd.
-    const hd = provider === "x" ? undefined : identity.hd?.trim().toLowerCase() || undefined
+    // Neither X nor the email connection can vouch for organization membership.
+    const hd = provider === "x" || provider === "email" ? undefined : identity.hd?.trim().toLowerCase() || undefined
     const req = provider === "google" ? adm.google : provider === "saml" ? adm.saml : undefined
     if (req && (req.requireHostedDomain || req.allowedHostedDomains !== undefined)) {
       if (!hd || (req.allowedHostedDomains !== undefined && !req.allowedHostedDomains.includes(hd))) {
@@ -1877,7 +1942,7 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
     const base = {
       id: o.traceId,
       identity: actionIdentity,
-      authenticationMethod: AUTH_METHOD[provider],
+      authenticationMethod: o.authenticationMethod ?? AUTH_METHOD[provider],
       signUpMode: policy.mode,
       matchedAllowlistIdentifier: matched,
       untrusted,
@@ -2020,7 +2085,7 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
       grantsResolvedAt:
         (payload.gra as number) ?? (payload.lvc as number) ?? Math.floor(Date.now() / 1000),
       providerSub: payload.psub as string | undefined,
-      provider: payload.prv as "google" | "saml" | "x" | undefined,
+      provider: payload.prv as "google" | "saml" | "x" | "email" | undefined,
       emailVerified: payload.ev === true ? true : undefined,
     }
 
@@ -2728,13 +2793,22 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
     redirectUrlComplete: string,
     untrusted: UntrustedRequestHints,
   ): Promise<void> {
-    const provider = identity.provider ?? "google"
     const traceId = newTraceId()
     const decision = await admit(identity, { phase: "sign_in", untrusted, traceId })
     if (!decision.ok) {
       return backToApp(res, fallbackRedirect, refusalParams(decision, traceId, redirectUrlComplete))
     }
+    await establishSession(res, identity)
+    backToApp(res, fallbackRedirect, { redirect_url_complete: redirectUrlComplete })
+  }
 
+  /**
+   * Mint the session for an identity admission ALREADY admitted: the signed cookie plus the durable
+   * store record. Shared by the redirect connections (finishSignIn) and the email connection's JSON
+   * routes, so every connection produces the identical session.
+   */
+  async function establishSession(res: ServerResponse, identity: OidcIdentity): Promise<void> {
+    const provider = identity.provider ?? "google"
     // Establish the session. resolveGrants may be async; it is awaited.
     const grants = await cfg.resolveGrants(identity)
     const now = Math.floor(Date.now() / 1000)
@@ -2789,8 +2863,236 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
     }
     // Redact PII: log a hashed identifier, not the raw email, on the routine per-sign-in line.
     cfg.log("info", `Sign-in established for ${redactEmail(identity.email, emailLogKey)}`)
+  }
 
-    backToApp(res, fallbackRedirect, { redirect_url_complete: redirectUrlComplete })
+  // ---------------------------------------------------------------------------------------------
+  // THE EMAIL CONNECTION (email-auth.ts). Three JSON routes, mirroring Clerk's email_code and
+  // password strategies. The proof of the mailbox is the code; the identity it yields goes through
+  // admit() and establishSession() exactly like a Google, X or SAML identity.
+  //
+  //   POST /email/code      { email, purpose }                         → a code is emailed
+  //   POST /email/verify    { email, code, password?, redirect_url_complete? } → signed in
+  //   POST /email/password  { email, password, redirect_url_complete? } → signed in
+  //
+  // Every route requires `Content-Type: application/json`: a cross-site HTML form cannot send that
+  // without a CORS preflight, which this middleware never grants to an unlisted origin — so a page
+  // elsewhere cannot sign a visitor into an attacker's account (login CSRF).
+  // ---------------------------------------------------------------------------------------------
+
+  function emailError(
+    res: ServerResponse,
+    status: number,
+    error: string,
+    message: string,
+    extra: Record<string, unknown> = {},
+  ): void {
+    sendJson(res, status, { error, error_message: message, ...extra })
+  }
+
+  function isJsonRequest(req: IncomingMessage): boolean {
+    const ct = req.headers?.["content-type"]
+    return typeof ct === "string" && /^application\/json\b/i.test(ct.trim())
+  }
+
+  function emailUntrusted(req: IncomingMessage, purpose: EmailCodePurpose): UntrustedRequestHints {
+    return untrustedFrom(req, { mode: purpose === "sign_up" ? "sign_up" : "sign_in", connectionId: "conn_email" })
+  }
+
+  /** Admit, mint the session, answer JSON. The account is written only after admission said yes. */
+  async function completeEmailSignIn(
+    req: IncomingMessage,
+    res: ServerResponse,
+    account: EmailAccount,
+    persist: boolean,
+    method: AuthenticationMethod,
+    purpose: EmailCodePurpose,
+    redirectUrlComplete: string,
+  ): Promise<void> {
+    const email = cfg.email!
+    const identity: OidcIdentity = { sub: account.id, email: account.email, emailVerified: true, provider: "email" }
+    const traceId = newTraceId()
+    const decision = await admit(identity, {
+      phase: "sign_in",
+      untrusted: emailUntrusted(req, purpose),
+      traceId,
+      authenticationMethod: method,
+    })
+    if (!decision.ok) {
+      return emailError(res, 403, decision.code, decision.message, {
+        ...(decision.longMessage ? { error_long_message: decision.longMessage } : {}),
+        trace_id: traceId,
+      })
+    }
+    if (persist) await email.store.putAccount(account)
+    await establishSession(res, identity)
+    sendJson(res, 200, { object: "sign_in", status: "complete", redirect_url_complete: redirectUrlComplete })
+  }
+
+  async function handleEmailCode(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const email = cfg.email!
+    if (!isJsonRequest(req)) return emailError(res, 415, "unsupported_media_type", "Send this request as JSON.")
+    const body = await readJsonBody(req)
+    const address = normalizeEmailAddress(body.email)
+    const purpose: EmailCodePurpose =
+      body.purpose === "sign_up" || body.purpose === "reset_password" ? body.purpose : "sign_in"
+    if (!address || !parseEmail(address)) {
+      return emailError(res, 422, "form_identifier_invalid", "Enter a valid email address.")
+    }
+    if (purpose === "reset_password" && !email.password) {
+      return emailError(res, 404, "password_disabled", "This app does not use passwords. Sign in with a code instead.")
+    }
+    const now = Math.floor(Date.now() / 1000)
+    const prior = await email.store.getPending(address)
+    const recent = (prior?.sentAt ?? []).filter((t) => now - t < 3600)
+    const last = recent.length ? Math.max(...recent) : 0
+    if (last && now - last < email.resendCooldownSeconds) {
+      const wait = email.resendCooldownSeconds - (now - last)
+      return emailError(res, 429, "too_many_requests", `Wait ${wait} seconds before asking for another code.`, {
+        retry_after_seconds: wait,
+      })
+    }
+    if (recent.length >= email.maxCodesPerHour) {
+      const wait = 3600 - (now - Math.min(...recent))
+      return emailError(res, 429, "too_many_requests", "Too many codes were sent to this address. Try again later.", {
+        retry_after_seconds: wait,
+      })
+    }
+    const account = await email.store.getAccount(address)
+    const code = newEmailCode()
+    const salt = newCodeSalt()
+    await email.store.putPending({
+      email: address,
+      purpose,
+      salt,
+      codeHash: hashEmailCode(salt, address, purpose, code),
+      expiresAt: now + email.codeTtlSeconds,
+      attempts: 0,
+      sentAt: [...recent, now],
+    })
+    let delivery: { delivered: boolean; problem?: string | null }
+    try {
+      delivery = await email.sendCode({
+        to: address,
+        code,
+        purpose,
+        expiresInMinutes: Math.max(1, Math.round(email.codeTtlSeconds / 60)),
+        accountExists: Boolean(account),
+      })
+    } catch (err) {
+      delivery = { delivered: false, problem: err instanceof Error ? err.message : String(err) }
+    }
+    if (!delivery || delivery.delivered !== true) {
+      // A code that never left must not be spendable, and the throttle must not count it.
+      await email.store.putPending({ ...(prior ?? { email: address, purpose, salt: "", codeHash: "", expiresAt: 0, attempts: 0 }), sentAt: recent })
+      cfg.log("error", `email sign-in code was not delivered to ${redactEmail(address, emailLogKey)}: ${sanitizeLogMessage(String(delivery?.problem ?? "sendCode returned no delivery"))}`)
+      return emailError(res, 503, "email_not_delivered", "We could not send the email just now. Please try again in a few minutes.")
+    }
+    cfg.log("info", `email sign-in code sent to ${redactEmail(address, emailLogKey)} (${purpose})`)
+    // The same answer whether or not an account exists (no account enumeration).
+    sendJson(res, 200, {
+      object: "email_code",
+      status: "code_sent",
+      email: address,
+      purpose,
+      expires_in_seconds: email.codeTtlSeconds,
+      password_enabled: email.password,
+    })
+  }
+
+  async function handleEmailVerify(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const email = cfg.email!
+    if (!isJsonRequest(req)) return emailError(res, 415, "unsupported_media_type", "Send this request as JSON.")
+    const body = await readJsonBody(req)
+    const address = normalizeEmailAddress(body.email)
+    const redirectUrlComplete = safeRedirectTarget(typeof body.redirect_url_complete === "string" ? body.redirect_url_complete : "/")
+    if (!address || !parseEmail(address)) {
+      return emailError(res, 422, "form_identifier_invalid", "Enter a valid email address.")
+    }
+    const pending = await email.store.getPending(address)
+    const now = Math.floor(Date.now() / 1000)
+    if (!pending || !pending.codeHash || pending.expiresAt <= now) {
+      return emailError(res, 410, "verification_expired", "That code has expired. Ask for a new one.")
+    }
+    // A password given with the code is validated BEFORE the code is spent, so a short password does
+    // not burn a correct code. A reset requires one.
+    const wantsPassword = typeof body.password === "string" && body.password !== ""
+    if (pending.purpose === "reset_password" && !wantsPassword) {
+      return emailError(res, 422, "form_password_invalid", "Choose a new password.")
+    }
+    if (wantsPassword) {
+      if (!email.password) return emailError(res, 404, "password_disabled", "This app does not use passwords.")
+      const problem = passwordProblem(body.password, email.minPasswordLength)
+      if (problem) return emailError(res, 422, "form_password_invalid", problem)
+    }
+    if (!codeMatches(pending, address, String(body.code ?? ""))) {
+      const attempts = pending.attempts + 1
+      if (attempts >= email.maxCodeAttempts) {
+        await email.store.putPending({ ...pending, codeHash: "", attempts })
+        cfg.log("warn", `email sign-in code burned after ${attempts} wrong attempts for ${redactEmail(address, emailLogKey)}`)
+        return emailError(res, 429, "verification_failed", "Too many wrong codes. Ask for a new one.")
+      }
+      await email.store.putPending({ ...pending, attempts })
+      return emailError(res, 422, "form_code_incorrect", "That code is not right. Check the email and try again.", {
+        attempts_remaining: email.maxCodeAttempts - attempts,
+      })
+    }
+    // Single use: spent before anything else can fail. The throttle history is kept.
+    await email.store.putPending({ ...pending, codeHash: "", attempts: 0, expiresAt: 0 })
+
+    const existing = await email.store.getAccount(address)
+    const account: EmailAccount = existing
+      ? { ...existing, failedPasswordAttempts: 0, passwordLockedUntil: null, updatedAt: now }
+      : { id: newEmailAccountId(), email: address, passwordHash: null, verifiedAt: now, createdAt: now, updatedAt: now }
+    // Rule 1 (email-auth.ts): the password is written only now, with the mailbox proven.
+    if (wantsPassword) account.passwordHash = await hashPassword(String(body.password))
+    return completeEmailSignIn(req, res, account, true, "MagicAuth", pending.purpose, redirectUrlComplete)
+  }
+
+  async function handleEmailPassword(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const email = cfg.email!
+    if (!email.password) return emailError(res, 404, "password_disabled", "This app does not use passwords. Sign in with a code instead.")
+    if (!isJsonRequest(req)) return emailError(res, 415, "unsupported_media_type", "Send this request as JSON.")
+    const body = await readJsonBody(req)
+    const address = normalizeEmailAddress(body.email)
+    const redirectUrlComplete = safeRedirectTarget(typeof body.redirect_url_complete === "string" ? body.redirect_url_complete : "/")
+    const password = typeof body.password === "string" ? body.password : ""
+    if (!address || !parseEmail(address) || !password || password.length > 1024) {
+      return emailError(res, 401, "form_password_incorrect", "That email and password do not match.")
+    }
+    const now = Math.floor(Date.now() / 1000)
+    const account = await email.store.getAccount(address)
+    if (account?.passwordLockedUntil && account.passwordLockedUntil > now) {
+      const wait = account.passwordLockedUntil - now
+      return emailError(res, 429, "user_locked", "Too many wrong passwords. Sign in with an emailed code, or try again later.", {
+        retry_after_seconds: wait,
+      })
+    }
+    // verifyPassword spends the same time on a missing account or a code-only account.
+    const ok = await verifyPassword(password, account?.passwordHash)
+    if (!ok || !account) {
+      if (account) {
+        const failures = (account.failedPasswordAttempts ?? 0) + 1
+        const locked = failures >= email.maxPasswordFailures
+        await email.store.putAccount({
+          ...account,
+          failedPasswordAttempts: locked ? 0 : failures,
+          passwordLockedUntil: locked ? now + email.passwordLockSeconds : null,
+          updatedAt: now,
+        })
+        if (locked) cfg.log("warn", `password sign-in locked for ${redactEmail(address, emailLogKey)} after ${failures} failures`)
+      }
+      return emailError(res, 401, "form_password_incorrect", "That email and password do not match.")
+    }
+    const clean = (account.failedPasswordAttempts ?? 0) === 0 && !account.passwordLockedUntil
+    return completeEmailSignIn(
+      req,
+      res,
+      clean ? account : { ...account, failedPasswordAttempts: 0, passwordLockedUntil: null, updatedAt: now },
+      !clean,
+      "Password",
+      "sign_in",
+      redirectUrlComplete,
+    )
   }
 
   /**
@@ -2830,6 +3132,7 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
     }
     if (cfg.xConfigured) connections.push({ id: "conn_x", strategy: "oauth_x", label: adm.xLabel })
     if (cfg.saml) connections.push({ id: "conn_saml", strategy: "saml", label: adm.saml.label })
+    if (cfg.email) connections.push({ id: "conn_email", strategy: "email_code", label: cfg.email.label })
 
     sendJson(res, 200, {
       object: "environment",
@@ -2851,6 +3154,14 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
           oauth_x: { enabled: cfg.xConfigured, strategy: "oauth_x", name: adm.xLabel },
         },
         saml: { enabled: Boolean(cfg.saml) },
+        // Clerk's user_settings.attributes.email_address / password, flattened.
+        email: {
+          enabled: Boolean(cfg.email),
+          strategies: cfg.email ? (cfg.email.password ? ["email_code", "password"] : ["email_code"]) : [],
+          password_enabled: Boolean(cfg.email?.password),
+          min_password_length: cfg.email?.minPasswordLength ?? null,
+          name: cfg.email?.label ?? null,
+        },
         connections,
       },
       organization_settings: { enabled: adm.organizationsEnabled },
@@ -2941,6 +3252,11 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
     const q = queryOf(req)
     const back = safeRedirectTarget(q.get("redirect_url") || "/")
     if (!session) return redirect(res, back)
+    // An email session has no IdP to bounce through, and routing it to Google would fail the
+    // binding check anyway. Say so instead of sending the person on a round trip that cannot work.
+    if (session.provider === "email") {
+      return backToApp(res, back, { error: "reverify_unsupported", error_message: "Sign in again with your email to continue." })
+    }
     // REAL step-up: route through the IdP with a forced fresh authentication. lastVerifiedAt is
     // stamped ONLY after the IdP returns a fresh assertion (see the reverify branch in
     // handleCallback / handleSamlAcs), never by this endpoint alone. This closes the no-op-stamp
@@ -3231,6 +3547,18 @@ export function createFederatedFrontend(config: FederatedFrontendConfig): Federa
       }
       if (method === "GET" && path === "/oauth_callback") {
         if (!guardGoogleConfigured(res)) await handleCallback(req, res)
+        return true
+      }
+      if (cfg.email && method === "POST" && path === "/email/code") {
+        await handleEmailCode(req, res)
+        return true
+      }
+      if (cfg.email && method === "POST" && path === "/email/verify") {
+        await handleEmailVerify(req, res)
+        return true
+      }
+      if (cfg.email && method === "POST" && path === "/email/password") {
+        await handleEmailPassword(req, res)
         return true
       }
       if (method === "GET" && path === "/oauth_callback/x") {
