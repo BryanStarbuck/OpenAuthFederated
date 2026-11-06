@@ -359,6 +359,7 @@ function normalizeConfig(config) {
         securityHeaders: config.securityHeaders ?? true,
         allowedCorsOrigins: (config.allowedCorsOrigins ?? []).map((o) => o.trim()).filter(Boolean),
         samlSatisfiesHostedDomain: config.samlSatisfiesHostedDomain ?? false,
+        allowAnyDomain: config.allowAnyDomain ?? false,
         namespaceUserIds: config.namespaceUserIds ?? false,
         revalidateFailMode: config.revalidateFailMode === "closed" ? "closed" : "keep",
         upstreamTimeoutMs: typeof config.upstreamTimeoutMs === "number" && config.upstreamTimeoutMs > 0
@@ -1173,7 +1174,12 @@ function createFederatedFrontend(config) {
             : cfg.requireHostedDomain && !hdExempt
                 ? hd
                 : hd || emailDomain(identity.email)) ?? "";
-        if (!presentedDomain || !cfg.allowedDomains.includes(presentedDomain)) {
+        // allowAnyDomain: a public app admits any VERIFIED email (checked above). The domain only has
+        // to exist — an identity with no domain at all is still refused.
+        const domainAdmitted = cfg.allowAnyDomain
+            ? Boolean(presentedDomain)
+            : Boolean(presentedDomain) && cfg.allowedDomains.includes(presentedDomain);
+        if (!domainAdmitted) {
             cfg.log("warn", `Rejecting sign-in from non-allowed domain: ${presentedDomain || "unknown"}`);
             return backToApp(res, fallbackRedirect, {
                 error: "identity_domain_not_allowed",
