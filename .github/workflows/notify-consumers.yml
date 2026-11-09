@@ -1,0 +1,43 @@
+# Tells the apps that build this library into their images that main moved, so they redeploy now
+# instead of waiting for their own hourly check.
+#
+# Why: a consumer's deploy normally fires only on a push to ITS OWN repo. ACT3 TV's accounts backend
+# (ACT3ai/all, film/tv/code/backend) builds @auth/backend from this repo's main, so before 2026-11-09
+# a fix merged here never reached production until something unrelated changed there.
+#
+# The consumer's deploy decides whether anything really changed (it compares the commit it would build
+# against the one it last deployed), so a dispatch for a docs-only commit costs a few seconds.
+#
+# Needs the repo secret CONSUMER_DISPATCH_TOKEN: a fine-grained token with "Contents: read and write"
+# on ACT3ai/all (that is what repository_dispatch requires). Without it this job prints a notice and
+# exits 0. The consumers still pick the change up within about an hour from their scheduled check.
+name: Notify consumers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send oaf-updated to every consumer
+        env:
+          TOKEN: ${{ secrets.CONSUMER_DISPATCH_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::notice::CONSUMER_DISPATCH_TOKEN is not set; consumers will pick up $SHA from their hourly check."
+            exit 0
+          fi
+          for repo in ACT3ai/all; do
+            curl -fsS -X POST \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/$repo/dispatches" \
+              -d "{\"event_type\":\"oaf-updated\",\"client_payload\":{\"sha\":\"$SHA\"}}"
+            echo "dispatched oaf-updated ($SHA) to $repo"
+          done
