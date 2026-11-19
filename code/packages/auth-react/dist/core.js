@@ -286,6 +286,15 @@ export class RealAuthCore extends BaseCore {
     // cache invalidation. Opt-in (enableAutoRefresh) so a mock/dev core is unaffected.
     autoRefresh = false;
     refreshTimer = null;
+    // DEAD SESSION (Clerk's handleUnauthenticated). A 401/404 from /tokens means the Frontend API no longer accepts
+    // this session (cookie gone, revoked, expired). Before this, mintToken answered null and changed nothing, so every
+    // later caller minted again: one idle tab POSTed a dead session's /tokens ~twice a minute for days (2026-11-19).
+    // Now the client is re-read ONCE (single-flight): signed out there → this core is signed out (no more mints, the
+    // app's guard shows sign-in); still listed → mints pause for a growing window instead of one per caller.
+    mintBlockedUntil = 0;
+    deadSessionStrikes = 0;
+    deadSessionCheck = null;
+    static DEAD_SESSION_BACKOFF_MS = [30_000, 60_000, 120_000, 300_000, 900_000];
     /** True when no connections were configured: /environment may supply them on load(). */
     connectionsFromEnvironment;
     /** The /environment read is attempted once per core. */
@@ -543,6 +552,9 @@ export class RealAuthCore extends BaseCore {
     async getToken(opts = {}) {
         if (!this.activeSessionId)
             return null;
+        // A session the API just rejected: answer "no token" without the network until the back-off ends.
+        if (Date.now() < this.mintBlockedUntil)
+            return null;
         // A templated token is minted fresh each call (its claim shape may differ) and never cached.
         if (opts.template)
             return this.mintToken(opts.template);
@@ -609,6 +621,7 @@ export class RealAuthCore extends BaseCore {
     async mintToken(template) {
         if (!this.activeSessionId)
             return null;
+        const sessionId = this.activeSessionId;
         // A named JWT template mints against a different Frontend-API path (spec §15).
         const path = template
             ? `${this.base()}/client/sessions/${this.activeSessionId}/tokens/${template}`
@@ -619,8 +632,15 @@ export class RealAuthCore extends BaseCore {
             credentials: "include",
             body: JSON.stringify(this.snapshot.orgId ? { org_id: this.snapshot.orgId } : {}),
         });
+        if (res.status === 401 || res.status === 404) {
+            await this.onSessionRejected(sessionId, res.status);
+            return null;
+        }
+        // Any other failure (5xx, network) is transient: the next caller may try again.
         if (!res.ok)
             return null;
+        this.deadSessionStrikes = 0;
+        this.mintBlockedUntil = 0;
         const data = (await res.json());
         const jwt = data.jwt ?? null;
         if (jwt && !template) {
@@ -631,6 +651,36 @@ export class RealAuthCore extends BaseCore {
             this.scheduleRefresh();
         }
         return jwt;
+    }
+    /**
+     * /tokens refused `sessionId` (401/404). Re-read the client once (shared by every concurrent caller). Signed out
+     * or a different session there → adopt it (applyClient) and stop. The same session still listed as active → the
+     * server disagrees with itself (or this tab cannot send its session cookie): pause mints for the next back-off
+     * window (30 s, 1, 2, 5, then 15 min) and say so once per window, never a request per caller.
+     */
+    onSessionRejected(sessionId, status) {
+        if (this.deadSessionCheck)
+            return this.deadSessionCheck;
+        this.deadSessionCheck = (async () => {
+            this.clearTokenCache();
+            await this.loadWithRetry(0);
+            if (this.activeSessionId !== sessionId) {
+                this.deadSessionStrikes = 0;
+                this.mintBlockedUntil = 0;
+                console.warn(`[auth] session ${sessionId} was refused by the token endpoint (HTTP ${status}); the server says it has ` +
+                    (this.activeSessionId ? `moved to session ${this.activeSessionId}` : "ended — signed out"));
+                return;
+            }
+            const schedule = RealAuthCore.DEAD_SESSION_BACKOFF_MS;
+            const wait = schedule[Math.min(this.deadSessionStrikes, schedule.length - 1)] ?? 900_000;
+            this.deadSessionStrikes++;
+            this.mintBlockedUntil = Date.now() + wait;
+            console.warn(`[auth] session ${sessionId} was refused by the token endpoint (HTTP ${status}) but the client still lists ` +
+                `it as active; no token requests for ${Math.round(wait / 1000)} s (refusal ${this.deadSessionStrikes})`);
+        })().finally(() => {
+            this.deadSessionCheck = null;
+        });
+        return this.deadSessionCheck;
     }
     /** Drop the cached access token so the next getToken() re-mints with current grants. */
     clearTokenCache() {
