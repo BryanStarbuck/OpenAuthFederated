@@ -223,6 +223,24 @@ Send the returned `jwt` as `Authorization: Bearer <jwt>` to your application or 
 This is why a leaked JWT is low-risk (it expires almost immediately) and why sign-out / admin
 revocation takes effect right away.
 
+### When a mint is refused (401 / 404) — the SDK stops asking
+
+A refused mint means the platform no longer accepts that session (cookie gone, revoked, expired). The
+SDK then does what Clerk's `handleUnauthenticated` does, once per refusal (concurrent callers share it):
+
+1. It re-reads the client (`GET /v1/client`).
+2. Signed out there (or a different session active) → the SDK adopts that answer: `isSignedIn` turns
+   false, `getToken()` answers `null` without any request, and the app's guard shows sign-in.
+3. The same session still listed as active → the SDK pauses every mint for a growing window
+   (30 s, 1 min, 2 min, 5 min, then 15 min), logs one console warning per window, and resumes (and
+   forgets the back-off) on the first successful mint.
+
+A 5xx or network failure is transient: no client re-read, no sign-out, the next call may mint.
+Before 2026-11-19 a refused mint only returned `null`, so an idle tab whose session had ended asked
+`/tokens` again for every caller (one tab: ~twice a minute for days).
+When /tokens refuses a session, if the client no longer lists it, sign out; else back off — implemented in:
+`~/BGit/Bryan_git/OpenAuthFederated/code/packages/auth-react/src/core.ts` `RealAuthCore.mintToken` / `onSessionRejected` / `getToken`
+
 ## Sign out a single session
 
 Ends one session: marks the server-side record `removed`/`revoked` and clears its cookie. Any

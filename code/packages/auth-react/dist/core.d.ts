@@ -72,6 +72,10 @@ export declare class RealAuthCore extends BaseCore {
     private inflight;
     private autoRefresh;
     private refreshTimer;
+    private mintBlockedUntil;
+    private deadSessionStrikes;
+    private deadSessionCheck;
+    private static readonly DEAD_SESSION_BACKOFF_MS;
     /** True when no connections were configured: /environment may supply them on load(). */
     private connectionsFromEnvironment;
     /** The /environment read is attempted once per core. */
@@ -132,6 +136,13 @@ export declare class RealAuthCore extends BaseCore {
     private scheduleRefresh;
     /** POST to the Frontend API to mint an access JWT. Caches the default (non-templated) token. */
     private mintToken;
+    /**
+     * /tokens refused `sessionId` (401/404). Re-read the client once (shared by every concurrent caller). Signed out
+     * or a different session there → adopt it (applyClient) and stop. The same session still listed as active → the
+     * server disagrees with itself (or this tab cannot send its session cookie): pause mints for the next back-off
+     * window (30 s, 1, 2, 5, then 15 min) and say so once per window, never a request per caller.
+     */
+    private onSessionRejected;
     /** Drop the cached access token so the next getToken() re-mints with current grants. */
     private clearTokenCache;
     setActiveOrg(orgId: string | null): Promise<void>;
